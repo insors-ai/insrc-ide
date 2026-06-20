@@ -37,6 +37,24 @@ const MAX_BULLETS_PER_TODO = 12;
 /** Max output tokens. Each bullet is ~30-50 tokens; 5-10 bullets -> ~500 tokens upper bound. */
 const MAX_EXTRACT_TOKENS = 1024;
 
+// plans/structured-output.md Phase C.6. JSON Schema for the wire-layer
+// enforcement of the bullets shape. Per-bullet constraints (>=1 char,
+// <=300 char, non-empty after trim) live in `parseBullets` so the cache
+// stays consistent on edge cases the schema accepts but the
+// application-level rule rejects.
+const BULLETS_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['bullets'],
+	additionalProperties: false,
+	properties: {
+		bullets: {
+			type: 'array',
+			maxItems: MAX_BULLETS_PER_TODO,
+			items: { type: 'string', minLength: 1, maxLength: 300 },
+		},
+	},
+};
+
 const EXTRACTOR_ROLE = [
 	'You are extracting prompt-AGNOSTIC key facts from one completed',
 	'investigation TODO. The facts you emit will be cached as semantic',
@@ -113,15 +131,20 @@ export async function extractBullets(
 	const max = Math.min(MAX_BULLETS_PER_TODO, Math.max(min, opts.maxCount ?? 10));
 	const writer = getPromptRegistry().get<BulletExtractorWriterInput, readonly LLMMessage[]>('bullet-extractor');
 	const messages = [...writer.build({ entry, count: { min, max } })];
-	const response = await provider.complete(messages, {
-		maxTokens:       MAX_EXTRACT_TOKENS,
-		temperature:     0,
-		responseFormat:  'json',
-		disableThinking: true,
-	});
-	const bullets = parseBullets(response.text);
+	let parsed: unknown;
+	try {
+		parsed = await provider.completeStructured<unknown>(messages, BULLETS_SCHEMA, {
+			maxTokens:       MAX_EXTRACT_TOKENS,
+			temperature:     0,
+			disableThinking: true,
+		});
+	} catch (err) {
+		log.warn({ todoId: entry.todoId, err: (err as Error).message }, 'bullet extraction call failed; returning empty');
+		return [];
+	}
+	const bullets = parseBullets(parsed);
 	if (bullets.length === 0) {
-		log.warn({ todoId: entry.todoId, rawPreview: response.text.slice(0, 200) }, 'bullet extraction returned no bullets');
+		log.warn({ todoId: entry.todoId }, 'bullet extraction returned no bullets');
 		return [];
 	}
 	// Hard clamp at MAX_BULLETS_PER_TODO even when the model overshoots.
@@ -130,17 +153,7 @@ export async function extractBullets(
 	return clamped;
 }
 
-function parseBullets(raw: string): string[] {
-	let text = raw.trim();
-	if (text.startsWith('```')) {
-		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		return [];
-	}
+function parseBullets(parsed: unknown): string[] {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return [];
 	}

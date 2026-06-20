@@ -41,7 +41,6 @@ import {
 	chunkMemory,
 	_chunkTokensForTest,
 	_hasRequiredKeysForTest,
-	_stripFencesForTest,
 } from '../shaper.js';
 import type { MemoryShapeInput } from '../shaper.js';
 import { createBudget } from '../../context/budget.js';
@@ -60,21 +59,40 @@ test.beforeEach(() => {
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly schema:   unknown;
 }
 
+// plans/structured-output.md Phase C.6. shapeMemory now calls
+// provider.completeStructured for both the map (chunk-partial) and
+// reduce/single (full bundle) shapes. Malformed text replays as `{}`
+// so the application-level `hasRequiredKeys` retry path stays exercised.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -100,12 +118,6 @@ const VALID_PARTIAL_JSON = JSON.stringify({
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-test('stripFences: unwraps ```json ... ``` blocks', () => {
-	assert.equal(_stripFencesForTest('```json\n{"x":1}\n```'), '{"x":1}');
-	assert.equal(_stripFencesForTest('```\n{"x":1}\n```'), '{"x":1}');
-	assert.equal(_stripFencesForTest('{"x":1}'), '{"x":1}');
-});
 
 test('hasRequiredKeys: passes when any one of the 5 keys is a string', () => {
 	assert.equal(_hasRequiredKeysForTest({ system: 'x' }), true);
@@ -163,7 +175,9 @@ test('shapeMemory: small memory -> single-call path; one LLM call', async () => 
 	assert.equal(result.bundle.summary.startsWith('memory contains'), true);
 });
 
-test('shapeMemory: every LLM call has disableThinking=true + temperature=0 + responseFormat=json', async () => {
+test('shapeMemory: every LLM call has disableThinking=true + temperature=0 + schema to completeStructured', async () => {
+	// plans/structured-output.md Phase C.6. responseFormat is gone; the
+	// schema travels as the second arg to provider.completeStructured.
 	const { provider, calls } = scriptedProvider([VALID_BUNDLE_JSON]);
 	await shapeMemory(provider, {
 		memoryText: 'small',
@@ -174,7 +188,7 @@ test('shapeMemory: every LLM call has disableThinking=true + temperature=0 + res
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]!.opts.disableThinking, true);
 	assert.equal(calls[0]!.opts.temperature, 0);
-	assert.equal(calls[0]!.opts.responseFormat, 'json');
+	assert.ok(calls[0]!.schema !== undefined && typeof calls[0]!.schema === 'object');
 });
 
 test('shapeMemory: prompt structure has system role + trailing schema in user message', async () => {
@@ -260,17 +274,6 @@ test('shapeMemory: disableRetry=true skips retry path -> direct throw on bad sha
 // Markdown-fenced response
 // ---------------------------------------------------------------------------
 
-test('shapeMemory: markdown-fenced JSON response is unwrapped and parsed', async () => {
-	const fenced = '```json\n' + VALID_BUNDLE_JSON + '\n```';
-	const { provider } = scriptedProvider([fenced]);
-	const result = await shapeMemory(provider, {
-		memoryText: 'small',
-		objective:  'next TODO',
-		budget:     createBudget(32_768),
-		numCtx:     32_768,
-	});
-	assert.equal(result.bundle.system, 'project: insrc');
-});
 
 // ---------------------------------------------------------------------------
 // Chunked map-reduce path
@@ -367,7 +370,9 @@ test('shapeMemory: chunked path also has disableThinking=true on every call', as
 	for (const call of calls) {
 		assert.equal(call.opts.disableThinking, true);
 		assert.equal(call.opts.temperature, 0);
-		assert.equal(call.opts.responseFormat, 'json');
+		// plans/structured-output.md Phase C.6. Each call now carries a
+		// schema via the second arg to completeStructured.
+		assert.ok(call.schema !== undefined && typeof call.schema === 'object');
 	}
 });
 

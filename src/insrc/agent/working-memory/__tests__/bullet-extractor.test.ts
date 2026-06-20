@@ -42,21 +42,40 @@ test.beforeEach(() => {
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly schema:   unknown;
 }
 
+// plans/structured-output.md Phase C.6. extractBullets now flows
+// through provider.completeStructured. Malformed text replays as `{}`
+// so the application-level `parseBullets` still degrades to [] on the
+// same kind of failure the legacy path did.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -84,27 +103,23 @@ function makeEntry(overrides: Partial<WorkingMemoryEntry> = {}): WorkingMemoryEn
 // ---------------------------------------------------------------------------
 
 test('parseBullets: valid array returns trimmed strings', () => {
-	const raw = JSON.stringify({ bullets: ['  fact A  ', 'fact B', '  ', 'fact C'] });
-	const out = parseBullets(raw);
+	const out = parseBullets({ bullets: ['  fact A  ', 'fact B', '  ', 'fact C'] });
 	assert.deepEqual(out, ['fact A', 'fact B', 'fact C']);    // empty string dropped
 });
 
-test('parseBullets: unwraps markdown fences', () => {
-	const raw = '```json\n' + JSON.stringify({ bullets: ['x'] }) + '\n```';
-	assert.deepEqual(parseBullets(raw), ['x']);
-});
-
-test('parseBullets: malformed JSON -> []', () => {
+test('parseBullets: non-object input -> []', () => {
+	// plans/structured-output.md Phase C.6. parseBullets now takes the
+	// already-parsed value from completeStructured; a string lands in the
+	// "shape invalid" branch and degrades to [].
 	assert.deepEqual(parseBullets('not json'), []);
 });
 
 test('parseBullets: object without bullets key -> []', () => {
-	assert.deepEqual(parseBullets(JSON.stringify({ other: ['x'] })), []);
+	assert.deepEqual(parseBullets({ other: ['x'] }), []);
 });
 
 test('parseBullets: non-string array entries dropped', () => {
-	const raw = JSON.stringify({ bullets: ['ok', 42, null, 'also ok'] });
-	assert.deepEqual(parseBullets(raw), ['ok', 'also ok']);
+	assert.deepEqual(parseBullets({ bullets: ['ok', 42, null, 'also ok'] }), ['ok', 'also ok']);
 });
 
 // ---------------------------------------------------------------------------
@@ -135,13 +150,18 @@ test('extractBullets: happy path returns the bullets', async () => {
 	assert.deepEqual(out, bullets);
 });
 
-test('extractBullets: every call sends disableThinking=true + temperature=0 + responseFormat=json', async () => {
+test('extractBullets: every call sends disableThinking=true + temperature=0 + schema to completeStructured', async () => {
+	// plans/structured-output.md Phase C.6. The schema travels via the
+	// second positional arg to provider.completeStructured.
 	const { provider, calls } = scriptedProvider([JSON.stringify({ bullets: ['x'] })]);
 	await extractBullets(provider, makeEntry());
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]!.opts.disableThinking, true);
 	assert.equal(calls[0]!.opts.temperature, 0);
-	assert.equal(calls[0]!.opts.responseFormat, 'json');
+	const schema = calls[0]!.schema;
+	assert.ok(schema !== undefined && typeof schema === 'object');
+	const propsObj = (schema as { properties?: unknown }).properties;
+	assert.ok(propsObj !== undefined && typeof propsObj === 'object' && 'bullets' in (propsObj as object));
 });
 
 test('extractBullets: clamps to MAX_BULLETS_PER_TODO when model overshoots', async () => {
@@ -170,9 +190,3 @@ test('extractBullets: empty bullets array from model -> []', async () => {
 	assert.deepEqual(out, []);
 });
 
-test('extractBullets: markdown-fenced model response is unwrapped', async () => {
-	const fenced = '```json\n' + JSON.stringify({ bullets: ['a', 'b'] }) + '\n```';
-	const { provider } = scriptedProvider([fenced]);
-	const out = await extractBullets(provider, makeEntry());
-	assert.deepEqual(out, ['a', 'b']);
-});

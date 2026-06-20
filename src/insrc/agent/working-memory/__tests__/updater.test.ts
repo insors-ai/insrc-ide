@@ -34,7 +34,7 @@ import {
 	_extractCodeBlocksForTest as extractCodeBlocks,
 	_renderFindingsForTest as renderFindings,
 	_enforceBudgetForTest as enforceBudget,
-	_tryParseSingleFieldForTest as tryParseSingleField,
+	_extractSingleFieldForTest as extractSingleField,
 	_formatBulletsAsSemanticForTest as formatBulletsAsSemantic,
 	RECENT_ENTRY_WINDOW_VALUE,
 	COLD_REBUILD_GROWTH_MULTIPLIER_VALUE,
@@ -59,8 +59,14 @@ test.beforeEach(() => {
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly schema:   unknown;
 }
 
+// plans/structured-output.md Phase C.6. Each updater layer now calls
+// provider.completeStructured with a per-layer schema. Malformed text
+// replays as `{}` so the application-level extractSingleField still
+// degrades to empty-string on the same kind of failure the legacy
+// path did.
 function scriptedProvider(responses: readonly string[], opts: { embedVec?: number[] } = {}): { provider: LLMProvider; calls: RecordedCall[]; embedCalls: number } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
@@ -68,14 +74,28 @@ function scriptedProvider(responses: readonly string[], opts: { embedVec?: numbe
 	const embedVec = opts.embedVec ?? [];
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], optsArg: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts: optsArg });
+			calls.push({ messages, opts: optsArg, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, optsArg: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts: optsArg, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> {
@@ -313,24 +333,23 @@ test('enforceBudget: truncates over-budget values to budget*3 chars', () => {
 	assert.equal(truncated.length, 300);
 });
 
-test('tryParseSingleField: extracts named field from valid JSON', () => {
-	assert.equal(tryParseSingleField('{"summary":"hi"}', 'summary'), 'hi');
+test('extractSingleField: extracts named field from object', () => {
+	assert.equal(extractSingleField({ summary: 'hi' }, 'summary'), 'hi');
 });
 
-test('tryParseSingleField: unwraps markdown fences', () => {
-	assert.equal(tryParseSingleField('```json\n{"recent":"x"}\n```', 'recent'), 'x');
+test('extractSingleField: non-object input -> undefined', () => {
+	// plans/structured-output.md Phase C.6. extractSingleField now
+	// receives the already-parsed object from completeStructured; a
+	// string lands in the "shape invalid" branch and returns undefined.
+	assert.equal(extractSingleField('not json', 'summary'), undefined);
 });
 
-test('tryParseSingleField: malformed JSON -> undefined', () => {
-	assert.equal(tryParseSingleField('not json', 'summary'), undefined);
+test('extractSingleField: object missing the requested key -> undefined', () => {
+	assert.equal(extractSingleField({ other: 'x' }, 'summary'), undefined);
 });
 
-test('tryParseSingleField: JSON missing the requested key -> undefined', () => {
-	assert.equal(tryParseSingleField('{"other":"x"}', 'summary'), undefined);
-});
-
-test('tryParseSingleField: JSON value not a string -> undefined', () => {
-	assert.equal(tryParseSingleField('{"summary":42}', 'summary'), undefined);
+test('extractSingleField: value not a string -> undefined', () => {
+	assert.equal(extractSingleField({ summary: 42 }, 'summary'), undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -414,7 +433,9 @@ test('incrementalUpdate: code layer updates deterministically when new code is p
 	assert.equal(result.trace.layersUpdated.includes('code'), true);
 });
 
-test('incrementalUpdate: every LLM call has disableThinking=true + temperature=0 + responseFormat=json', async () => {
+test('incrementalUpdate: every LLM call has disableThinking=true + temperature=0 + schema to completeStructured', async () => {
+	// plans/structured-output.md Phase C.6. Each call sends a layer-
+	// specific schema via the second arg to provider.completeStructured.
 	const { provider, calls } = scriptedProvider([
 		layerResponse('summary',  's'),
 		layerResponse('recent',   'r'),
@@ -430,7 +451,7 @@ test('incrementalUpdate: every LLM call has disableThinking=true + temperature=0
 	for (const call of calls) {
 		assert.equal(call.opts.disableThinking, true);
 		assert.equal(call.opts.temperature, 0);
-		assert.equal(call.opts.responseFormat, 'json');
+		assert.ok(call.schema !== undefined && typeof call.schema === 'object');
 	}
 });
 

@@ -272,35 +272,46 @@ async function callSingleLayerUpdate(
 		{ role: 'system', content: call.system },
 		{ role: 'user',   content: call.user   },
 	];
-	const response = await provider.complete(messages, {
-		maxTokens:       MAX_UPDATE_TOKENS,
-		temperature:     0,
-		responseFormat:  'json',
-		disableThinking: true,
-	});
-	const parsed = tryParseSingleField(response.text, call.layerName);
-	if (parsed === undefined) {
-		log.warn({ layer: call.layerName, preview: response.text.slice(0, 200) }, 'incremental layer update: parse failure -- returning empty');
+	// plans/structured-output.md Phase C.6. Per-call schema with the
+	// expected layer name as the only required property. The wire layer
+	// enforces structure; the application-level check below handles the
+	// edge where the model emits an object with `null` or non-string
+	// value (which the schema rejects but the `{}` fallback in tests
+	// reaches us).
+	const layerSchema: Record<string, unknown> = {
+		type: 'object',
+		required: [call.layerName],
+		additionalProperties: false,
+		properties: {
+			[call.layerName]: { type: 'string' },
+		},
+	};
+	let parsed: unknown;
+	try {
+		parsed = await provider.completeStructured<unknown>(messages, layerSchema, {
+			maxTokens:       MAX_UPDATE_TOKENS,
+			temperature:     0,
+			disableThinking: true,
+		});
+	} catch (err) {
+		log.warn({ layer: call.layerName, err: (err as Error).message }, 'incremental layer update: call failed -- returning empty');
 		return '';
 	}
-	return enforceBudget(parsed, call.budgetTokens);
+	const value = extractSingleField(parsed, call.layerName);
+	if (value === undefined) {
+		log.warn({ layer: call.layerName }, 'incremental layer update: parse failure -- returning empty');
+		return '';
+	}
+	return enforceBudget(value, call.budgetTokens);
 }
 
-function tryParseSingleField(raw: string, key: LayerName): string | undefined {
-	let text = raw.trim();
-	if (text.startsWith('```')) {
-		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-	}
-	try {
-		const obj = JSON.parse(text) as Record<string, unknown>;
-		if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
-			return undefined;
-		}
-		const value = obj[key];
-		return typeof value === 'string' ? value : undefined;
-	} catch {
+function extractSingleField(parsed: unknown, key: LayerName): string | undefined {
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return undefined;
 	}
+	const obj = parsed as Record<string, unknown>;
+	const value = obj[key];
+	return typeof value === 'string' ? value : undefined;
 }
 
 function enforceBudget(value: string, budgetTokens: number): string {
@@ -638,7 +649,7 @@ export const _buildRecentWindowForTest   = buildRecentWindow;
 export const _extractCodeBlocksForTest   = extractCodeBlocks;
 export const _renderFindingsForTest      = renderFindings;
 export const _enforceBudgetForTest       = enforceBudget;
-export const _tryParseSingleFieldForTest = tryParseSingleField;
+export const _extractSingleFieldForTest = extractSingleField;
 export const RECENT_ENTRY_WINDOW_VALUE   = RECENT_ENTRY_WINDOW;
 export const COLD_REBUILD_GROWTH_MULTIPLIER_VALUE = COLD_REBUILD_GROWTH_MULTIPLIER;
 

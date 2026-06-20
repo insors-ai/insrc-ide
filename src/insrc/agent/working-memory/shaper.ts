@@ -231,21 +231,35 @@ export function chunkMemory(
 // Parsing + validation
 // ---------------------------------------------------------------------------
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
+// plans/structured-output.md Phase C.6. JSON Schemas for wire-layer
+// enforcement -- full bundle vs chunk-partial. Application-level
+// `hasRequiredKeys` still runs (some providers permit unconstrained
+// shapes; the schema's `additionalProperties: false` should refuse
+// them, but the post-check is cheap insurance).
+const SHAPE_BUNDLE_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['system', 'summary', 'recent', 'semantic', 'code'],
+	additionalProperties: false,
+	properties: {
+		system:   { type: 'string' },
+		summary:  { type: 'string' },
+		recent:   { type: 'string' },
+		semantic: { type: 'string' },
+		code:     { type: 'string' },
+	},
+};
 
-function tryParse(raw: string): unknown {
-	try {
-		return JSON.parse(stripFences(raw));
-	} catch {
-		return undefined;
-	}
-}
+const CHUNK_PARTIAL_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['summary', 'recent', 'semantic', 'code'],
+	additionalProperties: false,
+	properties: {
+		summary:  { type: 'string' },
+		recent:   { type: 'string' },
+		semantic: { type: 'string' },
+		code:     { type: 'string' },
+	},
+};
 
 function hasRequiredKeys(parsed: unknown): boolean {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -267,15 +281,21 @@ function bundleFromParsed(parsed: unknown): MemoryShapeBundle {
 	};
 }
 
-function parseChunkPartial(raw: string): ChunkPartial | { parseError: string } {
-	const parsed = tryParse(raw);
-	if (parsed === undefined) {
-		return { parseError: 'invalid JSON' };
-	}
+function parseChunkPartial(parsed: unknown): ChunkPartial | { parseError: string } {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { parseError: 'not a JSON object' };
 	}
 	const obj = parsed as Record<string, unknown>;
+	// plans/structured-output.md Phase C.6. The wire layer's `{}` recovery
+	// (when the model emits text the schema would have refused) shows up
+	// here as an object with none of the four keys. Treat that case as a
+	// parse failure so mapParseFails accounting matches the legacy
+	// invalid-JSON behaviour. Compliant providers never deliver this
+	// shape -- the schema's `required` enforcement rejects it first.
+	const partialKeys: readonly string[] = ['summary', 'recent', 'semantic', 'code'];
+	if (!partialKeys.some(k => typeof obj[k] === 'string')) {
+		return { parseError: 'missing every partial-shape key' };
+	}
 	return {
 		summary:  typeof obj['summary']  === 'string' ? obj['summary']  : '',
 		recent:   typeof obj['recent']   === 'string' ? obj['recent']   : '',
@@ -296,23 +316,30 @@ const RETRY_ADDENDUM = [
 // LLM call wrappers
 // ---------------------------------------------------------------------------
 
+// plans/structured-output.md Phase C.6. Both paths now flow through
+// provider.completeStructured -- the schema enforces the bundle shape
+// (or the chunk-partial shape for the map step) and the wire layer
+// retries on validation failure up to maxAttempts (default 3). The
+// application-level retry below kicks in only if the model returns a
+// schema-conformant but empty/key-missing object that ajv accepts (the
+// schemas above prevent this for compliant providers but the post-check
+// is cheap defence-in-depth).
 async function callShape(
 	provider: LLMProvider,
 	system: string,
 	user: string,
 	maxTokens: number,
-): Promise<string> {
+	schema: Record<string, unknown>,
+): Promise<unknown> {
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: system },
 		{ role: 'user',   content: user   },
 	];
-	const response = await provider.complete(messages, {
+	return provider.completeStructured<unknown>(messages, schema, {
 		maxTokens,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return response.text;
 }
 
 async function callWithSchemaRetry(
@@ -321,18 +348,17 @@ async function callWithSchemaRetry(
 	user: string,
 	maxTokens: number,
 	enableRetry: boolean,
-): Promise<{ raw: string; retried: boolean }> {
-	const raw = await callShape(provider, system, user, maxTokens);
+): Promise<{ parsed: unknown; retried: boolean }> {
+	const parsed = await callShape(provider, system, user, maxTokens, SHAPE_BUNDLE_SCHEMA);
 	if (!enableRetry) {
-		return { raw, retried: false };
+		return { parsed, retried: false };
 	}
-	const parsed = tryParse(raw);
 	if (hasRequiredKeys(parsed)) {
-		return { raw, retried: false };
+		return { parsed, retried: false };
 	}
-	log.warn({ rawPreview: raw.slice(0, 200) }, 'shape response missing required keys, retrying with schema reminder');
-	const retried = await callShape(provider, system + RETRY_ADDENDUM, user, maxTokens);
-	return { raw: retried, retried: true };
+	log.warn('shape response missing required keys after wire-layer retries, retrying with schema reminder');
+	const retried = await callShape(provider, system + RETRY_ADDENDUM, user, maxTokens, SHAPE_BUNDLE_SCHEMA);
+	return { parsed: retried, retried: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -384,11 +410,10 @@ export async function shapeMemory(
 	if (!triggerChunk) {
 		const { system, user } = buildShapingPrompt(input.memoryText, input.objective, input.budget);
 		const started = Date.now();
-		const { raw, retried } = await callWithSchemaRetry(provider, system, user, responseBudget, enableRetry);
+		const { parsed, retried } = await callWithSchemaRetry(provider, system, user, responseBudget, enableRetry);
 		const dur = Date.now() - started;
-		const parsed = tryParse(raw);
 		if (!hasRequiredKeys(parsed)) {
-			throw new Error(`shapeMemory: single-call response did not match schema after retry. Preview: ${raw.slice(0, 200)}`);
+			throw new Error(`shapeMemory: single-call response did not match schema after retry. Got: ${JSON.stringify(parsed).slice(0, 200)}`);
 		}
 		const bundle = bundleFromParsed(parsed);
 		log.info({ memTokens, durationMs: dur, retried }, 'shapeMemory: single-call complete');
@@ -403,7 +428,7 @@ export async function shapeMemory(
 				retryTriggered:   retried,
 				memoryTokens:     memTokens,
 			},
-			rawResponse: raw,
+			rawResponse: JSON.stringify(parsed),
 		};
 	}
 
@@ -435,12 +460,12 @@ export async function shapeMemory(
 		const { system, user } = buildMapPrompt(chunk.content, i, chunks.length, input.objective);
 		const started = Date.now();
 		try {
-			const raw = await callShape(provider, system, user, MAP_OUTPUT_TOKENS);
+			const parsedChunk = await callShape(provider, system, user, MAP_OUTPUT_TOKENS, CHUNK_PARTIAL_SCHEMA);
 			mapDurationsMs.push(Date.now() - started);
-			const partial = parseChunkPartial(raw);
+			const partial = parseChunkPartial(parsedChunk);
 			if ('parseError' in partial) {
 				mapParseFails += 1;
-				log.warn({ chunkIndex: i, error: partial.parseError, preview: raw.slice(0, 200) }, 'shapeMemory: chunk parse failure -- empty partial');
+				log.warn({ chunkIndex: i, error: partial.parseError }, 'shapeMemory: chunk parse failure -- empty partial');
 				partials.push({ summary: '', recent: '', semantic: '', code: '' });
 			} else {
 				partials.push(partial);
@@ -455,11 +480,10 @@ export async function shapeMemory(
 
 	const { system, user } = buildReducePrompt(partials, input.objective, input.budget);
 	const reduceStart = Date.now();
-	const { raw, retried } = await callWithSchemaRetry(provider, system, user, responseBudget, enableRetry);
+	const { parsed, retried } = await callWithSchemaRetry(provider, system, user, responseBudget, enableRetry);
 	const reduceDuration = Date.now() - reduceStart;
-	const parsed = tryParse(raw);
 	if (!hasRequiredKeys(parsed)) {
-		throw new Error(`shapeMemory: reduce response did not match schema after retry. Preview: ${raw.slice(0, 200)}`);
+		throw new Error(`shapeMemory: reduce response did not match schema after retry. Got: ${JSON.stringify(parsed).slice(0, 200)}`);
 	}
 	const bundle = bundleFromParsed(parsed);
 	log.info({
@@ -481,7 +505,7 @@ export async function shapeMemory(
 			retryTriggered:   retried,
 			memoryTokens:     memTokens,
 		},
-		rawResponse: raw,
+		rawResponse: JSON.stringify(parsed),
 	};
 }
 
@@ -492,4 +516,3 @@ export async function shapeMemory(
 export const _chunkTokensForTest      = chunkTokensFor;
 export const _hasRequiredKeysForTest  = hasRequiredKeys;
 export const _bundleFromParsedForTest = bundleFromParsed;
-export const _stripFencesForTest      = stripFences;
