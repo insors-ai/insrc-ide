@@ -316,9 +316,19 @@ type StepOutcome =
 
 async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 	const startMs = opts.now();
+	// The heartbeat's `_status` arg now carries the bare substate; the
+	// onTick callback composes the rolling elapsed time so the user sees
+	// the counter advance on every tick. Tight 2s cadence so silent LLM
+	// calls (cloud Phase 1 ask + Phase 2 task, often 15-45s each) feel
+	// alive in the progress widget.
+	const label = stepLabel(opts.template, opts.stepDesc);
 	const heartbeat = new Heartbeat({
-		onTick: status => opts.emit.progress(stepLabel(opts.template, opts.stepDesc), status),
-		now:    opts.now,
+		intervalMs: 2_000,
+		onTick: substate => opts.emit.progress(
+			label,
+			composeStatus({ substate, elapsedMs: opts.now() - startMs }),
+		),
+		now: opts.now,
 	});
 
 	// Cumulative chunks across narrowing + context-needed retries. Each retry
@@ -329,7 +339,7 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 	let lastPhase2Reason: string | undefined;
 
 	const bubble = `meta-task:${opts.template.id} / ${opts.stepDesc.name}`;
-	heartbeat.start(composeStatus({ substate: 'phase-1 ctx', elapsedMs: 0 }));
+	heartbeat.start('phase-1 ctx');
 
 	try {
 		// ─────────────────────────────────────────────────────────────────
@@ -389,10 +399,7 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 				});
 			}
 			opts.emit.liveStep(`${bubble}: phase-1 ctx`, '', true);
-			heartbeat.updateStatus(composeStatus({
-				substate: 'phase-2 task',
-				elapsedMs: opts.now() - startMs,
-			}));
+			heartbeat.updateStatus('phase-2 task');
 
 			// PHASE 2 -- run the task with the assembled context.
 			opts.emit.liveStep(`${bubble}: phase-2 task`, '');
@@ -478,10 +485,7 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 				};
 			}
 			// Loop back into phase 1 with the updated context.
-			heartbeat.updateStatus(composeStatus({
-				substate: `phase-1 ctx (retry ${phase2RetryAttempt}/${DEFAULT_RETRY_CAPS.maxContextNeededRetries})`,
-				elapsedMs: opts.now() - startMs,
-			}));
+			heartbeat.updateStatus(`phase-1 ctx (retry ${phase2RetryAttempt}/${DEFAULT_RETRY_CAPS.maxContextNeededRetries})`);
 		}
 	} finally {
 		heartbeat.stop();
@@ -710,6 +714,22 @@ const SYNTHESIS_SCHEMA: Record<string, unknown> = {
 async function runSynthesis(opts: SynthesisOpts): Promise<string> {
 	const bubble = `meta-task:${opts.template.id} / synthesis`;
 	opts.emit.liveStep(bubble, '');
+
+	// 2s heartbeat so the progress widget stays alive during the silent
+	// synthesis LLM call (cloud Phase 2 of the meta-task pipeline; can
+	// take 15-30s for a multi-step plan).
+	const startMs = opts.now();
+	const label = `meta-task:${opts.template.id}`;
+	const heartbeat = new Heartbeat({
+		intervalMs: 2_000,
+		onTick: substate => opts.emit.progress(
+			label,
+			composeStatus({ substate, elapsedMs: opts.now() - startMs }),
+		),
+		now: opts.now,
+	});
+	heartbeat.start('synthesis');
+
 	const prompt =
 		`You are composing the synthesis artifact for a multi-step meta-task.\n\n`
 		+ `Intent: ${opts.scope.intent}\n`
@@ -734,6 +754,8 @@ async function runSynthesis(opts: SynthesisOpts): Promise<string> {
 		opts.emit.liveStep(bubble, body);
 	} catch (err) {
 		log.warn({ err: (err as Error).message }, 'synthesis call failed');
+	} finally {
+		heartbeat.stop();
 	}
 	opts.emit.liveStep(bubble, '', true);
 	await opts.store.writeSynthesis(body);
