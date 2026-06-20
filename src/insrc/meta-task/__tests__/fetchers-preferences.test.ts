@@ -32,23 +32,45 @@ import {
 } from '../../daemon/substrate/singleton.js';
 
 
+const TEST_CAPS = {
+	structuredOutput: true, toolCalling: false, vision: false,
+	webSearch: false, streaming: false, embeddings: false,
+} as const;
+
 function noopProvider(): LLMProvider {
 	return {
+		supportsTools: false,
+		capabilities:  TEST_CAPS,
 		async complete(_messages: LLMMessage[]): Promise<LLMResponse> {
 			throw new Error('noopProvider.complete: should not be invoked');
 		},
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
+		async completeStructured() {
+			throw new Error('noopProvider.completeStructured: should not be invoked');
+		},
 	};
 }
 
 function scriptedProvider(text: string): LLMProvider {
 	return {
+		supportsTools: false,
+		capabilities:  TEST_CAPS,
 		async complete(_messages: LLMMessage[]): Promise<LLMResponse> {
 			return { text, stopReason: 'end_turn' };
 		},
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
+		async completeStructured<T>(_messages: LLMMessage[], _schema: unknown): Promise<T> {
+			// Phase C.2: the scripted text IS the JSON the test wants the
+			// provider to "produce". The previous tests parsed via JSON.parse
+			// at the callsite; now the migrated curator calls completeStructured
+			// directly. Replay the same shape by parsing here.
+			try { return JSON.parse(text) as T; }
+			catch (err) {
+				throw new Error(`scriptedProvider.completeStructured: text not JSON: ${text} (${(err as Error).message})`);
+			}
+		},
 	};
 }
 

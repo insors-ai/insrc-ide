@@ -41,6 +41,7 @@ import {
 } from '../db/entities.js';
 import { searchTurnsByRepo } from '../db/conversations.js';
 
+import { Type } from '@sinclair/typebox';
 import { getLogger } from '../shared/logger.js';
 import type { LLMMessage, LLMProvider } from '../shared/types.js';
 
@@ -676,17 +677,12 @@ Rules:
 
 If the intent is empty or unclear, include everything.`;
 
-const PREFERENCES_CURATION_SCHEMA: Record<string, unknown> = {
-	type: 'object',
-	required: ['relevant_indices'],
-	properties: {
-		relevant_indices: {
-			type:        'array',
-			items:       { type: 'integer', minimum: 0 },
-			uniqueItems: true,
-		},
-	},
-};
+// plans/structured-output.md Phase C.2. TypeBox schema replaces the
+// hand-rolled JSON-schema constant so the wire layer enforces the
+// shape via provider.completeStructured.
+const PREFERENCES_CURATION_SCHEMA = Type.Object({
+	relevant_indices: Type.Array(Type.Integer({ minimum: 0 }), { uniqueItems: true }),
+});
 
 function preferencesOwnerForScope(scopeIn: ContextRequestPreferences['scope']): string {
 	const templateId = scopeIn?.templateId ?? '__unknown__';
@@ -714,20 +710,24 @@ async function curatePreferencesViaLlm(
 	const numbered = candidates.map((c, i) => `${i}. [${c.subject}] ${c.canonicalText}`).join('\n');
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: PREFERENCES_CURATION_SYSTEM },
-		{ role: 'user',   content: `Step intent:\n${stepIntent}\n\nPreferences:\n${numbered}\n\nRespond with the JSON object.` },
+		{ role: 'user',   content: `Step intent:\n${stepIntent}\n\nPreferences:\n${numbered}` },
 	];
-	const response = await provider.complete(messages, {
-		responseFormat: { schema: PREFERENCES_CURATION_SCHEMA },
-		temperature:    0.1,
-		maxTokens:      512,
-	});
+	// plans/structured-output.md Phase C.2. provider.completeStructured
+	// guarantees the response conforms to PREFERENCES_CURATION_SCHEMA
+	// (relevant_indices: integer[]). The retry helper handles transient
+	// schema drift; we keep the catch-all so an unrecoverable failure
+	// degrades to inclusion bias rather than throwing through the
+	// orchestrator.
 	try {
-		const raw = JSON.parse(response.text) as { relevant_indices?: unknown };
-		if (!Array.isArray(raw.relevant_indices)) { return candidates; }
-		const include = new Set(raw.relevant_indices.filter((n): n is number => Number.isInteger(n)));
+		const result = await provider.completeStructured<{ relevant_indices: number[] }>(
+			messages,
+			PREFERENCES_CURATION_SCHEMA,
+			{ temperature: 0.1, maxTokens: 512 },
+		);
+		const include = new Set(result.relevant_indices);
 		return candidates.filter((_c, i) => include.has(i));
 	} catch (err) {
-		log.warn({ err: (err as Error).message, head: response.text.slice(0, 80) }, 'preferences curator returned malformed JSON; including all');
+		log.warn({ err: (err as Error).message }, 'preferences curator failed; including all candidates (inclusion bias)');
 		return candidates;
 	}
 }
