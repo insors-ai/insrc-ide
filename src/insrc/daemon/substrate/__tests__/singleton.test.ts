@@ -29,6 +29,11 @@ import { PREFERENCE_SUBJECTS } from '../taxonomy/preference-subjects.js';
 
 function fakeLocalProvider(): LLMProvider {
 	return {
+		supportsTools: false,
+		capabilities: {
+			structuredOutput: true, toolCalling: false, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(_msgs: LLMMessage[]): Promise<LLMResponse> {
 			return {
 				text: JSON.stringify({ verdict: 'defer', confidence: 0.3, rationale: 'fake' }),
@@ -37,6 +42,9 @@ function fakeLocalProvider(): LLMProvider {
 		},
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
+		async completeStructured<T>(_msgs: LLMMessage[], _schema: unknown): Promise<T> {
+			return { verdict: 'defer', confidence: 0.3, rationale: 'fake' } as T;
+		},
 	};
 }
 

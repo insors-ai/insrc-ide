@@ -29,6 +29,7 @@
  *   `OLLAMA_MODEL=qwen3-coder npx tsx --test daemon/substrate/__tests__/ollama-hook.live.test.ts`.
  */
 
+import { Type } from '@sinclair/typebox';
 import type { LLMProvider } from '../../../shared/types.js';
 import { getLogger } from '../../../shared/logger.js';
 
@@ -75,22 +76,25 @@ export function createOllamaLayer2Hook(opts: CreateOllamaHookOpts): LlmClassifyH
 			: [];
 
 		const prompt = buildClassifyPrompt(span, relatedEntries);
-		const schema = SCHEMA;
 
+		// plans/structured-output.md Phase C.4. provider.completeStructured
+		// guarantees the response conforms to TYPEBOX_SCHEMA at the wire
+		// layer (Ollama format field; cloud providers' native structured
+		// output for future cloud-Layer-2 surfaces). normalizeParsedShape
+		// applies the post-processing (clamp confidence, normalise
+		// relationship discriminator) the legacy parseClassifyResponse
+		// did inline.
 		let parsed: ParsedResponse;
 		try {
-			const response = await opts.provider.complete(
+			const raw = await opts.provider.completeStructured<Record<string, unknown>>(
 				[
 					{ role: 'system', content: SYSTEM_PROMPT },
 					{ role: 'user',   content: prompt },
 				],
-				{
-					responseFormat: { schema },
-					temperature:    0.1,
-					maxTokens:      512,
-				},
+				TYPEBOX_SCHEMA,
+				{ temperature: 0.1, maxTokens: 512 },
 			);
-			parsed = parseClassifyResponse(response.text);
+			parsed = normalizeParsedShape(raw);
 		} catch (err) {
 			log.warn({ err: (err as Error).message, span: span.slice(0, 80) }, 'Layer 2 LLM call failed; deferring');
 			return { kind: 'defer', reason: `LLM call failed: ${(err as Error).message}` };
@@ -118,50 +122,29 @@ export function createOllamaLayer2Hook(opts: CreateOllamaHookOpts): LlmClassifyH
 // docs; deeper schemas reduce to the supported subset internally).
 // ---------------------------------------------------------------------------
 
-const SCHEMA: Record<string, unknown> = {
-	type: 'object',
-	required: ['verdict', 'confidence', 'rationale'],
-	properties: {
-		verdict: {
-			type: 'string',
-			enum: ['accept', 'reject', 'defer'],
-		},
-		confidence: {
-			type: 'number',
-			minimum: 0,
-			maximum: 1,
-		},
-		rationale: {
-			type: 'string',
-		},
-		subject: {
-			type: 'string',
-			enum: [...PREFERENCE_SUBJECTS],
-		},
-		canonicalText: {
-			type: 'string',
-		},
-		categories: {
-			type: 'array',
-			items: { type: 'string' },
-		},
-		repoPaths: {
-			type: 'array',
-			items: { type: 'string' },
-		},
-		relationship: {
-			type: 'object',
-			required: ['kind'],
-			properties: {
-				kind: {
-					type: 'string',
-					enum: ['independent', 'exact', 'refinement', 'weakening', 'contradiction'],
-				},
-				existingRef: { type: 'string' },
-			},
-		},
-	},
-};
+// plans/structured-output.md Phase C.4. TypeBox schema replaces the
+// hand-rolled JSON Schema map. The shape is identical; typebox just
+// gives us compile-time validation against ParsedResponse shape +
+// uniform wire-layer enforcement via provider.completeStructured.
+const TYPEBOX_SCHEMA = Type.Object({
+	verdict:     Type.Union(['accept', 'reject', 'defer'].map(v => Type.Literal(v as 'accept' | 'reject' | 'defer'))),
+	confidence:  Type.Number({ minimum: 0, maximum: 1 }),
+	rationale:   Type.String(),
+	subject:     Type.Optional(Type.Union(
+		PREFERENCE_SUBJECTS.map(s => Type.Literal(s)),
+	)),
+	canonicalText: Type.Optional(Type.String()),
+	categories:    Type.Optional(Type.Array(Type.String())),
+	repoPaths:     Type.Optional(Type.Array(Type.String())),
+	relationship:  Type.Optional(Type.Object({
+		kind:        Type.Union([
+			Type.Literal('independent'), Type.Literal('exact'),
+			Type.Literal('refinement'),  Type.Literal('weakening'),
+			Type.Literal('contradiction'),
+		]),
+		existingRef: Type.Optional(Type.String()),
+	})),
+});
 
 
 // ---------------------------------------------------------------------------
@@ -229,23 +212,23 @@ interface ParsedResponse {
 }
 
 
-function parseClassifyResponse(text: string): ParsedResponse {
-	let raw: unknown;
-	try {
-		raw = JSON.parse(text);
-	} catch {
-		// Some models return code fences or trailing prose despite the schema
-		// constraint; try to recover.
-		const match = /\{[\s\S]*\}/.exec(text);
-		if (match === null) {
-			throw new Error('Ollama response is not parseable JSON');
-		}
-		raw = JSON.parse(match[0]);
-	}
-	if (typeof raw !== 'object' || raw === null) {
-		throw new Error('Ollama response root is not an object');
-	}
-	const r = raw as Record<string, unknown>;
+/**
+ * plans/structured-output.md Phase C.4. Post-processes the already-
+ * schema-validated raw output from provider.completeStructured:
+ *   - clamps confidence to [0, 1] (the schema constrains it but a
+ *     model that emits 1.000001 would slip through);
+ *   - extracts the optional G3/G4/G7 fields with defensive type guards
+ *     since the schema marks them optional;
+ *   - normalises the relationship discriminator so unsupported shapes
+ *     (e.g. kind='exact' without existingRef) decay to undefined
+ *     rather than throwing.
+ *
+ * Replaces the legacy parseClassifyResponse(text) function -- the
+ * text-level recovery (fence-stripping, regex extraction) is no
+ * longer needed because provider.completeStructured guarantees the
+ * payload arrives schema-conformant.
+ */
+function normalizeParsedShape(r: Record<string, unknown>): ParsedResponse {
 	const verdict = r.verdict;
 	if (verdict !== 'accept' && verdict !== 'reject' && verdict !== 'defer') {
 		throw new Error(`invalid verdict: ${String(verdict)}`);

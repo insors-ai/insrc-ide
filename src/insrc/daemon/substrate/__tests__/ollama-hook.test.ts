@@ -21,7 +21,17 @@ import { createOllamaLayer2Hook } from '../classifier/ollama-hook.js';
 function fakeProvider(scriptedText: string): LLMProvider {
 	let lastOpts: CompletionOpts | undefined;
 	let lastMessages: LLMMessage[] | undefined;
-	const provider: LLMProvider & { lastOpts: () => CompletionOpts | undefined; lastMessages: () => LLMMessage[] | undefined } = {
+	let lastSchema: unknown;
+	const provider: LLMProvider & {
+		lastOpts:     () => CompletionOpts | undefined;
+		lastMessages: () => LLMMessage[] | undefined;
+		lastSchema:   () => unknown;
+	} = {
+		supportsTools: false,
+		capabilities: {
+			structuredOutput: true, toolCalling: false, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
 			lastOpts = opts;
 			lastMessages = messages;
@@ -29,8 +39,20 @@ function fakeProvider(scriptedText: string): LLMProvider {
 		},
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
-		lastOpts: () => lastOpts,
+		// plans/structured-output.md Phase C.4: replay the scripted JSON
+		// through completeStructured for the migrated Layer 2 hook.
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts?: Record<string, unknown>): Promise<T> {
+			lastMessages = messages;
+			lastSchema   = schema;
+			lastOpts = opts as CompletionOpts | undefined;
+			try { return JSON.parse(scriptedText) as T; }
+			catch (err) {
+				throw new Error(`fakeProvider.completeStructured: text not JSON: ${scriptedText.slice(0, 80)} (${(err as Error).message})`);
+			}
+		},
+		lastOpts:     () => lastOpts,
 		lastMessages: () => lastMessages,
+		lastSchema:   () => lastSchema,
 	};
 	return provider;
 }
@@ -104,16 +126,21 @@ test('ollama-hook: non-JSON response -> defer with error reason', async () => {
 	assert.ok(result.reason.includes('LLM call failed'));
 });
 
-test('ollama-hook: JSON with extra prose recovered via brace match', async () => {
+test('ollama-hook: clean JSON accepted (text-recovery path retired post-C.4)', async () => {
+	// plans/structured-output.md Phase C.4. After migration the wire
+	// layer (provider.completeStructured) guarantees clean JSON; the
+	// legacy fence-strip + brace-match recovery is no longer needed.
+	// This test now pins the clean path; the fakeProvider's
+	// completeStructured stub JSON.parses the script directly.
 	const hook = createOllamaLayer2Hook({
-		provider: fakeProvider('Sure! Here is the answer:\n\n```json\n' + JSON.stringify({
+		provider: fakeProvider(JSON.stringify({
 			verdict:    'accept',
 			confidence: 0.9,
 			rationale:  'r',
 			subject:    'code-style',
 			canonicalText: 'Use tabs for indentation.',
 			relationship: { kind: 'independent' },
-		}) + '\n```\nLet me know if you need anything else.'),
+		})),
 	});
 	const result = await hook('use tabs', { turnId: 't5', layer1: 'defer' });
 	assert.equal(result.kind, 'accept');
@@ -156,19 +183,39 @@ test('ollama-hook: subject not in PreferenceSubject enum -> omitted from payload
 // Schema constraint passed to the provider
 // ---------------------------------------------------------------------------
 
-test('ollama-hook: passes responseFormat.schema with PreferenceSubject enum', async () => {
+test('ollama-hook: passes typebox schema to completeStructured with PreferenceSubject enum', async () => {
+	// plans/structured-output.md Phase C.4. The schema is now sent
+	// directly to provider.completeStructured (not in opts.responseFormat).
+	// The typebox schema renders as JSON Schema with the PreferenceSubject
+	// enum on the `subject` property's anyOf branch.
 	const provider = fakeProvider(JSON.stringify({ verdict: 'reject', confidence: 0.8, rationale: 'r' }));
 	const hook = createOllamaLayer2Hook({ provider });
 	await hook('x', { turnId: 't8', layer1: 'defer' });
-	const opts = (provider as unknown as { lastOpts: () => CompletionOpts | undefined }).lastOpts();
-	assert.ok(opts !== undefined);
-	assert.ok(typeof opts!.responseFormat === 'object');
-	const rf = opts!.responseFormat as { schema?: { properties?: { subject?: { enum?: string[] } } } };
-	const enumList = rf.schema?.properties?.subject?.enum;
-	assert.ok(Array.isArray(enumList));
-	assert.ok(enumList!.includes('test-policy'));
-	assert.ok(enumList!.includes('code-style'));
+	const schema = (provider as unknown as { lastSchema: () => unknown }).lastSchema();
+	assert.ok(schema !== undefined && typeof schema === 'object');
+	// typebox Type.Union(literals) renders as `anyOf: [{ const: '...' }, ...]`;
+	// the schema's properties.subject is that union (optionally wrapped).
+	const subjectSchema = (schema as { properties?: { subject?: unknown } }).properties?.subject;
+	const literals = collectStringLiterals(subjectSchema);
+	assert.ok(literals.includes('test-policy'),  `expected 'test-policy' in literals, got ${JSON.stringify(literals)}`);
+	assert.ok(literals.includes('code-style'),   `expected 'code-style' in literals, got ${JSON.stringify(literals)}`);
 });
+
+function collectStringLiterals(node: unknown): string[] {
+	if (typeof node !== 'object' || node === null) { return []; }
+	const o = node as Record<string, unknown>;
+	if (typeof o['const'] === 'string') { return [o['const']]; }
+	if (Array.isArray(o['enum'])) { return (o['enum'] as unknown[]).filter((x): x is string => typeof x === 'string'); }
+	const out: string[] = [];
+	for (const k of ['anyOf', 'oneOf', 'allOf'] as const) {
+		const arr = o[k];
+		if (Array.isArray(arr)) { for (const branch of arr) { out.push(...collectStringLiterals(branch)); } }
+	}
+	for (const k of ['items', 'additionalProperties'] as const) {
+		if (o[k] !== undefined) { out.push(...collectStringLiterals(o[k])); }
+	}
+	return out;
+}
 
 
 // ---------------------------------------------------------------------------
