@@ -692,6 +692,21 @@ interface SynthesisOpts {
 	readonly now:          () => number;
 }
 
+// plans/structured-output.md Phase C.7. Synthesis emits a single
+// `{ kind: 'deliverable', body: '<markdown>' }` object via the
+// wire-layer-enforced surface. Streaming token-emission is dropped on
+// the structured path (the body still surfaces via liveStep once the
+// final object arrives).
+const SYNTHESIS_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['kind', 'body'],
+	additionalProperties: false,
+	properties: {
+		kind: { type: 'string', enum: ['deliverable'] },
+		body: { type: 'string' },
+	},
+};
+
 async function runSynthesis(opts: SynthesisOpts): Promise<string> {
 	const bubble = `meta-task:${opts.template.id} / synthesis`;
 	opts.emit.liveStep(bubble, '');
@@ -709,20 +724,20 @@ async function runSynthesis(opts: SynthesisOpts): Promise<string> {
 		{ role: 'system', content: 'Respond with ONLY a JSON object: { "kind": "deliverable", "body": "<markdown>" }' },
 		{ role: 'user',   content: prompt },
 	];
-	const raw = await opts.cloud.complete(messages, {
-		responseFormat: 'json',
-		onToken: t => opts.emit.liveStep(bubble, t),
-	});
-	opts.emit.liveStep(bubble, '', true);
+	let body = '';
 	try {
-		const parsed = JSON.parse(raw.text) as { body?: string };
-		const body   = parsed.body ?? '';
-		await opts.store.writeSynthesis(body);
-		return body;
+		const parsed = await opts.cloud.completeStructured<{ kind: string; body: string }>(
+			messages,
+			SYNTHESIS_SCHEMA,
+		);
+		body = parsed.body ?? '';
+		opts.emit.liveStep(bubble, body);
 	} catch (err) {
-		log.warn({ err: (err as Error).message }, 'synthesis JSON parse failed');
-		return '';
+		log.warn({ err: (err as Error).message }, 'synthesis call failed');
 	}
+	opts.emit.liveStep(bubble, '', true);
+	await opts.store.writeSynthesis(body);
+	return body;
 }
 
 

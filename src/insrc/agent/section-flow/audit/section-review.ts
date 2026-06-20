@@ -132,6 +132,20 @@ interface ReviewParsed {
 	readonly edits?:     string | undefined;
 }
 
+// plans/structured-output.md Phase C.7. JSON Schema for the wire-layer
+// enforcement of the section-review verdict. App-level fallback
+// (accept-on-invalid-shape) stays in `parseReview`.
+const SECTION_REVIEW_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['verdict'],
+	additionalProperties: false,
+	properties: {
+		verdict:   { type: 'string', enum: ['accept', 'revise-edits', 'revise-major'] },
+		reasoning: { type: 'string', maxLength: 2000 },
+		edits:     { type: 'string', maxLength: 4000 },
+	},
+};
+
 async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesConsumed: number, _cap: number): Promise<ReviewParsed> {
 	const writer = getPromptRegistry().get<SectionReviewWriterInput, readonly LLMMessage[]>('section-review');
 	const messages = [...writer.build({
@@ -140,13 +154,18 @@ async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesCo
 		candidate,
 		cyclesConsumed,
 	})];
-	const response = await input.provider.complete(messages, {
-		maxTokens:       MAX_REVIEW_TOKENS,
-		temperature:     0,
-		responseFormat:  'json',
-		disableThinking: true,
-	});
-	return parseReview(response.text);
+	let parsed: unknown;
+	try {
+		parsed = await input.provider.completeStructured<unknown>(messages, SECTION_REVIEW_SCHEMA, {
+			maxTokens:       MAX_REVIEW_TOKENS,
+			temperature:     0,
+			disableThinking: true,
+		});
+	} catch (err) {
+		log.warn({ err: (err as Error).message }, 'section review: call failed; defaulting to accept');
+		return { verdict: 'accept', reasoning: 'review call failure -> accept' };
+	}
+	return parseReview(parsed);
 }
 
 function buildReviewUser(input: SectionReviewInput, candidate: string, cyclesConsumed: number): string {
@@ -180,18 +199,7 @@ function buildReviewUser(input: SectionReviewInput, candidate: string, cyclesCon
 	].join('\n');
 }
 
-function parseReview(raw: string): ReviewParsed {
-	let text = raw.trim();
-	if (text.startsWith('```')) {
-		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		log.warn({ preview: raw.slice(0, 200) }, 'section review: JSON parse failed; defaulting to accept');
-		return { verdict: 'accept', reasoning: 'review parse failure -> accept' };
-	}
+function parseReview(parsed: unknown): ReviewParsed {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { verdict: 'accept', reasoning: 'review shape invalid -> accept' };
 	}

@@ -48,21 +48,40 @@ test.beforeEach(() => {
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly method:   'complete' | 'completeStructured';
 }
 
+// plans/structured-output.md Phase C.7. Section-review verdicts now
+// flow through provider.completeStructured. Revise (markdown) stays on
+// `complete`. Both methods share the response cursor so the test
+// script order is preserved.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, method: 'complete' });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], _schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, method: 'completeStructured' });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -86,31 +105,29 @@ const verdict = (v: 'accept' | 'revise-edits' | 'revise-major', extras: Record<s
 // ---------------------------------------------------------------------------
 
 test('parseReview: accept verdict', () => {
-	const r = parseReview(verdict('accept', { reasoning: 'good' }));
+	const r = parseReview(JSON.parse(verdict('accept', { reasoning: 'good' })));
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.reasoning, 'good');
 });
 
 test('parseReview: revise-edits with edits string', () => {
-	const r = parseReview(verdict('revise-edits', { edits: 'fix the intro' }));
+	const r = parseReview(JSON.parse(verdict('revise-edits', { edits: 'fix the intro' })));
 	assert.equal(r.verdict, 'revise-edits');
 	assert.equal(r.edits, 'fix the intro');
 });
 
 test('parseReview: invalid verdict -> defaults to accept', () => {
-	const r = parseReview(verdict('whatever' as 'accept'));
+	const r = parseReview(JSON.parse(verdict('whatever' as 'accept')));
 	assert.equal(r.verdict, 'accept');
 });
 
-test('parseReview: malformed JSON -> accept (safe default)', () => {
+test('parseReview: non-object input -> accept (safe default)', () => {
+	// plans/structured-output.md Phase C.7. parseReview now takes the
+	// already-parsed value from completeStructured; a string lands in
+	// the "shape invalid -> accept" branch.
 	const r = parseReview('not json');
 	assert.equal(r.verdict, 'accept');
-	assert.match(r.reasoning ?? '', /parse failure/);
-});
-
-test('parseReview: markdown-fenced JSON unwraps', () => {
-	const r = parseReview('```json\n' + verdict('revise-edits', { edits: 'x' }) + '\n```');
-	assert.equal(r.verdict, 'revise-edits');
+	assert.match(r.reasoning ?? '', /shape invalid/);
 });
 
 // ---------------------------------------------------------------------------
@@ -224,15 +241,18 @@ test('revise-major after a revise-edits cycle: escalates with current revised ma
 // LLM contract
 // ---------------------------------------------------------------------------
 
-test('LLM contract: review calls send responseFormat=json + disableThinking + temp=0', async () => {
+test('LLM contract: review calls go through completeStructured + disableThinking + temp=0', async () => {
+	// plans/structured-output.md Phase C.7. Review verdicts now flow
+	// through provider.completeStructured (the wire layer enforces the
+	// JSON Schema).
 	const { provider, calls } = scriptedProvider([verdict('accept')]);
 	await reviewSection({ todo, candidate: 'x', findings, provider });
-	assert.equal(calls[0]!.opts.responseFormat, 'json');
+	assert.equal(calls[0]!.method, 'completeStructured');
 	assert.equal(calls[0]!.opts.disableThinking, true);
 	assert.equal(calls[0]!.opts.temperature, 0);
 });
 
-test('LLM contract: revise call does NOT send responseFormat=json (output is markdown)', async () => {
+test('LLM contract: revise call stays on complete (output is markdown)', async () => {
 	const { provider, calls } = scriptedProvider([
 		verdict('revise-edits', { edits: 'x' }),
 		'# Revised\n',
@@ -240,7 +260,7 @@ test('LLM contract: revise call does NOT send responseFormat=json (output is mar
 	]);
 	await reviewSection({ todo, candidate: 'x', findings, provider });
 	// Calls: 0 = review, 1 = revise, 2 = review.
-	assert.equal(calls[1]!.opts.responseFormat, undefined);
+	assert.equal(calls[1]!.method, 'complete');
 	assert.equal(calls[1]!.opts.disableThinking, true);
 	assert.equal(calls[1]!.opts.temperature, 0);
 });
