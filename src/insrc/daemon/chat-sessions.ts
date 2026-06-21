@@ -1,447 +1,186 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 /**
- * Chat session pool — manages active daemon-hosted agent sessions.
+ * Chat session pool -- generic transport for daemon-hosted chat sessions.
  *
- * Each session holds a Session object (context manager, providers, turn history),
- * a DaemonChannel, and an AbortController. Sessions idle for >30 minutes are
- * automatically closed.
+ * Scrubbed during the cleanup from a 447-line agent-coupled pool down to
+ * a minimal session registry. Each session is a tiny `ChatSession` shell
+ * (id + repoPath). Idle sessions are evicted after 30 minutes; the most
+ * recently touched session is protected from idle eviction so the IDE
+ * doesn't lose state under the user's cursor.
+ *
+ * No agent state, no context manager, no channel/abortController, no
+ * injected-message queue, no file/PDF caches. The next backend
+ * (Ollama-with-tools) attaches its own per-session state in a sibling
+ * registry without modifying this file.
  */
 
 import { randomUUID } from 'node:crypto';
-import { Session } from '../agent/session.js';
-import { loadConfigForRepo } from '../agent/config.js';
-import { DaemonChannel } from './channel.js';
-import { getLogger } from '../shared/logger.js';
-import { getSessionById, getTurnsForSession, saveSession } from '../db/conversations.js';
+
+import { ChatSession } from './session.js';
 import { getDb } from '../db/client.js';
-import { SessionFileCache } from './file-cache.js';
-import { SessionPDFCache } from './pdf-processor.js';
+import { getSessionById, saveSession } from '../db/conversations.js';
+import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('chat-sessions');
 
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const CLEANUP_INTERVAL_MS = 60 * 1000;  // check every minute
+const IDLE_TIMEOUT_MS    = 30 * 60 * 1000; // 30 minutes
+const CLEANUP_INTERVAL_MS = 60 * 1000;     // check every minute
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** User-contributed idea pushed via `brainstorm.addIdea` (Item 14). */
-export interface InjectedIdea {
-  title: string;
-  body: string;
-}
 
 export interface ActiveSession {
-  id: string;
-  session: Session;
-  channel: DaemonChannel | null;       // null when no agent is running
-  abortController: AbortController | null;
-  agentRunning: boolean;
-  lastStep: string | null;
-  createdAt: number;
-  lastActivityAt: number;
-  /** Free-text messages injected by the user mid-pipeline (via chat.inject). */
-  injectedMessages: string[];
-  /** User-contributed brainstorm ideas queued for insertion at the next
-   *  controller tick (via brainstorm.addIdea). */
-  injectedIdeas: InjectedIdea[];
-  /** Per-session file cache for referenced files. */
-  fileCache: SessionFileCache;
-  /** Per-session PDF cache for extracted text. */
-  pdfCache: SessionPDFCache;
+	id:              string;
+	session:         ChatSession;
+	createdAt:       number;
+	lastActivityAt:  number;
 }
 
 export interface SessionInfo {
-  id: string;
-  repo: string;
-  agentRunning: boolean;
-  lastStep: string | null;
-  pendingGateId: string | undefined;
-  idleSeconds: number;
+	id:           string;
+	repo:         string;
+	idleSeconds:  number;
 }
+
 
 // ---------------------------------------------------------------------------
 // Session Pool
 // ---------------------------------------------------------------------------
 
 export class ChatSessionPool {
-  private readonly sessions = new Map<string, ActiveSession>();
-  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+	private readonly sessions = new Map<string, ActiveSession>();
+	private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
-    // Start periodic idle cleanup
-    this.cleanupTimer = setInterval(() => this.cleanupIdle(), CLEANUP_INTERVAL_MS);
-  }
+	constructor() {
+		this.cleanupTimer = setInterval(() => this.cleanupIdle(), CLEANUP_INTERVAL_MS);
+	}
 
-  /**
-   * Create a new chat session for a repo.
-   * Initializes Session object with config, context manager, and providers.
-   */
-  async create(repoPath: string): Promise<string> {
-    const sessionId = randomUUID();
-    const config = await loadConfigForRepo(repoPath);
+	async create(repoPath: string): Promise<string> {
+		const sessionId = randomUUID();
+		const session = new ChatSession({ id: sessionId, repoPath });
 
-    // Pass the pool's session id into Session so `session.id` matches the
-    // browser-facing ActiveSession.id. Without this the Session constructor
-    // generates its own separate UUID and any downstream consumer that keys
-    // on `session.id` (checkpoint filenames -- Item 7) diverges from what
-    // the client knows the session as. `restore()` already threads the id
-    // through this way; create() was the gap.
-    const session = new Session({ repoPath, config, id: sessionId });
-    await session.init();
+		try {
+			const db = await getDb();
+			await saveSession(db, {
+				id:      sessionId,
+				repo:    repoPath,
+				summary: '',
+				agent:   'chat',
+				status:  'active',
+			});
+		} catch (err) {
+			log.error({ err, sessionId }, 'failed to persist session row on create');
+		}
 
-    // Persist the session row immediately (plans/session-lifecycle.md
-    // Phase 1). Writing at create time means Resume + agent.list never
-    // need to fall back to parsing the checkpoint for repo / agent --
-    // the DB row is authoritative from the start. Status begins as
-    // 'active'; the pipeline transitions it to 'paused' on checkpoint
-    // and 'completed' on finalize.
-    try {
-      const db = await getDb();
-      await saveSession(db, {
-        id:      sessionId,
-        repo:    repoPath,
-        summary: '',
-        agent:   'chat',
-        status:  'active',
-      });
-    } catch (err) {
-      // Non-fatal: the pool-side state still works. Log loudly because
-      // a failed DB write here breaks Resume for this session.
-      log.error({ err, sessionId }, 'failed to persist session row on create');
-    }
+		const active: ActiveSession = {
+			id:             sessionId,
+			session,
+			createdAt:      Date.now(),
+			lastActivityAt: Date.now(),
+		};
+		this.sessions.set(sessionId, active);
+		log.info({ sessionId, repo: repoPath }, 'chat session created');
+		return sessionId;
+	}
 
-    const active: ActiveSession = {
-      id: sessionId,
-      session,
-      channel: null,
-      abortController: null,
-      agentRunning: false,
-      lastStep: null,
-      createdAt: Date.now(),
-      lastActivityAt: Date.now(),
-      injectedMessages: [],
-      injectedIdeas: [],
-      fileCache: new SessionFileCache(),
-      pdfCache: new SessionPDFCache(),
-    };
+	async restore(sessionId: string): Promise<string | null> {
+		if (this.sessions.has(sessionId)) {
+			return sessionId;
+		}
+		const db = await getDb();
+		const sessionRecord = await getSessionById(db, sessionId);
+		if (sessionRecord === null) {
+			log.warn({ sessionId }, 'session not found in DB for restore');
+			return null;
+		}
+		const session = new ChatSession({ id: sessionId, repoPath: sessionRecord.repo });
+		const active: ActiveSession = {
+			id:             sessionId,
+			session,
+			createdAt:      Date.now(),
+			lastActivityAt: Date.now(),
+		};
+		this.sessions.set(sessionId, active);
+		log.info({ sessionId, repo: sessionRecord.repo }, 'chat session restored from DB');
+		return sessionId;
+	}
 
-    this.sessions.set(sessionId, active);
-    log.info({ sessionId, repo: repoPath }, 'chat session created');
-    return sessionId;
-  }
+	get(sessionId: string): ActiveSession | undefined {
+		const s = this.sessions.get(sessionId);
+		if (s) s.lastActivityAt = Date.now();
+		return s;
+	}
 
-  /**
-   * Restore a persisted session from DB into the active pool.
-   * Hydrates the ContextManager with L2 summary, L3a recent turns, and L3b semantic history.
-   * Returns the sessionId if successful, null if not found in DB.
-   */
-  async restore(sessionId: string): Promise<string | null> {
-    // Already active? Just return it.
-    if (this.sessions.has(sessionId)) {
-      log.info({ sessionId }, 'session already active');
-      return sessionId;
-    }
+	drop(sessionId: string): void {
+		if (!this.sessions.delete(sessionId)) return;
+		log.info({ sessionId }, 'chat session dropped');
+	}
 
-    const db = await getDb();
+	async close(sessionId: string): Promise<boolean> {
+		const s = this.sessions.get(sessionId);
+		if (!s) return false;
+		try { await s.session.close(); }
+		catch (err) { log.warn({ sessionId, error: String(err) }, 'error closing session'); }
+		this.sessions.delete(sessionId);
+		log.info({ sessionId }, 'chat session closed');
+		return true;
+	}
 
-    // 1. Look up session — try sessions table first, fall back to turns
-    const sessionRecord = await getSessionById(db, sessionId);
-    const turns = await getTurnsForSession(db, sessionId);
+	list(): SessionInfo[] {
+		const now = Date.now();
+		const result: SessionInfo[] = [];
+		for (const s of this.sessions.values()) {
+			result.push({
+				id:          s.id,
+				repo:        s.session.repoPath,
+				idleSeconds: Math.floor((now - s.lastActivityAt) / 1000),
+			});
+		}
+		return result;
+	}
 
-    // Determine repo from session record or from turns
-    const repo = sessionRecord?.repo ?? (turns.length > 0 ? turns[0]!.repo : undefined);
-    if (!repo) {
-      log.warn({ sessionId }, 'session not found in DB for restore');
-      return null;
-    }
+	status(sessionId: string): SessionInfo | null {
+		const s = this.sessions.get(sessionId);
+		if (!s) return null;
+		return {
+			id:          s.id,
+			repo:        s.session.repoPath,
+			idleSeconds: Math.floor((Date.now() - s.lastActivityAt) / 1000),
+		};
+	}
 
-    // 2. Create fresh Session with original repo and session ID
-    const config = await loadConfigForRepo(repo);
-    const session = new Session({ repoPath: repo, config, id: sessionId });
-    await session.init();
+	/**
+	 * Periodic idle cleanup. Most recently touched session is protected
+	 * (never closed regardless of idle duration); all others past
+	 * `IDLE_TIMEOUT_MS` are closed normally.
+	 */
+	private cleanupIdle(): void {
+		const now = Date.now();
+		let mostRecentlyTouchedId: string | null = null;
+		let mostRecentTs = -Infinity;
+		for (const [id, s] of this.sessions) {
+			if (s.lastActivityAt > mostRecentTs) {
+				mostRecentTs = s.lastActivityAt;
+				mostRecentlyTouchedId = id;
+			}
+		}
+		for (const [id, s] of this.sessions) {
+			if (id === mostRecentlyTouchedId) continue;
+			if ((now - s.lastActivityAt) <= IDLE_TIMEOUT_MS) continue;
+			log.info({ sessionId: id, idleMinutes: Math.floor((now - s.lastActivityAt) / 60000) }, 'closing idle session');
+			void this.close(id);
+		}
+	}
 
-    // 3. Hydrate context from DB
-    if (sessionRecord?.summary) {
-      session.contextManager.seedSummary(sessionRecord.summary);
-    }
-    if (turns.length > 0) {
-      // Restore L3a (recent turns window)
-      session.contextManager.restoreRecentTurns(
-        turns.map(t => ({ user: t.user, assistant: t.assistant, entities: t.entities })),
-      );
-
-      // Restore L3b (semantic history with embeddings)
-      session.contextManager.hydrateFromHistory(
-        turns.map(t => ({ user: t.user, assistant: t.assistant, entities: t.entities, vector: t.vector })),
-      );
-    }
-
-    session.turnIndex = turns.length;
-
-    // 4. Add to pool
-    const active: ActiveSession = {
-      id: sessionId,
-      session,
-      channel: null,
-      abortController: null,
-      agentRunning: false,
-      lastStep: null,
-      createdAt: Date.now(),
-      lastActivityAt: Date.now(),
-      injectedMessages: [],
-      injectedIdeas: [],
-      fileCache: new SessionFileCache(),
-      pdfCache: new SessionPDFCache(),
-    };
-
-    this.sessions.set(sessionId, active);
-    log.info({ sessionId, repo, turns: turns.length }, 'chat session restored from DB');
-    return sessionId;
-  }
-
-  /**
-   * Get an active session by ID.
-   */
-  get(sessionId: string): ActiveSession | undefined {
-    const s = this.sessions.get(sessionId);
-    if (s) s.lastActivityAt = Date.now();
-    return s;
-  }
-
-  /**
-   * Attach a DaemonChannel to a session (called when chat.send starts).
-   * Returns false if an agent is already running on this session.
-   */
-  attachChannel(sessionId: string, channel: DaemonChannel, abortController: AbortController): boolean {
-    const s = this.sessions.get(sessionId);
-    if (!s) return false;
-    if (s.agentRunning) return false;
-
-    s.channel = channel;
-    s.abortController = abortController;
-    s.agentRunning = true;
-    s.lastActivityAt = Date.now();
-    return true;
-  }
-
-  /**
-   * Mark agent as finished (called when runAgent completes or errors).
-   */
-  detachChannel(sessionId: string): void {
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    s.channel = null;
-    s.abortController = null;
-    s.agentRunning = false;
-    s.lastActivityAt = Date.now();
-  }
-
-  /**
-   * Phase 4 discard (plans/session-lifecycle.md). Aborts any in-flight
-   * agent and evicts the session from the pool. Callers (`agent.discard`
-   * RPC) additionally purge the DB + checkpoint file -- this method is
-   * just the in-memory cleanup.
-   */
-  drop(sessionId: string): void {
-    const s = this.sessions.get(sessionId);
-    if (!s) return;
-    if (s.abortController && !s.abortController.signal.aborted) {
-      s.abortController.abort();
-    }
-    this.sessions.delete(sessionId);
-    log.info({ sessionId }, 'chat session dropped');
-  }
-
-  /**
-   * Queue a free-text message injected by the user mid-pipeline.
-   */
-  pushInjectedMessage(sessionId: string, message: string): void {
-    const s = this.sessions.get(sessionId);
-    if (s) s.injectedMessages.push(message);
-  }
-
-  /**
-   * Drain and return all queued injected messages.
-   */
-  popInjectedMessages(sessionId: string): string[] {
-    const s = this.sessions.get(sessionId);
-    if (!s || s.injectedMessages.length === 0) return [];
-    const msgs = [...s.injectedMessages];
-    s.injectedMessages = [];
-    return msgs;
-  }
-
-  /** Queue a user-contributed idea for insertion at the next controller tick. */
-  pushInjectedIdea(sessionId: string, idea: InjectedIdea): void {
-    const s = this.sessions.get(sessionId);
-    if (s) s.injectedIdeas.push(idea);
-  }
-
-  /** Drain and return all queued injected ideas. */
-  popInjectedIdeas(sessionId: string): InjectedIdea[] {
-    const s = this.sessions.get(sessionId);
-    if (!s || s.injectedIdeas.length === 0) return [];
-    const ideas = [...s.injectedIdeas];
-    s.injectedIdeas = [];
-    return ideas;
-  }
-
-  /**
-   * Update the last step name (for status reporting).
-   */
-  setLastStep(sessionId: string, step: string): void {
-    const s = this.sessions.get(sessionId);
-    if (s) s.lastStep = step;
-  }
-
-  /**
-   * Close a session — persists summary, releases resources.
-   */
-  async close(sessionId: string): Promise<boolean> {
-    const s = this.sessions.get(sessionId);
-    if (!s) return false;
-
-    // Abort if agent is running
-    if (s.agentRunning && s.abortController) {
-      s.abortController.abort();
-    }
-
-    try {
-      await s.session.close();
-    } catch (err) {
-      log.warn({ sessionId, error: String(err) }, 'error closing session');
-    }
-
-    this.sessions.delete(sessionId);
-    log.info({ sessionId }, 'chat session closed');
-    return true;
-  }
-
-  /**
-   * List all active sessions with status info.
-   */
-  list(): SessionInfo[] {
-    const now = Date.now();
-    const result: SessionInfo[] = [];
-    for (const s of this.sessions.values()) {
-      result.push({
-        id: s.id,
-        repo: s.session.repoPath,
-        agentRunning: s.agentRunning,
-        lastStep: s.lastStep,
-        pendingGateId: s.channel?.pendingGateId,
-        idleSeconds: Math.floor((now - s.lastActivityAt) / 1000),
-      });
-    }
-    return result;
-  }
-
-  /**
-   * Get session status (for chat.status RPC).
-   */
-  status(sessionId: string): SessionInfo | null {
-    const s = this.sessions.get(sessionId);
-    if (!s) return null;
-    const now = Date.now();
-    return {
-      id: s.id,
-      repo: s.session.repoPath,
-      agentRunning: s.agentRunning,
-      lastStep: s.lastStep,
-      pendingGateId: s.channel?.pendingGateId,
-      idleSeconds: Math.floor((now - s.lastActivityAt) / 1000),
-    };
-  }
-
-  /**
-   * Periodic maintenance pass.
-   *
-   * Two policies:
-   *
-   *   1. **Active session (most recently touched in the pool):
-   *      NEVER closed.** Regardless of idle duration. This is the
-   *      session the user is actively using in the IDE; closing it
-   *      would destroy in-memory context, the channel, and the
-   *      L4 task scratch. Instead, periodically `persistSummary()`
-   *      so the L2 summary lands in LMDB + Lance for crash recovery
-   *      without stopping the session. `persistSummary()` is
-   *      idempotent and a no-op when there is no summary yet.
-   *
-   *   2. **Other sessions past `IDLE_TIMEOUT_MS`: closed normally.**
-   *      `close()` itself persists the summary as part of teardown,
-   *      so closing a stale session is the right "clean it up"
-   *      semantic. Sessions with an agent currently running are
-   *      always skipped.
-   */
-  private cleanupIdle(): void {
-    const now = Date.now();
-
-    // Identify the protected session (most recently touched).
-    let mostRecentlyTouchedId: string | null = null;
-    let mostRecentTs = -Infinity;
-    for (const [id, s] of this.sessions) {
-      if (s.lastActivityAt > mostRecentTs) {
-        mostRecentTs = s.lastActivityAt;
-        mostRecentlyTouchedId = id;
-      }
-    }
-
-    for (const [id, s] of this.sessions) {
-      const isActive = id === mostRecentlyTouchedId;
-
-      if (isActive) {
-        // Active session: keep it alive, but periodically persist its
-        // L2 summary so a daemon crash doesn't lose it. Wrapped in
-        // try/catch so a transient persist failure doesn't take out
-        // the timer; we'll try again on the next tick.
-        s.session.persistSummary().catch(err => {
-          log.warn({ sessionId: id, err: String(err) }, 'periodic persistSummary failed (continuing)');
-        });
-        continue;
-      }
-
-      if (s.agentRunning) continue;
-      if ((now - s.lastActivityAt) <= IDLE_TIMEOUT_MS) continue;
-
-      log.info({ sessionId: id, idleMinutes: Math.floor((now - s.lastActivityAt) / 60000) }, 'closing idle session');
-      void this.close(id);
-    }
-  }
-
-  /**
-   * Hot-reload config for all active sessions.
-   * Skips sessions with an agent currently running.
-   */
-  async reloadConfig(): Promise<number> {
-    let reloaded = 0;
-    for (const [id, s] of this.sessions) {
-      if (s.agentRunning) {
-        log.info({ sessionId: id }, 'skipping config reload — agent running');
-        continue;
-      }
-      try {
-        const newConfig = await loadConfigForRepo(s.session.repoPath);
-        s.session.reloadConfig(newConfig);
-        reloaded++;
-        log.info({ sessionId: id }, 'config reloaded');
-      } catch (err) {
-        log.warn({ sessionId: id, error: String(err) }, 'config reload failed');
-      }
-    }
-    return reloaded;
-  }
-
-  /**
-   * Dispose — close all sessions and stop cleanup timer.
-   */
-  async dispose(): Promise<void> {
-    if (this.cleanupTimer) {
-      clearInterval(this.cleanupTimer);
-      this.cleanupTimer = null;
-    }
-    for (const id of this.sessions.keys()) {
-      await this.close(id);
-    }
-  }
+	async dispose(): Promise<void> {
+		if (this.cleanupTimer) {
+			clearInterval(this.cleanupTimer);
+			this.cleanupTimer = null;
+		}
+		for (const id of this.sessions.keys()) {
+			await this.close(id);
+		}
+	}
 }

@@ -1,11 +1,19 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 /**
  * Builtin tools -- registration aggregator.
  *
  * One entry point for daemon/index.ts. Each domain plugs in via its
  * `registerXTools()` call; every domain registers unconditionally.
- * Per-action permission gates (approval, fs-access, cross-agent
- * depth) handle authorisation; we don't double-gate at registry
- * lookup time.
+ *
+ * Cleanup: removed `diff`, `plan`, `artifact`, `skills`, `llm-aliases`.
+ * The diff + plan + artifact tools were agent-orchestration-specific;
+ * the skills tool wrapped the dead skill registry; the llm-aliases
+ * mapped legacy LLM names (Read/Grep/Bash/...) onto canonical tool
+ * ids, which the next backend can reintroduce if needed.
  */
 
 import { registerGitTools } from './git/index.js';
@@ -17,45 +25,31 @@ import { registerSshTools } from './ssh/index.js';
 import { registerHttpTools } from './http/index.js';
 import { registerK8sTools } from './k8s/index.js';
 import { registerCloudTools } from './cloud/index.js';
-import { registerDiffTools } from './diff/index.js';
 import { registerNotifyTools } from './notify/index.js';
 import { registerTestTools } from './test/index.js';
 import { registerPkgTools } from './pkg/index.js';
 import { registerWebTools } from './web/index.js';
 import { registerGraphTools } from './graph/index.js';
-import { registerPlanTools } from './plan/index.js';
-import { registerArtifactTools } from './artifact/index.js';
 import { registerDbTools } from './db/index.js';
 import { registerDataTools } from './data/index.js';
 import { registerCodeTools } from './code/index.js';
-import { registerSkillTools } from './skills/invoke-skill.js';
-import { registerLlmAliases } from './llm-aliases.js';
 
 export function registerBuiltinTools(): void {
-  registerGitTools();
-  registerFileTools();
-  registerShellTools();
-  registerSearchTools();
-  registerGhTools();
-  registerSshTools();
-  registerHttpTools();
-  registerK8sTools();
-  registerCloudTools();
-  registerDiffTools();
-  registerNotifyTools();
-  registerTestTools();
-  registerPkgTools();
-  registerWebTools();
-  registerGraphTools();
-  registerPlanTools();
-  registerArtifactTools();
-  registerDbTools();
-  registerDataTools();
-  registerCodeTools();
-  registerSkillTools();
-
-  // Legacy LLM-name aliases (Read / Grep / Bash / WebSearch / ...)
-  // run last; they're alias-only and no-op against tools whose
-  // canonical id wasn't registered.
-  registerLlmAliases();
+	registerGitTools();
+	registerFileTools();
+	registerShellTools();
+	registerSearchTools();
+	registerGhTools();
+	registerSshTools();
+	registerHttpTools();
+	registerK8sTools();
+	registerCloudTools();
+	registerNotifyTools();
+	registerTestTools();
+	registerPkgTools();
+	registerWebTools();
+	registerGraphTools();
+	registerDbTools();
+	registerDataTools();
+	registerCodeTools();
 }

@@ -186,12 +186,12 @@ export async function removeRepo(_db: DbClient, path: string): Promise<void> {
 	const { deleteEntitiesForRepo } = await import('./entities.js');
 	const { deleteUnresolvedForRepo } = await import('./relations.js');
 	const { deleteSessionsForRepo } = await import('./conversations.js');
-	const { deletePlansForRepo } = await import('../agent/tasks/plan-store.js');
+	// Cleanup: deletePlansForRepo (agent/tasks/plan-store) was the legacy
+	// agent planner storage -- gone with the agent subsystem.
 
 	await deleteEntitiesForRepo(null, path);
 	await deleteUnresolvedForRepo(null, path);
 	await deleteSessionsForRepo(null, path);
-	await deletePlansForRepo(null, path);
 
 	await withWriteTxn(s => {
 		const id = findRepoIdByPath(s, path);

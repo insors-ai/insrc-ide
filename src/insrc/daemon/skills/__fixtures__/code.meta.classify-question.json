@@ -1,9 +1,0 @@
-{
-  "input": {
-    "question": "describe this repository",
-    "repo":     { "path": "/repo/alpha", "primaryLanguages": ["typescript"] }
-  },
-  "expectedConfidenceFloor": "low",
-  "expectedConfidence": "low",
-  "_comment": "Smoke gate: skill declares preconditions: required-tools [skill_describe]. Feasibility short-circuits at confidence 'low' without fakeTools. Happy-path coverage (with a fakeProvider returning canned JSON) lives in code.meta.test.ts."
-}

@@ -1,7 +1,0 @@
-{
-  "input": {
-    "repoPath": "/repo/nonexistent-fixture-repo"
-  },
-  "expectedConfidenceFloor": "high",
-  "_comment": "Smoke gate uses an unregistered repo path so listEntitiesForRepo returns []. The skill treats this cleanly as `{found: false, reason: 'repo-not-indexed'}` with confidence 'high'. Happy-path coverage lives in code.source.describe.test.ts."
-}

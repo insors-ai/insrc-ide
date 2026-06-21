@@ -1,7 +1,0 @@
-{
-  "input": {
-    "entityId": "00000000000000000000000000000000"
-  },
-  "expectedConfidenceFloor": "high",
-  "_comment": "Smoke gate: synthetic entity id -> not in graph -> `{found: false, reason: 'entity-not-found'}` with confidence 'high'. Happy-path coverage lives in code.entity.test.ts."
-}

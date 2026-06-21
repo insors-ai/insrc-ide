@@ -1,7 +1,0 @@
-{
-  "input": {
-    "repoPath": "/repo/nonexistent-fixture-repo"
-  },
-  "expectedConfidenceFloor": "low",
-  "_comment": "Smoke gate: empty graph slice -> no files -> early-return `{fileCount: 0, cycleCount: 0}` with confidence 'low'. Happy-path coverage lives in code.quality.test.ts."
-}

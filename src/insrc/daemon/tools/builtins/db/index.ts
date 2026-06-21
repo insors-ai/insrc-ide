@@ -130,7 +130,7 @@ async function requireRepoPath(
 	toolId: string,
 	deps: ToolDeps,
 ): Promise<string | ToolResult> {
-	const repoPath = deps.session.repoPath;
+	const repoPath = deps.repoPath;
 	if (repoPath === undefined || repoPath === '') {
 		return fail(toolId, 'No active repo on the session; db:* tools need a repoPath', 'NO_ACTIVE_REPO');
 	}

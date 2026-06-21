@@ -1,7 +1,0 @@
-{
-  "input": {
-    "name": "__fixture_entity_with_no_match__"
-  },
-  "expectedConfidenceFloor": "medium",
-  "_comment": "Smoke gate: synthetic name -> empty matches -> confidence 'medium' (locate-by-name treats no-match as medium, distinct from a high-confidence found). Happy-path coverage lives in code.entity.test.ts."
-}

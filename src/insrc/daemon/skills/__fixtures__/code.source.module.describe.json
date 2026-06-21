@@ -1,8 +1,0 @@
-{
-  "input": {
-    "modulePath": "/repo/nonexistent-fixture-repo/src",
-    "repoPath":   "/repo/nonexistent-fixture-repo"
-  },
-  "expectedConfidenceFloor": "high",
-  "_comment": "Smoke gate: unregistered repo path -> empty graph slice -> `{found: false, reason: 'no-files-in-module'}` with confidence 'high'. Happy-path coverage lives in code.source.describe.test.ts."
-}

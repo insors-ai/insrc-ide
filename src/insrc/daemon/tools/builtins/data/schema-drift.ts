@@ -136,7 +136,7 @@ export const dataSchemaDriftTool: Tool = {
 			return fail('connectionId and target are required');
 		}
 
-		const repoPath = deps.session.repoPath;
+		const repoPath = deps.repoPath;
 		if (repoPath.length === 0) {
 			return fail('session has no active repo; cannot resolve the connection');
 		}

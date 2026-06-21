@@ -1,152 +1,152 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
 /**
  * Unified Tool type.
  *
- * A Tool is a single capability invoked via two entry paths:
- *   - LLM tool-call (via the tool-loop)
- *   - Controller task (`kind: 'tool'`)
- *
- * Both paths share this contract, the registry, and the executor so
- * approval gating, schema validation, and progress streaming happen in
- * one place regardless of who invoked the tool.
+ * A Tool is a single capability. Tools are invoked by whatever loop
+ * happens to be in front of them -- an LLM tool-call loop, a direct
+ * IPC handler, or a CLI subcommand. Cleanup-scrubbed from the previous
+ * agent-coupled contract: `ToolDeps.session: Session` (rich agent
+ * Session with context manager + provider resolver + access store) was
+ * replaced with the minimal `ToolContext { repoPath, send, requestId,
+ * signal, todos? }`. Access-gate fields + `AccessPolicy` were removed
+ * along with `shared/access.ts`; the next backend can reintroduce
+ * gating in a generic form when tool-loop wiring lands.
  */
 
-import type { Session } from '../../agent/session.js';
-import type { IpcStreamMessage } from '../../shared/types.js';
-import type { DaemonChannel } from '../channel.js';
-import type { GateAction } from '../../agent/framework/types.js';
+import type { IpcStreamMessage, LLMProvider } from '../../shared/types.js';
 import type { TodosApi } from '../../shared/todos.js';
-import type { AccessPolicy } from '../../shared/access.js';
+
 
 // ---------------------------------------------------------------------------
 // Tool contract
 // ---------------------------------------------------------------------------
 
 export type ToolFormat =
-  | 'text' | 'markdown' | 'code' | 'json' | 'diff' | 'table';
+	| 'text' | 'markdown' | 'code' | 'json' | 'diff' | 'table';
 
 export interface ToolInput { [key: string]: unknown }
 
 export interface ToolResult {
-  /** Rendered output surfaced to the caller and persisted on agent turns. */
-  output: string;
-  /** Render hint for the UI. */
-  format: ToolFormat;
-  /** True when execution completed without an error. */
-  success: boolean;
-  /** Error message when success is false. */
-  error?: string | undefined;
-  /**
-   * Optional structured payload for callers that want more than a string
-   * (e.g. web-search exposing its result list to the LLM for further
-   * reasoning without re-parsing the rendered text).
-   */
-  data?: unknown;
+	/** Rendered output surfaced to the caller. */
+	output: string;
+	/** Render hint for the UI. */
+	format: ToolFormat;
+	/** True when execution completed without an error. */
+	success: boolean;
+	/** Error message when success is false. */
+	error?: string | undefined;
+	/**
+	 * Optional structured payload for callers that want more than a string
+	 * (e.g. web-search exposing its result list to the LLM for further
+	 * reasoning without re-parsing the rendered text).
+	 */
+	data?: unknown;
 }
 
 export interface ToolDeps {
-  session: Session;
-  /**
-   * Channel for approval gate resolution. Optional: when absent, the
-   * executor logs and auto-approves (matches the legacy delegate fallback).
-   */
-  channel?: DaemonChannel | undefined;
-  /** Stream-message emitter for progress / gate events. */
-  send: (msg: IpcStreamMessage) => void;
-  /** IPC request id -- used to correlate stream events. */
-  requestId: number;
-  /**
-   * Cancellation signal. Tools that run long operations should respect this.
-   * Defaults to a non-aborting signal when the caller does not supply one.
-   */
-  signal?: AbortSignal | undefined;
-  /**
-   * Pre-built TodosApi scoped to the calling agent's family (or
-   * `'chat'` for LLM tool-loop turns without an active controller).
-   * Tools that persist to TODO-framework storage should read through
-   * this rather than constructing their own instance -- the caller
-   * owns `caller` attribution, not the tool. Optional for backward
-   * compatibility with existing tool call sites that don't know
-   * about it; new tools should assume it's present in production.
-   */
-  todos?: TodosApi | undefined;
+	/** Active session id. Used by tools that maintain per-session state. */
+	sessionId: string;
+	/** Workspace root for the current invocation. */
+	repoPath: string;
+	/** Stream-message emitter for progress events. */
+	send: (msg: IpcStreamMessage) => void;
+	/** IPC request id -- used to correlate stream events. */
+	requestId: number;
+	/** Cancellation signal. Tools that run long operations should respect this. */
+	signal?: AbortSignal | undefined;
+	/**
+	 * Pre-built TodosApi scoped to a caller-owned `caller` namespace
+	 * (e.g. 'chat'). Tools that persist to TODO-framework storage should
+	 * read through this rather than constructing their own instance.
+	 */
+	todos?: TodosApi | undefined;
+	/**
+	 * Local Ollama provider for tools that embed (graph_search, artifact
+	 * search, data lineage). Optional because not every tool needs an
+	 * LLM; tools that depend on it should null-check and emit a clear
+	 * error when missing.
+	 */
+	ollamaProvider?: LLMProvider | undefined;
+	/**
+	 * Transitive repo-dependency closure for the current session. Used
+	 * by graph/lineage tools to scope queries across dependent repos.
+	 * Optional; tools that depend on it default to a single-repo query
+	 * when missing.
+	 */
+	closureRepos?: readonly string[] | undefined;
 }
 
 export interface ToolApprovalGate {
-  title: string;
-  content: string;
-  actions: GateAction[];
+	title: string;
+	content: string;
+	/**
+	 * Free-form action descriptors. The cleanup removed the strict
+	 * `GateAction` shape; this widens to `Record<string, unknown>` so
+	 * existing tool builtins (~110 files) keep their declarations
+	 * verbatim. The next backend's gate dispatcher will pin a concrete
+	 * action shape when it lands.
+	 */
+	actions: ReadonlyArray<Record<string, unknown>>;
 }
 
 export interface Tool {
-  /** Unique canonical ID. Namespacing convention: 'domain:action'. */
-  readonly id: string;
+	/** Unique canonical ID. Namespacing convention: 'domain:action'. */
+	readonly id: string;
 
-  /** One-sentence description -- surfaced to the LLM and to the gate UI. */
-  readonly description: string;
+	/** One-sentence description -- surfaced to the LLM and to the gate UI. */
+	readonly description: string;
 
-  /**
-   * JSON Schema for the input. Used both to advertise the tool to the LLM
-   * and to validate controller-supplied input before execute() runs.
-   * Schema validation is enforced by the executor (stage 2+).
-   */
-  readonly inputSchema: Record<string, unknown>;
+	/**
+	 * JSON Schema for the input. Used both to advertise the tool to the LLM
+	 * and to validate input before execute() runs. Schema validation is
+	 * enforced by the executor.
+	 */
+	readonly inputSchema: Record<string, unknown>;
 
-  /**
-   * When truthy, the executor fires an Approve / Skip / Edit gate before
-   * calling execute(). A predicate lets a tool opt in per-input (e.g.
-   * shell:exec auto-runs low-risk commands, gates higher-risk ones).
-   */
-  readonly requiresApproval?: boolean | ((input: ToolInput) => boolean);
+	/**
+	 * When truthy, the executor fires an Approve / Skip / Edit gate before
+	 * calling execute(). A predicate lets a tool opt in per-input (e.g.
+	 * shell:exec auto-runs low-risk commands, gates higher-risk ones).
+	 *
+	 * Gate semantics are deferred to the next backend; the field is
+	 * preserved as metadata for now.
+	 */
+	readonly requiresApproval?: boolean | ((input: ToolInput) => boolean);
 
-  /**
-   * Optional alias IDs. Lets legacy tool names (Read, Bash, WebSearch, ...)
-   * resolve to the canonical entry during migration. Aliases are preferred
-   * over duplicate registrations.
-   */
-  readonly aliases?: readonly string[];
+	/**
+	 * Optional alias IDs. Lets legacy tool names (Read, Bash, WebSearch, ...)
+	 * resolve to the canonical entry during migration. Aliases are preferred
+	 * over duplicate registrations.
+	 */
+	readonly aliases?: readonly string[];
 
-  /**
-   * Flags the tool as destructive / irreversible (terminate VM, drop
-   * database, recursive rm, force push to protected branch). The
-   * executor applies a second "Are you sure?" approval gate after the
-   * normal one when `insrc.tools.destructive.requireDoubleConfirm` is
-   * on, even if the tool already verified an in-band confirmation
-   * token (confirmBucket, confirmCount, confirmService, ...).
-   */
-  readonly destructive?: boolean;
+	/** Flags the tool as destructive / irreversible. The next backend may apply additional confirms. */
+	readonly destructive?: boolean;
 
-  /**
-   * Universal Access Gate declaration (plans/access-gate.md). A tool
-   * that touches an EXTERNAL RESOURCE (DB, filesystem, cloud API,
-   * shell, network host) declares its access requirement here; the
-   * executor's gate dispatcher (Phase 2) consults Session.access on
-   * every call and fires a gate UI on miss. Tools that only read
-   * daemon-internal state (registry queries, list_connections,
-   * config getters) leave this undefined -- the dispatcher's
-   * `if (tool.access)` check short-circuits and the call runs
-   * ungated.
-   *
-   * Distinct from `requiresApproval`: that flag triggers a generic
-   * per-call confirm; `access` is keyed on a real-world resource and
-   * caches approvals across calls in the same session via the
-   * AccessStore. Both can coexist on the same tool.
-   */
-  readonly access?: AccessPolicy;
+	/**
+	 * Universal Access Gate declaration -- legacy metadata field. The
+	 * `AccessPolicy` type and the access store the executor consulted
+	 * were both removed in the cleanup. The field is preserved on the
+	 * Tool surface (widened to `unknown`) so the ~110 surviving tool
+	 * builtins keep their declarations verbatim; the next backend may
+	 * either repurpose this field or define a fresh access surface.
+	 */
+	readonly access?: unknown;
 
-  /**
-   * Build the approval gate shown to the user. The default gate is
-   * generic -- tools that care should override to show query / command /
-   * diff previews. May be async when the gate needs live repo / cluster
-   * state (e.g. git:amend checking if HEAD has already been pushed).
-   */
-  buildApprovalGate?(input: ToolInput): ToolApprovalGate | Promise<ToolApprovalGate>;
+	/**
+	 * Build the approval gate shown to the user. The default gate is
+	 * generic -- tools that care should override to show query / command /
+	 * diff previews.
+	 */
+	buildApprovalGate?(input: ToolInput): ToolApprovalGate | Promise<ToolApprovalGate>;
 
-  /**
-   * Apply the user's Edit feedback to input before re-gating. Default
-   * behavior: replace input.query with the feedback text.
-   */
-  applyEdit?(input: ToolInput, feedback: string): ToolInput;
+	/** Apply the user's Edit feedback to input before re-gating. */
+	applyEdit?(input: ToolInput, feedback: string): ToolInput;
 
-  /** Do the work. */
-  execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult>;
+	/** Do the work. */
+	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult>;
 }

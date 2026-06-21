@@ -170,7 +170,7 @@ export const dataLineageTool: Tool = {
 		const rawLimit = typeof input['limit'] === 'number' ? input['limit'] : DEFAULT_LIMIT;
 		const limit = Math.max(1, Math.min(MAX_LIMIT, Math.floor(rawLimit)));
 
-		const closure = deps.session.closureRepos;
+		const closure = deps.closureRepos ?? [];
 		if (closure.length === 0) {
 			return fail('session has no closure repos initialised; cannot search the code knowledge graph');
 		}

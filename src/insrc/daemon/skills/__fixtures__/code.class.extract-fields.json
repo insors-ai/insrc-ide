@@ -1,8 +1,0 @@
-{
-  "input": {
-    "className": "FixtureClass"
-  },
-  "expectedConfidenceFloor": "low",
-  "expectedConfidence": "low",
-  "_comment": "Smoke gate: skill declares preconditions: required-tools [code_class_locate, code_class_fields]. Without fakeTools the harness doesn't register them, so feasibility short-circuits with `precondition-failed` at confidence 'low'. Happy-path coverage lives in code.class.extract-fields.test.ts."
-}

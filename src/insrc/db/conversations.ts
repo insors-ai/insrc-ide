@@ -565,14 +565,11 @@ export async function deleteSessionsForRepo(_db: DbClient, repo: string): Promis
 	// caller of the spill purge -- see the doc-comment on
 	// `purgeSession` for the rationale (sessions are persistent
 	// otherwise; only repo removal wipes their spills).
-	const { purgeSessionById } = await import('../agent/artifacts/spill-writer.js');
-	// Same cascade: drop per-session response-segment embeddings used
-	// by the intent classifier's memory retrieval. Scoped per-session
-	// (no `repo` column on response_segment_vec) so we loop alongside
-	// purgeSessionById.
+	// Cleanup: purgeSessionById (agent/artifacts/spill-writer) was the
+	// per-session artifact-spill cleanup -- gone with the agent subsystem.
+	// response_segment_vec rows are still purged below.
 	const { deleteResponseSegmentsForSession } = await import('./lance/response-segment-vec.js');
 	for (const id of ids) {
-		await purgeSessionById(id);
 		await deleteResponseSegmentsForSession(id);
 	}
 

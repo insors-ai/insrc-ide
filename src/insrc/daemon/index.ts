@@ -64,11 +64,6 @@ process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', r
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { closeDuckDB } from './db/duckdb-pool.js';
 import {
-	analyzerStatus,
-	deleteAnalyzerDb,
-	closeAllAnalyzerPools,
-} from './db/duckdb-analyzer-pool.js';
-import {
 	listRepos, addRepo, removeRepo,
 	InvalidRepoPathError, validateRepoPath,
 } from '../db/repos.js';
@@ -117,10 +112,8 @@ import {
 	type TurnRecord,
 } from '../db/conversations.js';
 import { compactConversations, type CompactionOpts } from '../db/compaction.js';
-import {
-	savePlan, getPlan, getActivePlan, updateStepState, getNextStep, deletePlan, deletePlansForRepo, resetStaleLocks,
-} from '../agent/tasks/plan-store.js';
-import type { RegisteredRepo, DaemonStatus, Entity, Plan, PlanStepStatus, ConfigScope, ConfigSearchOpts, TemplateQuery } from '../shared/types.js';
+// Cleanup: plan-store + Plan / PlanStepStatus dropped with the legacy planner.
+import type { RegisteredRepo, DaemonStatus, Entity, ConfigScope, ConfigSearchOpts, TemplateQuery } from '../shared/types.js';
 import { basename } from 'node:path';
 import { ConfigStore } from '../config/store.js';
 import { searchConfig, resolveTemplate } from '../config/search.js';
@@ -213,8 +206,7 @@ async function main(): Promise<void> {
 	// moves `~/.insrc/<category>/pair|delegate/` dirs under
 	// `.../implementation/`. Runs before DB init so downstream loaders
 	// see a consistent view.
-	const { migrateAgentFamilyRename } = await import('./agent-family-migration.js');
-	migrateAgentFamilyRename();
+	// Phase 1 cleanup: agent-family-migration gone with the agent subsystem.
 
 	// 3. Open DB
 	const db = await getDb();
@@ -430,11 +422,10 @@ async function main(): Promise<void> {
 			await indexer.removeRepo(path);
 			await deleteEntitiesForRepo(db, path);
 			await deleteUnresolvedForRepo(db, path);
-			await deletePlansForRepo(db, path);
 			await deleteSessionsForRepo(db, path);
 			await deleteTurnsForRepo(db, path);
 			await removeRepo(db, path);
-			log.info({ repo: path }, 'repo removed (entities + relations + plans + sessions + turns purged)');
+			log.info({ repo: path }, 'repo removed (entities + relations + sessions + turns purged)');
 			return { ok: true };
 		},
 
@@ -576,74 +567,10 @@ async function main(): Promise<void> {
 			return runs;
 		},
 
-		'agent.resume': async (params) => {
-			const { id } = params as { id: string };
-			const { readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
-			const { join } = await import('node:path');
-			const { CHECKPOINT_SCHEMA_VERSION } = await import('./task.js');
-			const { getSessionById } = await import('../db/conversations.js');
-
-			// Phase 3 + Phase 6 (plans/session-lifecycle.md): validate both
-			// the DB row and the checkpoint before handing off to
-			// chat.resumeFromCheckpoint. Returning a structured reason code
-			// here means the Runs sidebar surfaces a clear error before a
-			// stream is opened (otherwise the user sees a cancelBrainstormSession
-			// bounce that's hard to interpret).
-			const row = await getSessionById(db, id);
-			if (!row) {
-				return {
-					ok: false,
-					reason: 'no-session-row',
-					message: `Session ${id} has no DB row. Discard to clean up any orphan checkpoint.`,
-				};
-			}
-			if (row.status === 'discarded' || row.status === 'completed') {
-				return {
-					ok: false,
-					reason: 'terminal-status',
-					message: `Session ${id} is ${row.status}; nothing to resume.`,
-					controllerId: row.agent,
-				};
-			}
-
-			// Checkpoint filename matches `${row.agent}-${id}.json`. Legacy
-			// files with a different controller prefix aren't resumable under
-			// Phase 3's DB-authoritative rules -- user should Discard.
-			const checkpointFile = join(PATHS.insrc, 'checkpoints', `${row.agent}-${id}.json`);
-			if (!existsFs(checkpointFile)) {
-				return {
-					ok: false,
-					reason: 'no-checkpoint',
-					message: `No checkpoint file for session ${id}. Discard to clean up.`,
-					controllerId: row.agent,
-				};
-			}
-			try {
-				const raw = JSON.parse(readFs(checkpointFile, 'utf-8')) as Record<string, unknown>;
-				const schemaVersion = raw['schemaVersion'] as number | undefined;
-				// Decision I2: refuse when the checkpoint's schema doesn't match
-				// the daemon's. Client surfaces a Discard-only message; we do
-				// NOT best-effort rehydrate.
-				if (schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
-					return {
-						ok: false,
-						reason: 'schema-drift',
-						message: `Checkpoint schema ${schemaVersion ?? 'unknown'} cannot be resumed by this daemon (current ${CHECKPOINT_SCHEMA_VERSION}). Discard to continue.`,
-						controllerId: row.agent,
-					};
-				}
-				return {
-					ok: true,
-					sessionId: id,
-					controllerId: row.agent,
-					// The browser then opens chat.resumeFromCheckpoint to actually
-					// stream the rehydrated pipeline.
-					message: `Use chat.resumeFromCheckpoint with sessionId=${id}`,
-				};
-			} catch (err) {
-				return { ok: false, reason: 'read-failed', message: `Checkpoint read failed: ${(err as Error).message}` };
-			}
-		},
+		// Phase 1 cleanup: agent.resume returned a checkpoint-validity
+		// signal for the chat.resumeFromCheckpoint stream. Both surfaces
+		// are gone with the agent framework; the RPC returns offline.
+		'agent.resume': offlineRpc('agent.resume'),
 
 		'agent.discard': async (params) => {
 			const { id } = params as { id: string };
@@ -994,63 +921,18 @@ async function main(): Promise<void> {
 			return getConversationStats(db, repo);
 		},
 
-		// ----- Plan graph (Phase 6) -----
-
-		'plan.save': async (params) => {
-			const plan = params as Plan;
-			await savePlan(db, plan);
-			return { ok: true };
-		},
-
-		'plan.get': async (params) => {
-			const { planId, repoPath } = params as { planId?: string; repoPath?: string };
-			if (planId) return getPlan(db, planId);
-			if (repoPath) return getActivePlan(db, repoPath);
-			return null;
-		},
-
-		'plan.step_update': async (params) => {
-			const { stepId, status, note } = params as {
-				stepId: string; status: PlanStepStatus; note?: string;
-			};
-			return updateStepState(db, stepId, status, note);
-		},
-
-		'plan.next_step': async (params) => {
-			const { planId } = params as { planId: string };
-			return getNextStep(db, planId);
-		},
-
-		'plan.delete': async (params) => {
-			const { planId } = params as { planId: string };
-			await deletePlan(db, planId);
-			return { ok: true };
-		},
-
-		// Underscore aliases — match tool names from registry (LLM tool calls)
-		'plan_get': async (params) => {
-			const { repo } = params as { repo?: string };
-			if (repo) return getActivePlan(db, repo);
-			return null;
-		},
-
-		'plan_step_update': async (params) => {
-			const { step_id, status, note } = params as {
-				step_id: string; status: PlanStepStatus; note?: string;
-			};
-			return updateStepState(db, step_id, status, note);
-		},
-
-		'plan_next_step': async (params) => {
-			const { planId } = params as { planId: string };
-			return getNextStep(db, planId);
-		},
-
-		'plan.reset_stale': async (params) => {
-			const { planId } = params as { planId: string };
-			const count = await resetStaleLocks(db, planId);
-			return { reset: count };
-		},
+		// ----- Plan graph -----
+		// Phase 1 cleanup: legacy plan-store + plan.* RPCs gone with the
+		// planner agent. All return `backend offline`.
+		'plan.save':         offlineRpc('plan.save'),
+		'plan.get':          offlineRpc('plan.get'),
+		'plan.step_update':  offlineRpc('plan.step_update'),
+		'plan.next_step':    offlineRpc('plan.next_step'),
+		'plan.delete':       offlineRpc('plan.delete'),
+		'plan_get':          offlineRpc('plan_get'),
+		'plan_step_update':  offlineRpc('plan_step_update'),
+		'plan_next_step':    offlineRpc('plan_next_step'),
+		'plan.reset_stale':  offlineRpc('plan.reset_stale'),
 
 		// ----- File re-index (Phase 7) -----
 
@@ -1131,54 +1013,10 @@ async function main(): Promise<void> {
 			];
 		},
 
-		// Return all agent step bindings (defaults + config overrides)
-		'config.agents': async () => {
-			const { pairAgent } = await import('../agent/tasks/pair/agent.js');
-			const { delegateAgent } = await import('../agent/tasks/delegate/agent.js');
-			const { plannerAgent } = await import('../agent/planner/agent.js');
-			const { designerAgent } = await import('../agent/tasks/designer/agent.js');
-			const { brainstormAgent } = await import('../agent/tasks/brainstorm/agent.js');
-			const { testerAgent } = await import('../agent/tasks/tester/agent.js');
-
-			const allAgents = [pairAgent, delegateAgent, plannerAgent, designerAgent, brainstormAgent, testerAgent];
-
-			// Read current config overrides
-			let overrides: Record<string, Record<string, string>> = {};
-			try {
-				const raw = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
-				const models = raw['models'] as Record<string, unknown> | undefined;
-				overrides = (models?.['agents'] ?? {}) as Record<string, Record<string, string>>;
-			} catch { /* no config */ }
-
-			// Default bindings: steps using resolveOrNull -> claude, others -> local
-			const CLAUDE_STEPS: Record<string, string[]> = {
-				pair: ['validate'],
-				delegate: ['validate'],
-				planner: ['enhance'],
-				designer: ['enhance', 'review'],
-				brainstorm: ['validate-seed', 'validate-convergence', 'review-spec'],
-				tester: ['validate-plan', 'validate-tests', 'review-tests'],
-			};
-
-			const result: Record<string, Record<string, string>> = {};
-			for (const agent of allAgents) {
-				const ns = agent.configNamespace ?? agent.id;
-				const displayId = agent.id; // Use agent.id for display (e.g. 'brainstorm' not 'common')
-				const steps = Object.keys(agent.steps);
-				const agentOverrides = overrides[ns] ?? {};
-				const claudeSteps = CLAUDE_STEPS[ns] ?? [];
-				const stepBindings: Record<string, string> = {};
-				for (const step of steps) {
-					if (typeof agentOverrides[step] === 'string') {
-						stepBindings[step] = agentOverrides[step];
-					} else {
-						stepBindings[step] = claudeSteps.includes(step) ? 'anthropic' : 'local';
-					}
-				}
-				result[displayId] = stepBindings;
-			}
-			return result;
-		},
+		// Phase 1 cleanup: agent step bindings RPC gone with the agent
+		// framework. IDE Model Providers pane no longer surfaces per-step
+		// overrides under the cleanup.
+		'config.agents': offlineRpc('config.agents'),
 
 		'config.show': async () => {
 			try {
@@ -1323,21 +1161,8 @@ async function main(): Promise<void> {
 		// never lazy-inits the pool (read-only stat); reset closes the
 		// pool + deletes the .db + .db.wal so the next analyzer call
 		// recreates an empty DB.
-		'analyzer.status': async (params) => {
-			const { workspaceRoot } = params as { workspaceRoot: string };
-			if (typeof workspaceRoot !== 'string' || workspaceRoot.length === 0) {
-				return { error: 'workspaceRoot is required' };
-			}
-			return analyzerStatus(workspaceRoot);
-		},
-
-		'analyzer.reset': async (params) => {
-			const { workspaceRoot } = params as { workspaceRoot: string };
-			if (typeof workspaceRoot !== 'string' || workspaceRoot.length === 0) {
-				return { error: 'workspaceRoot is required' };
-			}
-			return deleteAnalyzerDb(workspaceRoot);
-		},
+		'analyzer.status': offlineRpc('analyzer.status'),
+		'analyzer.reset':  offlineRpc('analyzer.reset'),
 
 		// Tool settings snapshot -- pushed by the IDE on connect and on
 		// settings changes. Daemon holds the snapshot in memory; tools
@@ -1354,38 +1179,16 @@ async function main(): Promise<void> {
 		},
 
 		// ---- Providers RPC ----
-		'providers.listModels': async (params) => {
-			const { listModelsForProvider } = await import('./providers.js');
-			const { provider } = (params ?? {}) as { provider: import('../shared/types.js').ProviderName };
-			return listModelsForProvider(provider);
-		},
-
-		'providers.testKey': async (params) => {
-			const { testProviderKey } = await import('./providers.js');
-			const { provider } = (params ?? {}) as { provider: import('../shared/types.js').ProviderName };
-			return testProviderKey(provider);
-		},
-
-		'providers.getConfig': async () => {
-			const { getProvidersConfig } = await import('./providers.js');
-			return getProvidersConfig();
-		},
-
-		'providers.setConfig': async (params) => {
-			const { setProvidersConfig } = await import('./providers.js');
-			const patch = (params ?? {}) as Partial<import('../shared/types.js').AgentConfig['models']>;
-			const result = await setProvidersConfig(patch);
-			await reloadChatConfig();
-			return result;
-		},
-
-		'providers.check': async () => {
-			const { checkConfigured } = await import('./providers.js');
-			const { loadConfigWithKeys } = await import('../agent/config.js');
-			const cfg = await loadConfigWithKeys();
-			const err = checkConfigured(cfg);
-			return err ?? { ok: true };
-		},
+		// Phase 1 cleanup: daemon/providers.ts gone with the 4 cloud
+		// REST providers + multi-provider config. The Models pane in the
+		// IDE gets a slimmer surface in Phase 6 (Ollama + claude/codex
+		// CLI auth status). Until then these return offline so the pane
+		// shows a clean error and the user can switch panes.
+		'providers.listModels': offlineRpc('providers.listModels'),
+		'providers.testKey':    offlineRpc('providers.testKey'),
+		'providers.getConfig':  offlineRpc('providers.getConfig'),
+		'providers.setConfig':  offlineRpc('providers.setConfig'),
+		'providers.check':      offlineRpc('providers.check'),
 
 		// Chat session management (standard handlers). Transport-only after
 		// Phase 1 cleanup -- chat.start/cancel/inject/close/list/status/restore
@@ -1638,7 +1441,6 @@ async function main(): Promise<void> {
 			const { closeLanceConn  } = await import('../db/lance/conn.js');
 			await closeDb();
 			await closeDuckDB();
-			await closeAllAnalyzerPools();
 			await closeGraphStore();
 			await closeLanceConn();
 			clearPid();

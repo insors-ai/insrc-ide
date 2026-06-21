@@ -11,7 +11,7 @@ import type {
   ToolDefinition,
   ToolCall,
 } from '../../shared/types.js';
-import { loadConfig } from '../config.js';
+import { loadLocalProviderConfig } from '../../config/local.js';
 import { getLogger } from '../../shared/logger.js';
 import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
 
@@ -28,13 +28,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Lazy defaults -- calling `loadConfig()` at module load creates a circular
-// init (config.ts imports factory.ts imports this file), so we defer until
-// an OllamaProvider is actually constructed.
-let _localDefaults: import('../../shared/types.js').LocalProviderConfig | undefined;
-function localDefaults(): import('../../shared/types.js').LocalProviderConfig {
+// Lazy defaults from the infra-only `config/local.ts` loader. Lazy
+// because the provider is sometimes constructed before the daemon's
+// config initialization order has settled.
+let _localDefaults: ReturnType<typeof loadLocalProviderConfig> | undefined;
+function localDefaults(): ReturnType<typeof loadLocalProviderConfig> {
   if (!_localDefaults) {
-    _localDefaults = loadConfig().models.providers.local;
+    _localDefaults = loadLocalProviderConfig();
   }
   return _localDefaults;
 }
@@ -153,7 +153,10 @@ export class OllamaProvider implements LLMProvider {
     const d = localDefaults();
     this.model = model ?? d.coreModel;
     host = host ?? d.host;
-    this.numCtx = numCtx ?? d.params[d.coreModel]?.maxInputTokens ?? 16_384;
+    // Cleanup: the per-model `params` lookup was on the old AgentConfig
+    // schema; the new infra-only loader keeps just a single context
+    // window. Callers passing `numCtx` win; otherwise default to 16k.
+    this.numCtx = numCtx ?? 16_384;
     this.embeddingModel = d.embeddingModel;
     this.quirks = modelQuirks(this.model);
     log.info({ model: this.model, family: this.quirks.family, noThinkOnTools: this.quirks.noThinkOnTools, formatWithTools: this.quirks.formatWithTools }, 'ollama provider configured');

@@ -1,8 +1,0 @@
-{
-  "input": {
-    "file":     "/repo/nonexistent-fixture-repo/src/index.ts",
-    "repoPath": "/repo/nonexistent-fixture-repo"
-  },
-  "expectedConfidenceFloor": "high",
-  "_comment": "Smoke gate: file not in graph -> `{found: false, reason: 'file-not-found'}` with confidence 'high'. Happy-path coverage lives in code.source.describe.test.ts."
-}

@@ -1,8 +1,0 @@
-{
-  "input": {
-    "query": "fixture probe -- find nothing in particular",
-    "closureRepos": ["/repo/nonexistent-fixture-repo"]
-  },
-  "expectedConfidenceFloor": "low",
-  "_comment": "Smoke gate: search-by-vector calls embedQuery() against Ollama and queries Lance. Three outcomes the floor accepts: 'low' if Ollama is down, 'medium' if Ollama is up but Lance has no matches, 'high' if Lance returns hits. The fixture's job is to confirm the skill doesn't crash and emits skill-end. Happy-path coverage lives in the dedicated unit test alongside the entity tests."
-}

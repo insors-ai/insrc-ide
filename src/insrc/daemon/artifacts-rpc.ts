@@ -31,12 +31,12 @@ import {
 import {
 	clearTemplateCache,
 	listTemplates,
-} from '../agent/tasks/artifacts/template-loader.js';
+} from './artifacts/template-loader.js';
 import {
 	offlineBundlePath,
 	OFFLINE_CACHE_DIR,
 	sriMatches,
-} from '../agent/tasks/artifacts/offline-bundle.js';
+} from './artifacts/offline-bundle.js';
 
 const log = getLogger('artifacts-rpc');
 

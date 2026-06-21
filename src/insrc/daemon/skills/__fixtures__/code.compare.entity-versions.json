@@ -1,9 +1,0 @@
-{
-  "input": {
-    "entityId": "00000000000000000000000000000001",
-    "baseRef":  "HEAD~1"
-  },
-  "expectedConfidenceFloor": "low",
-  "expectedConfidence": "low",
-  "_comment": "Smoke gate: skill declares preconditions: required-tools [git_diff]. Feasibility short-circuits at confidence 'low' without fakeTools. Happy-path coverage lives in code.compare.test.ts."
-}

@@ -128,7 +128,7 @@ export const graphSearchTool: Tool = {
     const query = str(input, 'query');
     if (!query) { return fail('graph_search', 'query required'); }
     const limit = num(input, 'limit') ?? 10;
-    const closure = deps.session.closureRepos;
+    const closure = [...(deps.closureRepos ?? [])];
     if (closure.length === 0) {
       return fail('graph_search', 'session has no closure repos initialized');
     }

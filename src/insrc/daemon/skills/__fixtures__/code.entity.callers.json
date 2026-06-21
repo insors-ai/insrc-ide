@@ -1,7 +1,0 @@
-{
-  "input": {
-    "entityId": "00000000000000000000000000000000"
-  },
-  "expectedConfidenceFloor": "medium",
-  "_comment": "Smoke gate: synthetic entityId -> empty neighbors -> confidence 'medium' (no callers is a clean answer, just lower-confidence than 'high' which requires neighbors). Happy-path coverage lives in code.entity.test.ts."
-}
