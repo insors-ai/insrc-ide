@@ -13,7 +13,7 @@ import type {
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
-import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
+import { normaliseSchemaForAnthropic, validateAgainstSchema, withStructuredRetry } from './structured-output.js';
 
 const log = getLogger('claude');
 
@@ -330,12 +330,19 @@ export class AnthropicProvider implements LLMProvider {
   ): Promise<T> {
     const { system, apiMessages } = splitMessages(messages);
 
+    // Anthropic's tools[].input_schema requires `type: 'object'` at the
+    // root. TypeBox `Type.Union([Type.Object(...), ...])` renders as a
+    // bare `{ anyOf: [...], title }` -- Anthropic rejects that with
+    // HTTP 400. The normaliser injects the missing `type: 'object'`
+    // when every union branch is itself an object schema. No-op when
+    // the schema already declares a root `type`.
+    const inputSchema = normaliseSchemaForAnthropic(schema);
     const emitTool: Anthropic.Tool = {
       name:         STRUCTURED_TOOL_NAME,
       description:
         'Emit your response through this tool. The input MUST conform '
         + 'to the JSON Schema. Do NOT include any text outside this tool call.',
-      input_schema: schema as Anthropic.Tool.InputSchema,
+      input_schema: inputSchema as Anthropic.Tool.InputSchema,
     };
     const baseRequest = {
       model:       this.model,

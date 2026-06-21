@@ -291,6 +291,39 @@ function isObject(x: unknown): x is Record<string, unknown> {
  * never hit it in production; tests gated on the same flag see a clear
  * "not yet implemented" rather than a malformed response.
  */
+/**
+ * Anthropic's `tools[].input_schema` requires a top-level
+ * `type: 'object'` declaration. TypeBox `Type.Union([Type.Object(...),
+ * ...])` renders as `{ anyOf: [{type:'object', ...}, ...], title }` with
+ * no root `type`, which Anthropic rejects with HTTP 400.
+ *
+ * This adapter clones the schema and injects `type: 'object'` at the
+ * root iff:
+ *   - the root has no `type` field, AND
+ *   - the root is a discriminated union (anyOf / oneOf) whose every
+ *     branch declares `type: 'object'`.
+ *
+ * Anything else is returned unchanged so an upstream-incompatible schema
+ * still surfaces as an API error rather than getting silently rewritten.
+ */
+export function normaliseSchemaForAnthropic(schema: StructuredSchema): StructuredSchema {
+  const root = schema as Record<string, unknown>;
+  if ('type' in root) {
+    return schema;
+  }
+  const branches = (root['anyOf'] ?? root['oneOf']) as unknown;
+  if (!Array.isArray(branches) || branches.length === 0) {
+    return schema;
+  }
+  const allObject = branches.every(b =>
+    b !== null && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'object',
+  );
+  if (!allObject) {
+    return schema;
+  }
+  return { ...root, type: 'object' };
+}
+
 export function notImplementedStructuredOutput(provider: string): never {
 	throw new Error(
 		`structured-output: provider '${provider}' does not implement completeStructured yet. `
