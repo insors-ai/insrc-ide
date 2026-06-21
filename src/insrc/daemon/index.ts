@@ -80,14 +80,32 @@ import { IndexerService } from '../indexer/index.js';
 import { IpcServer } from './server.js';
 import {
 	initChatHandlers, disposeChatHandlers, reloadChatConfig,
-	chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore, brainstormAddIdea,
-	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
+	chatStart, chatCancel, chatInject, chatClose, chatList, chatStatus, chatRestore,
 } from './chat-handler.js';
-import { handoffRunStream } from './handoff-stream.js';
-import { metaTaskRunStream } from './meta-task-stream.js';
-import { gateRequestPermissionStream, gateResolveRpc, handoffModeAResolveRpc } from './gate-handlers.js';
-import { handoffListOrphansRpc, handoffDiscardOrphanRpc, handoffCleanupRpc } from './orphan-handlers.js';
-import { detectOrphans } from '../handoff/orphan-cleanup.js';
+// Phase 1 cleanup: handoff-stream, meta-task-stream, gate-handlers, orphan-handlers,
+// the chat agent-flow exports (chatReply, chatRedirect, brainstormAddIdea, chatSend,
+// chatResume + variants), and handoff/orphan-cleanup detectOrphans all return
+// `backend offline` via the inline helpers below. Their backing files get deleted
+// in Phase 2-3.
+
+import type { RpcHandler, StreamHandler } from './server.js';
+
+const BACKEND_OFFLINE_REASON =
+	'backend offline: this RPC was removed during the cleanup. The next backend (Ollama + CLI subprocess) will reinstate the surface.';
+
+function offlineRpc(method: string): RpcHandler {
+	return async () => ({ error: `${BACKEND_OFFLINE_REASON} (method=${method})`, recoverable: false });
+}
+
+function offlineStream(method: string): StreamHandler {
+	return async (_params, send) => {
+		// id=0 is a sentinel; the IDE renders the error directly without
+		// needing to correlate to a request. Same shape every other
+		// StreamHandler used; the `0` is just a placeholder for "no
+		// running request to correlate against."
+		send({ id: 0, stream: 'error', data: { error: `${BACKEND_OFFLINE_REASON} (method=${method})`, recoverable: false } });
+	};
+}
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
@@ -247,70 +265,11 @@ async function main(): Promise<void> {
 	const { registerBuiltinDataDrivers } = await import('./db/drivers/index.js');
 	registerBuiltinDataDrivers();
 
-	// PHASE 1: DELETE -- cross-agent (code/data analyzer tools) goes
-	// with daemon/cross-agent/.
-	// 6d. Register cross-agent surface (plans/analyzers/code-analyzer.md
-	//     Phase 3). The Code Analyzer exposes `code_locate` / `code_trace`
-	//     / `code_describe` for sibling analyzer families to dispatch
-	//     into. Phase 4 of plans/analyzers/data-analyzer.md adds the
-	//     symmetrical `data_*` registrations alongside.
-	const { registerCodeAnalyzerCrossAgentTools, registerDataAnalyzerCrossAgentTools } = await import('./cross-agent/index.js');
-	registerCodeAnalyzerCrossAgentTools();
-	registerDataAnalyzerCrossAgentTools();
-
-	// PHASE 1: DELETE -- skill registry goes with daemon/skills/.
-	// 6e. Register the skill registry (plans/analyzers/skills-core.md).
-	//     Skills depend on tools (toolDeps) so this runs strictly after
-	//     all tool / cross-agent registrations. The bootstrap is
-	//     dependency-aware: atomic skills register before composites
-	//     so the registry's sub-skill check passes. v1 ships one
-	//     migration target -- data.lineage.read-write-callsites -- as
-	//     proof of substrate; per-family build-outs land in
-	//     plans/analyzers/data-analyzer-skills.md.
-	const { registerAllSkills } = await import('./skills/index.js');
-	registerAllSkills();
-
-	// PHASE 1: DELETE -- prompt writers go with agent/prompts/.
-	// Phase 0 of plans/section-flow-architecture-redesign.md: every
-	// section-flow LLM prompt is built by a registered PromptWriter.
-	// Registration mirrors the skill-catalog pattern -- one entrypoint,
-	// called once at daemon boot, idempotent only across fresh
-	// registries (tests reset between cases).
-	const { registerAllPromptWriters } = await import('../agent/prompts/index.js');
-	registerAllPromptWriters();
-
-	// PHASE 1: DELETE (entire block lines 282-298) -- substrate +
-	// preferences hook + ollama provider construction for the classifier
-	// all go with daemon/substrate/, prefs-confirm.ts, and agent/.
-	// memory-context M1.5: daemon-wide substrate runtime + `agent:chat`
-	// owner. Holds the user-assertion classifier (Ollama-backed Layer 2 hook),
-	// the assertion index, and the memory store. Chat-handler invokes
-	// `runtime.classifyAssertion(turn)` per user turn (M1.5 continuation).
-	const { OllamaProvider } = await import('../agent/providers/ollama.js');
-	const localCfg = (await import('../agent/config.js')).loadConfig().models.providers.local;
-	const localProvider = new OllamaProvider(
-		localCfg.coreModel,
-		localCfg.host,
-		localCfg.params[localCfg.coreModel]?.maxInputTokens ?? 16_384,
-	);
-	const { initSubstrateRuntime, registerAgentChatOwner } = await import('./substrate/singleton.js');
-	// M1.6.a: install the Layer 3 staging hook so low-confidence Layer 2
-	// accepts land in the pending namespace + fire the IDE-bound event
-	// instead of being silently deferred.
-	const { createPendingConfirmHook } = await import('./prefs-confirm.js');
-	const substrate = initSubstrateRuntime({
-		localProvider,
-		userConfirm: createPendingConfirmHook(),
-	});
-	registerAgentChatOwner(substrate);
-
-	// PHASE 1: DELETE -- meta-task templates go with meta-task/.
-	// memory-context M3.3: register meta-task template owners with the
-	// substrate so chat-captured preferences fan out to matching
-	// templates' user-assertions namespaces. Templates that were
-	// imported before the substrate booted get caught up here.
-	const { registerKnownTemplatesWithSubstrate } = await import('../meta-task/templates/index.js');
-	registerKnownTemplatesWithSubstrate();
+	// Phase 1 cleanup: cross-agent / skill registry / prompt writers /
+	// substrate runtime / meta-task template registration all stripped.
+	// Their backing modules (daemon/cross-agent/, daemon/skills/,
+	// daemon/substrate/, agent/prompts/, meta-task/templates/) get
+	// deleted in Phase 2-3. Tools + data drivers still register above.
 
 	// Shared session-purge pipeline. Used by `agent.discard`,
 	// `session.delete`, and `session.deleteBulk` so they don't drift.
@@ -1428,13 +1387,17 @@ async function main(): Promise<void> {
 			return err ?? { ok: true };
 		},
 
-		// Chat session management (standard handlers)
+		// Chat session management (standard handlers). Transport-only after
+		// Phase 1 cleanup -- chat.start/cancel/inject/close/list/status/restore
+		// stay live as session-pool plumbing. chat.reply / chat.redirect /
+		// brainstorm.addIdea wired into the agent routing layer, which is
+		// gone; they return `backend offline`.
 		'chat.start': chatStart,
-		'chat.reply': chatReply,
+		'chat.reply':       offlineRpc('chat.reply'),
 		'chat.cancel': chatCancel,
 		'chat.inject': chatInject,
-		'chat.redirect': chatRedirect,
-		'brainstorm.addIdea': brainstormAddIdea,
+		'chat.redirect':    offlineRpc('chat.redirect'),
+		'brainstorm.addIdea': offlineRpc('brainstorm.addIdea'),
 		'chat.close': chatClose,
 		'chat.list': chatList,
 		'chat.status': chatStatus,
@@ -1501,43 +1464,16 @@ async function main(): Promise<void> {
 			return mod.testConnectionRpc(params as { repoRoot?: unknown; config?: unknown });
 		},
 
-		// Access-gate RPCs (plans/access-gate.md Phase 5.3). Read /
-		// revoke window into Session.access + Session.accessAudit so
-		// the workbench Approvals pane can render the live picture.
-		'access.snapshot': async (params) => {
-			const mod = await import('./access-rpc.js');
-			return mod.snapshotRpc(params as { sessionId?: unknown });
-		},
-		'access.revoke': async (params) => {
-			const mod = await import('./access-rpc.js');
-			return mod.revokeRpc(params as { sessionId?: unknown; kind?: unknown; key?: unknown });
-		},
-		'access.revokePrefix': async (params) => {
-			const mod = await import('./access-rpc.js');
-			return mod.revokePrefixRpc(params as { sessionId?: unknown; kind?: unknown; prefix?: unknown });
-		},
-
-		// Skill registry RPCs (plans/analyzers/skills-core.md Phase 2.3).
-		// Workbench / CLI window into the runSkill pipeline -- the same
-		// pipeline the skill_invoke meta-tool uses from an LLM tool loop.
-		// `skill.audit` ships separately with the per-session ring buffer
-		// covered by Phase 7.2.
-		'skill.list': async () => {
-			const mod = await import('./skills-rpc.js');
-			return mod.listRpc();
-		},
-		'skill.feasibility': async (params) => {
-			const mod = await import('./skills-rpc.js');
-			return mod.feasibilityRpc(params as Parameters<typeof mod.feasibilityRpc>[0]);
-		},
-		'skill.invoke': async (params) => {
-			const mod = await import('./skills-rpc.js');
-			return mod.invokeRpc(params as Parameters<typeof mod.invokeRpc>[0]);
-		},
-		'skill.audit': async (params) => {
-			const mod = await import('./skills-rpc.js');
-			return mod.auditRpc(params as Parameters<typeof mod.auditRpc>[0]);
-		},
+		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
+		// backing files (substrate-coupled access store, skill registry).
+		// Both surfaces return `backend offline` to the workbench panes.
+		'access.snapshot':     offlineRpc('access.snapshot'),
+		'access.revoke':       offlineRpc('access.revoke'),
+		'access.revokePrefix': offlineRpc('access.revokePrefix'),
+		'skill.list':          offlineRpc('skill.list'),
+		'skill.feasibility':   offlineRpc('skill.feasibility'),
+		'skill.invoke':        offlineRpc('skill.invoke'),
+		'skill.audit':         offlineRpc('skill.audit'),
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();
@@ -1551,95 +1487,35 @@ async function main(): Promise<void> {
 			return mod.removeOfflineBundleRpc();
 		},
 
-		// Data Analyzer per-task cache (plans/analyzers/data-analyzer.md
-		// Phase 2.4). Backs the `insrc.dataAnalyzer.clearCache` palette
-		// command. The code-analyzer's per-task cache + clearCache RPC
-		// were dropped along with the legacy analyzer runner.
-		'dataAnalyzer.clearCache': async () => {
-			const mod = await import('../agent/tasks/data-analyzer/cache.js');
-			return mod.clearCache();
-		},
-
-		// Data Analyzer diff-vs-previous-run (plans/analyzers/data-analyzer.md
-		// Phase 5.2). Compares two completed analysis lists and returns a
-		// structured diff over their accepted findings plus a rendered
-		// markdown summary. Backs `insrc.dataAnalyzer.diffWithPrevious`.
-		'dataAnalyzer.diffRuns': async (params) => {
-			const mod = await import('./data-analyzer-diff.js');
-			return mod.diffRunsRpc(params as { priorListId?: unknown; currentListId?: unknown });
-		},
-
-		// Code Analyzer diff-vs-previous-run (plans/analyzers/code-analyzer.md
-		// Phase 4.2). Compares two completed analysis lists; returns a
-		// structured diff over their accepted findings plus a rendered
-		// markdown summary. Backs `insrc.codeAnalyzer.diffWithPrevious`.
-		'codeAnalyzer.diffRuns': async (params) => {
-			const mod = await import('./code-analyzer-diff.js');
-			return mod.diffRunsRpc(params as { priorListId?: unknown; currentListId?: unknown });
-		},
-
-		// Phase 3 Day 2: Mode B gate. The IDE calls this when the user clicks
-		// Allow / Deny in the permission modal. The handler looks up the
-		// gateId in the pending registry and forwards the verdict to the
-		// waiting `gate.request-permission` stream.
-		'gate.resolve': gateResolveRpc,
-
-		// Phase 3 Mode A pre-flight gate. The IDE calls this with the
-		// user's verdict on a `mode-a-gate-request` event the handoff
-		// orchestrator emitted between `spec-ready` and worktree
-		// creation. Resolves the pending entry in mode-a-dispatch;
-		// runHandoff resumes (or aborts on deny).
-		'handoff.mode-a.resolve': handoffModeAResolveRpc,
-
-		// Phase 5 orphan-worktree IPCs. Surface worktree state on disk
-		// to the IDE; the daemon doesn't garbage-collect on its own
-		// because the user may want to inspect / retry an interrupted
-		// run.
-		'handoff.list-orphans':   handoffListOrphansRpc,
-		'handoff.discard-orphan': handoffDiscardOrphanRpc,
-		// Phase 5 user-driven cleanup post-audit. Records the user's
-		// accept / reject / dismissed verdict to disk and removes the
-		// worktree; the IDE fires this from the handoff card.
-		'handoff.cleanup':        handoffCleanupRpc,
-
-		// memory-context M1.7. CRUD over the `agent:chat` owner's
-		// `user-assertions` namespace -- backs the `/prefs` slash
-		// command and (future) IDE-side palette commands.
-		'prefs.list': async (params) => {
-			const mod = await import('./prefs-rpc.js');
-			return mod.prefsListRpc(params);
-		},
-		'prefs.edit': async (params) => {
-			const mod = await import('./prefs-rpc.js');
-			return mod.prefsEditRpc(params);
-		},
-		'prefs.discard': async (params) => {
-			const mod = await import('./prefs-rpc.js');
-			return mod.prefsDiscardRpc(params);
-		},
-
-		// memory-context M1.6.a. Layer 3 confirm staging surface --
-		// list pending entries the user hasn't yet acted on, and
-		// resolve one as accept (promotes to constraint) or discard
-		// (marks pending row as user-discarded; audit trail preserved).
-		'prefs.confirm.list': async () => {
-			const mod = await import('./prefs-confirm.js');
-			return { entries: await mod.listPendingConfirms() };
-		},
-		'prefs.confirm.resolve': async (params) => {
-			const mod = await import('./prefs-confirm.js');
-			return mod.resolvePendingConfirm(params as Parameters<typeof mod.resolvePendingConfirm>[0]);
-		},
+		// Phase 1 cleanup: analyzer caches/diffs + handoff gates +
+		// preferences all return `backend offline`. Their backing files
+		// disappear in Phase 2.
+		'dataAnalyzer.clearCache': offlineRpc('dataAnalyzer.clearCache'),
+		'dataAnalyzer.diffRuns':   offlineRpc('dataAnalyzer.diffRuns'),
+		'codeAnalyzer.diffRuns':   offlineRpc('codeAnalyzer.diffRuns'),
+		'gate.resolve':            offlineRpc('gate.resolve'),
+		'handoff.mode-a.resolve':  offlineRpc('handoff.mode-a.resolve'),
+		'handoff.list-orphans':    offlineRpc('handoff.list-orphans'),
+		'handoff.discard-orphan':  offlineRpc('handoff.discard-orphan'),
+		'handoff.cleanup':         offlineRpc('handoff.cleanup'),
+		'prefs.list':              offlineRpc('prefs.list'),
+		'prefs.edit':              offlineRpc('prefs.edit'),
+		'prefs.discard':           offlineRpc('prefs.discard'),
+		'prefs.confirm.list':      offlineRpc('prefs.confirm.list'),
+		'prefs.confirm.resolve':   offlineRpc('prefs.confirm.resolve'),
 	}, {
-		// Streaming handlers
-		'handoff.run':              handoffRunStream,
-		'meta-task.run':            metaTaskRunStream,
-		'gate.request-permission':  gateRequestPermissionStream,
-		'chat.send': chatSend,
-		'chat.resume': chatResume,
-		'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
-		'chat.resumeCodeAnalysis':   chatResumeCodeAnalysis,
-		'chat.resumeDataAnalysis':   chatResumeDataAnalysis,
+		// Streaming handlers. All agent-driven streams (chat.send, the
+		// chat.resume variants, handoff.run, meta-task.run, gate.request-
+		// permission) emit a single `error` event and close. `todos.subscribe`
+		// + `ollama.pull` remain live.
+		'handoff.run':                 offlineStream('handoff.run'),
+		'meta-task.run':               offlineStream('meta-task.run'),
+		'gate.request-permission':     offlineStream('gate.request-permission'),
+		'chat.send':                   offlineStream('chat.send'),
+		'chat.resume':                 offlineStream('chat.resume'),
+		'chat.resumeFromCheckpoint':   offlineStream('chat.resumeFromCheckpoint'),
+		'chat.resumeCodeAnalysis':     offlineStream('chat.resumeCodeAnalysis'),
+		'chat.resumeDataAnalysis':     offlineStream('chat.resumeDataAnalysis'),
 		'todos.subscribe': todosRpc.subscribe,
 		'ollama.pull': async (params, send, signal) => {
 			const { model } = params as { model: string };
@@ -1666,21 +1542,8 @@ async function main(): Promise<void> {
 	await server.listen();
 	log.info('ready');
 
-	// Phase 5 §5.1: scan for orphaned handoff worktrees from prior
-	// daemon runs. We don't auto-discard; the IDE shows them and
-	// lets the user choose Retry or Discard. Surfaced count is
-	// purely advisory at startup -- the `handoff.list-orphans` RPC
-	// is the live source.
-	try {
-		const orphans = detectOrphans({ persistRoot: PATHS.handoffs });
-		if (orphans.length > 0) {
-			const byStatus = { completed: 0, interrupted: 0, pending: 0 };
-			for (const o of orphans) byStatus[o.status]++;
-			log.info({ total: orphans.length, ...byStatus }, 'orphan worktrees detected at startup');
-		}
-	} catch (err) {
-		log.warn({ err: (err as Error).message }, 'orphan-detection at startup failed; continuing');
-	}
+	// Phase 1 cleanup: orphan-handoff worktree scan stripped along with
+	// handoff/orphan-cleanup. Daemon no longer manages handoffs.
 
 	// 8. Nightly pruning job — runs every 24 hours
 	const PRUNE_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
