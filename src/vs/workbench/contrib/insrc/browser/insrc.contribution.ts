@@ -10,9 +10,7 @@ import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/
 import './media/insrc-shared.css';
 
 // Heroicons outline overrides for selected codicons. Unmapped codicons
-// keep the stock codicon font glyph (fallback via CSS). Regenerate
-// `insrc-icons.css` with `node scripts/build-insrc-icons.mjs` after
-// editing `scripts/insrc-icons-map.json`.
+// keep the stock codicon font glyph (fallback via CSS).
 import './media/insrc-icons.css';
 
 // Service interfaces (common layer - browser safe)
@@ -21,8 +19,7 @@ import '../common/sessionService.js';
 import '../common/workspaceService.js';
 import '../common/repoService.js';
 import '../common/agentRunService.js';
-import { IInsrcChatService } from '../common/chatService.js';
-import '../common/diffService.js';
+import '../common/chatService.js';
 import '../common/configService.js';
 import '../common/keychainService.js';
 import '../common/insrcConfiguration.js';
@@ -31,7 +28,7 @@ import '../common/lspToolService.js';
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';
 
-// Commands: add repo, remove repo, re-index, refresh, resume/discard runs, set step provider
+// Commands: add repo, remove repo, re-index, refresh, resume/discard runs
 import './sidebar/insrcCommands.js';
 
 // Workspace sync: keep Explorer folders in sync with daemon repos
@@ -39,13 +36,7 @@ import { InsrcWorkspaceSyncContribution } from './sidebar/insrcWorkspaceSync.js'
 registerWorkbenchContribution2(InsrcWorkspaceSyncContribution.ID, InsrcWorkspaceSyncContribution, WorkbenchPhase.AfterRestored);
 
 // Ephemeral pane infrastructure: backs notepad / artifacts / report-style
-// panes with a real file under ~/.insrc/tmp/, so VS Code's editor
-// restoration finds a valid resource on restart instead of an
-// unregistered custom-scheme URI (which used to render as an "error
-// pane"). Registered at BlockStartup so the tmp-dir singleton on
-// EphemeralEditorInput is set BEFORE editor restoration deserializes
-// any pane input. The reconciler runs at AfterRestored and prunes
-// orphan files no open editor references.
+// panes with a real file under ~/.insrc/tmp/.
 import { EphemeralPaneInitContribution, EphemeralPaneOrphanReconcilerContribution } from './shared/ephemeralPaneContribution.js';
 registerWorkbenchContribution2(EphemeralPaneInitContribution.ID, EphemeralPaneInitContribution, WorkbenchPhase.BlockStartup);
 registerWorkbenchContribution2(EphemeralPaneOrphanReconcilerContribution.ID, EphemeralPaneOrphanReconcilerContribution, WorkbenchPhase.AfterRestored);
@@ -57,17 +48,9 @@ registerWorkbenchContribution2(InsrcFileDecorationsContribution.ID, InsrcFileDec
 // Chat: register chat panel in auxiliary bar (right sidebar)
 import './chat/chatRegistration.js';
 
-// Diff manager: CodeLens accept/reject/edit on proposed diffs, chat integration
-import { InsrcDiffContribution } from './diff/diffRegistration.js';
-registerWorkbenchContribution2(InsrcDiffContribution.ID, InsrcDiffContribution, WorkbenchPhase.AfterRestored);
-
 // Status bar: daemon/agent status indicator
 import { InsrcStatusBarContribution } from './insrcStatusBar.js';
 registerWorkbenchContribution2(InsrcStatusBarContribution.ID, InsrcStatusBarContribution, WorkbenchPhase.AfterRestored);
-
-// Annotations: code selection + notes, compile to chat context
-import { InsrcAnnotationContribution } from './annotations/annotationManager.js';
-registerWorkbenchContribution2(InsrcAnnotationContribution.ID, InsrcAnnotationContribution, WorkbenchPhase.AfterRestored);
 
 // LSP tool bridge: pushes diagnostics to daemon, handles reverse LSP queries
 import { InsrcLSPToolBridge } from './lspToolBridge.js';
@@ -87,8 +70,6 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { EditorExtensions } from '../../../common/editor.js';
 import { SetupWizardPane } from './setup/setupWizardPane.js';
 import { SetupWizardInput } from './setup/setupWizardInput.js';
-import { StepProviderEditorPane } from './setup/stepProviderEditorPane.js';
-import { StepProviderEditorInput } from './setup/stepProviderEditorInput.js';
 
 const editorPaneRegistry = Registry.as<import('../../../browser/editor.js').IEditorPaneRegistry>(EditorExtensions.EditorPane);
 
@@ -97,51 +78,7 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(SetupWizardInput)],
 );
 
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(StepProviderEditorPane, StepProviderEditorPane.ID, 'Step Providers'),
-	[new SyncDescriptor(StepProviderEditorInput)],
-);
-
-// Brainstorm per-step panes. One pane per gate kind; the flow contribution
-// routes incoming gates to the matching input.
-import { BrainstormIdeasPane } from './brainstorm/step/ideasPane.js';
-import { BrainstormIdeasInput } from './brainstorm/step/ideasInput.js';
-import { BrainstormIdeaChatPane } from './brainstorm/step/ideaChatPane.js';
-import { BrainstormIdeaChatInput } from './brainstorm/step/ideaChatInput.js';
-import { BrainstormIdeaListPane } from './brainstorm/step/ideaListPane.js';
-import { BrainstormIdeaListInput } from './brainstorm/step/ideaListInput.js';
-import { BrainstormThemesPane } from './brainstorm/step/themesPane.js';
-import { BrainstormThemesInput } from './brainstorm/step/themesInput.js';
-import { BrainstormThemeDetailsPane } from './brainstorm/step/themeDetailsPane.js';
-import { BrainstormThemeDetailsInput } from './brainstorm/step/themeDetailsInput.js';
-import { BrainstormPresentationPane } from './brainstorm/step/presentationPane.js';
-import { BrainstormPresentationInput } from './brainstorm/step/presentationInput.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormIdeasPane, BrainstormIdeasPane.ID, 'Brainstorm: Ideas'),
-	[new SyncDescriptor(BrainstormIdeasInput)],
-);
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormIdeaChatPane, BrainstormIdeaChatPane.ID, 'Brainstorm: Discussion'),
-	[new SyncDescriptor(BrainstormIdeaChatInput)],
-);
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormIdeaListPane, BrainstormIdeaListPane.ID, 'Brainstorm: Idea List'),
-	[new SyncDescriptor(BrainstormIdeaListInput)],
-);
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormThemesPane, BrainstormThemesPane.ID, 'Brainstorm: Themes'),
-	[new SyncDescriptor(BrainstormThemesInput)],
-);
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormThemeDetailsPane, BrainstormThemeDetailsPane.ID, 'Brainstorm: Theme Spec'),
-	[new SyncDescriptor(BrainstormThemeDetailsInput)],
-);
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormPresentationPane, BrainstormPresentationPane.ID, 'Brainstorm: Final'),
-	[new SyncDescriptor(BrainstormPresentationInput)],
-);
-
-// Model Providers EditorPane + palette command + NOT_CONFIGURED auto-open
+// Model Providers EditorPane (Ollama + CLI providers after cleanup)
 import { ModelProvidersPane } from './models/modelProvidersPane.js';
 import { ModelProvidersInput } from './models/modelProvidersInput.js';
 import './models/modelProvidersCommands.js';
@@ -150,7 +87,7 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(ModelProvidersInput)],
 );
 
-// Data Sources EditorPane (per-repo db connections) -- plans/data-driver.md phase 2
+// Data Sources EditorPane (per-repo db connections)
 import { DbDriversPane } from './dbDrivers/dbDriversPane.js';
 import { DbDriversInput } from './dbDrivers/dbDriversInput.js';
 import './dbDrivers/dbDriversCommands.js';
@@ -160,19 +97,7 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(DbDriversInput)],
 );
 
-// Access Approvals EditorPane (plans/access-gate.md Phase 5.3) -- live
-// view of the active session's approval state + audit trail.
-import { AccessApprovalsPane } from './access/accessPane.js';
-import { AccessApprovalsInput } from './access/accessInput.js';
-import './access/accessCommands.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(AccessApprovalsPane, AccessApprovalsPane.ID, 'Access Approvals'),
-	[new SyncDescriptor(AccessApprovalsInput)],
-);
-
-// Todos editor pane (plans/todo-framework.md Phase 5a). Read-only review
-// surface for agent-authored todo lists. One pane instance per chat
-// session; opens via the `insrc.todos.open` command.
+// Todos editor pane -- generic todo list surface
 import { TodosEditorPane } from './todos/todosPane.js';
 import { TodosEditorInput } from './todos/todosInput.js';
 import './todos/todosCommands.js';
@@ -181,24 +106,17 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(TodosEditorInput)],
 );
 
-// Artifacts editor pane (plans/artifact-tasks.md section 2.2). Per-session
-// durable surface listing every artifact TodoItem generated by the
-// artifact.* tools. Opens via the `insrc.artifacts.open` command.
+// Artifacts editor pane -- per-session durable artifact list
 import { ArtifactsEditorPane } from './artifacts/artifactsPane.js';
 import { ArtifactsEditorInput } from './artifacts/artifactsInput.js';
 import './artifacts/artifactsCommands.js';
-// Template-override commands (plans/artifact-tasks.md section 2.3).
-// Three palette actions hanging off the IInsrcArtifactsService.
 import './artifacts/templateCommands.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(ArtifactsEditorPane, ArtifactsEditorPane.ID, 'Artifacts'),
 	[new SyncDescriptor(ArtifactsEditorInput)],
 );
 
-// Unified Notepad pane (plans/todo-framework.md Phase 9 follow-up).
-// One pane, two tabs: Draft (Monaco markdown editor) + TODOs (user-
-// owned structured lists). Agents never see user-owned lists unless
-// the user explicitly forwards items via withTodo.
+// Unified Notepad pane -- Draft (markdown editor) + TODOs surface
 import { NotepadEditorPane } from './notepad/notepadPane.js';
 import { NotepadEditorInput } from './notepad/notepadInput.js';
 editorPaneRegistry.registerEditorPane(
@@ -206,93 +124,7 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(NotepadEditorInput)],
 );
 
-// Brainstorm flow: routes gates to the matching per-step editor pane, falling
-// back to the legacy pane for kinds that haven't been migrated yet.
-import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
-import { BrainstormFlowContribution } from './brainstorm/brainstormFlowContribution.js';
-registerWorkbenchContribution2(BrainstormFlowContribution.ID, BrainstormFlowContribution, WorkbenchPhase.AfterRestored);
-
-// Model Providers auto-open: listens for NOT_CONFIGURED from chat.start
-// and opens the pane. If 'local' or 'both' is missing, opens the Local tab;
-// 'provider' missing -> opens Anthropic by default (see pane for rationale).
-class ModelProvidersAutoOpenContribution extends Disposable {
-	static readonly ID = 'insrc.modelProvidersAutoOpen';
-
-	constructor(
-		@IInsrcChatService chatService: IInsrcChatService,
-		@IEditorService private readonly editorService: IEditorService,
-	) {
-		super();
-		this._register(chatService.onDidRequireConfig(({ missing }) => {
-			const startTab = missing === 'provider' ? 'anthropic' : 'local';
-			this.editorService.openEditor(ModelProvidersInput.getInstance(startTab));
-		}));
-	}
-}
-registerWorkbenchContribution2(ModelProvidersAutoOpenContribution.ID, ModelProvidersAutoOpenContribution, WorkbenchPhase.AfterRestored);
-
 // Prompt Notepad: full editor for composing large prompts
 import './notepad/promptNotepadCommands.js';
 import { PromptNotepadContribution } from './notepad/promptNotepadRegistration.js';
 registerWorkbenchContribution2(PromptNotepadContribution.ID, PromptNotepadContribution, WorkbenchPhase.AfterRestored);
-
-// Code Analyzer Report Pane (plans/analyzers/code-analyzer.md Phase 2.1).
-// Ephemeral pane that renders the synthesised analysis report. The
-// flow contribution listens to IInsrcTodosService.onDidChangeList and
-// auto-opens the pane the first time a code-analyzer list in the
-// active session gets a non-empty body. No editor serializer is
-// registered -- the pane is intentionally ephemeral; list.body
-// persists in LanceDB on the daemon side, so re-opening goes
-// through the todos pane's "Open report" action.
-import { AnalysisReportPane } from './code-analyzer/analysisReportPane.js';
-import { AnalysisReportInput } from './code-analyzer/analysisReportInput.js';
-import { CodeAnalyzerFlowContribution } from './code-analyzer/codeAnalyzerFlowContribution.js';
-import { PathUriOpenerContribution } from './code-analyzer/pathUriOpener.js';
-import './code-analyzer/codeAnalyzerCommands.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(AnalysisReportPane, AnalysisReportPane.ID, 'Code Analysis Report'),
-	[new SyncDescriptor(AnalysisReportInput)],
-);
-registerWorkbenchContribution2(CodeAnalyzerFlowContribution.ID, CodeAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
-
-// Data Analyzer Report Pane (plans/analyzers/data-analyzer.md Phase 2.1).
-// Mirror of the Code Analyzer pane: ephemeral pane, auto-opens when the
-// data-analyzer's TodoList gets a non-empty body, no editor serializer
-// (re-open via `insrc.dataAnalyzer.openReport`).
-import { DataAnalysisReportPane } from './data-analyzer/dataAnalysisReportPane.js';
-import { DataAnalysisReportInput } from './data-analyzer/dataAnalysisReportInput.js';
-import { DataAnalyzerFlowContribution } from './data-analyzer/dataAnalyzerFlowContribution.js';
-import { DataConnUriOpenerContribution } from './data-analyzer/dataConnUriOpener.js';
-import './data-analyzer/dataAnalyzerCommands.js';
-import './data-analyzer/dataAnalyzerDbCommands.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(DataAnalysisReportPane, DataAnalysisReportPane.ID, 'Data Analysis Report'),
-	[new SyncDescriptor(DataAnalysisReportInput)],
-);
-registerWorkbenchContribution2(DataAnalyzerFlowContribution.ID, DataAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
-
-// Handoff Report Pane (plans/external-agent-integration.md post-MVP).
-// Mirror of the data-analyzer pane shape: ephemeral, auto-opens when
-// a handoff-owned TodoList's body lands.
-import { HandoffReportPane } from './handoff/handoffReportPane.js';
-import { HandoffReportInput } from './handoff/handoffReportInput.js';
-import { HandoffFlowContribution } from './handoff/handoffFlowContribution.js';
-import './handoff/handoffCommands.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(HandoffReportPane, HandoffReportPane.ID, 'Handoff Report'),
-	[new SyncDescriptor(HandoffReportInput)],
-);
-registerWorkbenchContribution2(HandoffFlowContribution.ID, HandoffFlowContribution, WorkbenchPhase.AfterRestored);
-
-// path: URI opener -- resolves citation links emitted by the synthesise
-// prompt (e.g. `[label](path:src/foo.ts#L42-L58)`) so clicks in the
-// Report Pane and the chat panel actually open the cited file at the
-// cited line instead of falling through silently.
-registerWorkbenchContribution2(PathUriOpenerContribution.ID, PathUriOpenerContribution, WorkbenchPhase.AfterRestored);
-
-// data-conn: URI opener (plans/analyzers/data-analyzer.md Phase 5.6).
-// Resolves data-citation links the data-analyzer's synthesise prompt
-// emits (e.g. `[label](data-conn:dev/public/users?col=email)`) so
-// clicks open the Data Sources pane and surface the parsed citation.
-registerWorkbenchContribution2(DataConnUriOpenerContribution.ID, DataConnUriOpenerContribution, WorkbenchPhase.AfterRestored);
