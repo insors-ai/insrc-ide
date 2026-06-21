@@ -20,10 +20,10 @@
 import * as lancedb from '@lancedb/lancedb';
 
 import { getLanceConn, openOrCreateTable } from './conn.js';
-import { loadConfig } from '../../agent/config.js';
+import { loadLocalProviderConfig } from '../../config/local.js';
 
 const TABLE = 'config_vec';
-const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
+const EMBEDDING_DIM = loadLocalProviderConfig().embeddingDim;
 
 export interface ConfigVecRow {
 	id:        string;

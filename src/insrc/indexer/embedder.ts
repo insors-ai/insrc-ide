@@ -1,9 +1,8 @@
 import { Ollama } from 'ollama';
 import type { Entity } from '../shared/types.js';
-import { loadConfig } from '../agent/config.js';
+import { loadLocalProviderConfig } from '../config/local.js';
 
-const config = loadConfig();
-const _localDefaults = config.models.providers.local;
+const _localDefaults = loadLocalProviderConfig();
 
 export const EMBEDDING_MODEL = _localDefaults.embeddingModel;
 export const EMBEDDING_DIM   = _localDefaults.embeddingDim;

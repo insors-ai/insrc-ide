@@ -247,6 +247,8 @@ async function main(): Promise<void> {
 	const { registerBuiltinDataDrivers } = await import('./db/drivers/index.js');
 	registerBuiltinDataDrivers();
 
+	// PHASE 1: DELETE -- cross-agent (code/data analyzer tools) goes
+	// with daemon/cross-agent/.
 	// 6d. Register cross-agent surface (plans/analyzers/code-analyzer.md
 	//     Phase 3). The Code Analyzer exposes `code_locate` / `code_trace`
 	//     / `code_describe` for sibling analyzer families to dispatch
@@ -256,6 +258,7 @@ async function main(): Promise<void> {
 	registerCodeAnalyzerCrossAgentTools();
 	registerDataAnalyzerCrossAgentTools();
 
+	// PHASE 1: DELETE -- skill registry goes with daemon/skills/.
 	// 6e. Register the skill registry (plans/analyzers/skills-core.md).
 	//     Skills depend on tools (toolDeps) so this runs strictly after
 	//     all tool / cross-agent registrations. The bootstrap is
@@ -267,6 +270,7 @@ async function main(): Promise<void> {
 	const { registerAllSkills } = await import('./skills/index.js');
 	registerAllSkills();
 
+	// PHASE 1: DELETE -- prompt writers go with agent/prompts/.
 	// Phase 0 of plans/section-flow-architecture-redesign.md: every
 	// section-flow LLM prompt is built by a registered PromptWriter.
 	// Registration mirrors the skill-catalog pattern -- one entrypoint,
@@ -275,6 +279,9 @@ async function main(): Promise<void> {
 	const { registerAllPromptWriters } = await import('../agent/prompts/index.js');
 	registerAllPromptWriters();
 
+	// PHASE 1: DELETE (entire block lines 282-298) -- substrate +
+	// preferences hook + ollama provider construction for the classifier
+	// all go with daemon/substrate/, prefs-confirm.ts, and agent/.
 	// memory-context M1.5: daemon-wide substrate runtime + `agent:chat`
 	// owner. Holds the user-assertion classifier (Ollama-backed Layer 2 hook),
 	// the assertion index, and the memory store. Chat-handler invokes
@@ -297,6 +304,7 @@ async function main(): Promise<void> {
 	});
 	registerAgentChatOwner(substrate);
 
+	// PHASE 1: DELETE -- meta-task templates go with meta-task/.
 	// memory-context M3.3: register meta-task template owners with the
 	// substrate so chat-captured preferences fan out to matching
 	// templates' user-assertions namespaces. Templates that were
