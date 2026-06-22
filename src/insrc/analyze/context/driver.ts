@@ -56,7 +56,9 @@ import { loadAnalyzeConfig } from '../../config/analyze.js';
 import { loadLocalProviderConfig } from '../../config/local.js';
 import { executeTool } from '../../daemon/tools/executor.js';
 import type { ToolDeps } from '../../daemon/tools/types.js';
+import { listRepos } from '../../db/repos.js';
 import { getLogger } from '../../shared/logger.js';
+import type { RegisteredRepo } from '../../shared/types.js';
 import type {
 	ContentBlock,
 	LLMMessage,
@@ -173,8 +175,15 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 			: {}),
 	};
 
-	// (3) Cache lookup.
-	const cached = readBundle(runId, cacheKey, opts);
+	// (3) Resolve the scope's repo lastIndexedAt from the registry. Used
+	// for both the cache freshness check below + stamping into meta on
+	// write. `undefined` here means the scope target isn't a registered
+	// repo (e.g. a 'connection' scope ref) -- the cache layer treats
+	// that as "no freshness watermark to check" and skips the check.
+	const currentLastIndexedAt = await resolveRepoLastIndexedAt(inferScopePath(inputs));
+
+	// (4) Cache lookup.
+	const cached = readBundle(runId, cacheKey, opts, currentLastIndexedAt);
 	if (cached !== null) {
 		log.debug(
 			{ runId, mode: invocationMode, shaperId, file: cacheFilePathFor(runId, cacheKey) },
@@ -210,7 +219,10 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 		cfg.shaper.structuredOutputRetries,
 	);
 
-	// (7) Stamp meta + validate.
+	// (7) Stamp meta + validate. `repoLastIndexedAt` carries the registry
+	// watermark we read pre-Ollama-call. The next invocation's cache
+	// read compares against the current watermark to detect a fresh
+	// index cycle.
 	const bundle: AnalyzeContextBundle = {
 		...rawBundle,
 		meta: {
@@ -220,6 +232,7 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 			modelId:       cfg.shaperModel,
 			emptyLayers:   deriveEmptyLayers(rawBundle),
 			schemaVersion: SCHEMA_VERSION,
+			...(currentLastIndexedAt !== undefined ? { repoLastIndexedAt: currentLastIndexedAt } : {}),
 		},
 	};
 
@@ -596,6 +609,75 @@ function inferRepoPath(inputs: RunShaperArgs['inputs']): string {
 	return process.cwd();
 }
 
+/**
+ * For freshness checking, we want the filesystem path that should be
+ * matched against the registry. Differs from inferRepoPath only on
+ * 'connection' kind: there we return an empty string to signal "no
+ * registered repo to check" rather than substituting cwd (which would
+ * accidentally pick up any registered repo containing the process's
+ * working directory).
+ */
+function inferScopePath(inputs: RunShaperArgs['inputs']): string {
+	if ('scopeRef' in inputs) {
+		return (inputs as ClassificationShapeInput).scopeRef.value;
+	}
+	if ('intent' in inputs) {
+		const intent = (inputs as RunShapeInput | TaskShapeInput).intent;
+		if (intent.scopeRef.kind === 'connection') return '';
+		return intent.scopeRef.value;
+	}
+	return '';
+}
+
+/**
+ * Resolve the registry's `lastIndexed` timestamp for the repo that
+ * contains `scopePath`. Returns the ms-epoch value, or `undefined`
+ * when:
+ *   - `scopePath` is empty (e.g. 'connection' scope ref)
+ *   - no registered repo's path is a prefix of `scopePath`
+ *   - the matching repo has no `lastIndexed` yet (never indexed)
+ *
+ * The "containing repo" is the registered repo with the longest
+ * path that is a prefix of `scopePath` (handles nested registered
+ * repos cleanly -- inner wins).
+ *
+ * Errors reading the registry (e.g. graph store not initialised
+ * in a test environment) are swallowed and return `undefined`; the
+ * cache layer then skips the freshness check, falling back to the
+ * key-hash check alone. This is the conservative choice: if we
+ * can't read the registry, we don't pretend the cache is fresh.
+ */
+async function resolveRepoLastIndexedAt(scopePath: string): Promise<number | undefined> {
+	if (scopePath.length === 0) return undefined;
+
+	let repos: readonly RegisteredRepo[];
+	try {
+		repos = await listRepos(null);
+	} catch (err) {
+		log.debug(
+			{ scopePath, err: (err as Error).message },
+			'resolveRepoLastIndexedAt: registry read failed; skipping freshness check',
+		);
+		return undefined;
+	}
+
+	let best: RegisteredRepo | undefined;
+	for (const r of repos) {
+		const isPrefix = scopePath === r.path || scopePath.startsWith(`${r.path}/`);
+		if (!isPrefix) continue;
+		if (best === undefined || r.path.length > best.path.length) {
+			best = r;
+		}
+	}
+
+	if (best === undefined || best.lastIndexed === undefined) {
+		return undefined;
+	}
+
+	const ms = Date.parse(best.lastIndexed);
+	return Number.isNaN(ms) ? undefined : ms;
+}
+
 // ---------------------------------------------------------------------------
 // Test hooks
 // ---------------------------------------------------------------------------
@@ -607,3 +689,5 @@ function inferRepoPath(inputs: RunShaperArgs['inputs']): string {
 export const _stableStringifyForTest = stableStringify;
 export const _classifyOllamaErrorForTest = classifyOllamaError;
 export const _deriveEmptyLayersForTest = deriveEmptyLayers;
+export const _resolveRepoLastIndexedAtForTest = resolveRepoLastIndexedAt;
+export const _inferScopePathForTest = inferScopePath;

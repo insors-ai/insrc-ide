@@ -90,19 +90,24 @@ export function cacheFilePathFor(runId: string, key: CacheKey): string {
  *   2. File is valid JSON with `{ key, bundle }` shape.
  *   3. Stored `key` exactly equals the supplied `key.hash` (defends
  *      against partial writes / shape changes / hand-edited files).
- *
- * Indexer-timestamp invalidation (lastIndexedAt > meta.repoLastIndexedAt)
- * is NOT enforced here -- the driver computes the freshness check
- * before calling this function (it has the registry handle); the cache
- * layer is purely a typed file-system slot.
+ *   4. (When `currentLastIndexedAt` is provided) the cached bundle's
+ *      `meta.repoLastIndexedAt` is >= the registry's current value.
+ *      The driver looks up the registry value before calling read;
+ *      the cache layer treats it as opaque "freshness watermark."
  *
  * `ShapeOpts.bypassCache: true` short-circuits the read (returns null
  * without touching disk). Used by tests to force a rebuild.
+ *
+ * Any of the invalidation paths (key mismatch / shape mismatch /
+ * stale-by-indexer) discard the slot from disk so the next miss-write
+ * lands cleanly. This is intentional: a stale slot is worse than no
+ * slot -- it costs a read every time + a cache miss.
  */
 export function readBundle(
 	runId: string,
 	key:   CacheKey,
 	opts:  ShapeOpts,
+	currentLastIndexedAt?: number,
 ): AnalyzeContextBundle | null {
 	if (opts.bypassCache === true) {
 		return null;
@@ -144,7 +149,50 @@ export function readBundle(
 		return null;
 	}
 
+	// Indexer-timestamp freshness check. If the registry reports a
+	// newer lastIndexedAt than the bundle's recorded value, the bundle
+	// reflects an older view of the indexed graph and must be rebuilt.
+	if (currentLastIndexedAt !== undefined && isStaleByIndexer(parsed.bundle, currentLastIndexedAt)) {
+		log.debug(
+			{
+				path,
+				cached:   parsed.bundle.meta?.repoLastIndexedAt,
+				registry: currentLastIndexedAt,
+			},
+			'cached bundle stale (registry lastIndexedAt advanced); discarding',
+		);
+		safeUnlink(path);
+		return null;
+	}
+
 	return parsed.bundle;
+}
+
+/**
+ * Pure function: is `bundle` stale relative to a registry-reported
+ * lastIndexedAt timestamp? A bundle is stale when the registry's
+ * lastIndexedAt strictly exceeds the bundle's recorded value. Equal
+ * timestamps are NOT stale (rebuilds during the same indexing cycle
+ * remain valid).
+ *
+ * A bundle without `meta.repoLastIndexedAt` is treated as stale -- it
+ * was written by an older code path that didn't stamp the watermark,
+ * so we cannot prove it is current. This is the conservative choice;
+ * the live tests in the framework's outer loop will rebuild instead
+ * of trusting an unstamped bundle.
+ *
+ * Exposed so the driver + tests can pin the invariant without
+ * touching disk.
+ */
+export function isStaleByIndexer(
+	bundle: AnalyzeContextBundle,
+	currentLastIndexedAt: number,
+): boolean {
+	const cached = bundle.meta?.repoLastIndexedAt;
+	if (cached === undefined) {
+		return true;
+	}
+	return currentLastIndexedAt > cached;
 }
 
 /**
