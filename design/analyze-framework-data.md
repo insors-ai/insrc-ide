@@ -18,7 +18,7 @@ The data vertical sits on top of the surviving infrastructure:
 | **Schemas** | Tables / collections / file-shapes; columns / fields / nested types; primary keys, foreign keys, indexes. |
 | **Distributions** | Cardinality, null rates, distinct counts, top-K, value ranges. Sampled per row-count thresholds. |
 | **Relationships** | FK-declared + inferred (column-name match + value-overlap) cross-table / cross-source linkages. |
-| **PII / sensitivity surface** | Column-name pattern matching + value-pattern detection (emails, phone, SSN, credit cards) + LLM-classification of free-text columns. Default-redacted in artefacts. |
+| **PII / sensitivity surface** | Column-name pattern matching + value-pattern detection (emails, phone, SSN, credit cards) + LLM-classification of free-text columns. Findings cite redacted sample values (see PII redaction section below); the context-builder itself does not redact, because the IDE is not expected to have production data access. |
 | **Format conventions** | Encoding (UTF-8 / latin-1), datetime serialization, decimal precision, enum encoding, null sentinels. |
 | **Lineage** | Source → destination flow within the dataset (when materialization metadata is available), and cross-connection lineage from documented joins / fk chains. |
 | **Constraints** | NOT NULLs, UNIQUEs, CHECKs, indexes; their actual enforcement vs declared. |

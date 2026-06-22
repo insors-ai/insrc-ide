@@ -53,21 +53,24 @@ The classifier produces:
 
 ```ts
 {
-  target: 'code' | 'data' | 'infrastructure';
+  target: 'code' | 'data' | 'infra' | 'generic';
   scope: 'XS' | 'S' | 'M' | 'L' | 'XL';
-  focused: boolean;                    // generic vs focused
+  focused: boolean;                    // generic-question vs focused-question
   focus?: string;                      // when focused, the concrete question
                                        // ("messaging patterns", "PII", "where do
                                        //  cron jobs live", ...)
   scopeRef: {                          // what the user pointed at
-    kind: 'repo' | 'module' | 'file' | 'symbol' | 'connection' | 'manifest-dir';
+    kind: 'repo' | 'module' | 'file' | 'symbol' | 'connection' | 'manifest-dir' | 'workspace';
     value: string;                     // path / id / connection name
   };
   reasoning: string;                   // 1-2 sentences explaining the bucket choice
 }
 ```
 
-Generic intent (`focused: false`) → produce a full understanding map. Focused intent (`focused: true`) → produce a map narrowed to the focus, with explicit "out of focus" sections collapsed.
+Two orthogonal axes:
+
+- **`target`** dispatches to a per-target shaper (and per-target template family). `target='generic'` means the request is multi-lens — typically "analyze this repo" against a workspace that has code + data + infra surfaces — and routes to the **generic-shaper** for the run-level bundle. Task-level dispatch always routes by task family namespace (`code.* → code-shaper`, `data.* → data-shaper`, `infra.* → infra-shaper`), so generic-target runs produce per-task contexts via the appropriate per-target shaper.
+- **`focused`** controls the planner's narration: generic-question (`focused: false`) → full understanding map for the chosen target. Focused-question (`focused: true`) → map narrowed to the focus, with out-of-focus sections collapsed.
 
 ### Citations — canonical shape
 
@@ -183,17 +186,32 @@ The recursion is shown by the arrow back to Context Builder. Every planner-templ
 
 ## Flow
 
-### 1. Classify
+### 1. Build classification context
 
-LLM call (small, local Ollama) emits the `{ target, scope, focused, focus?, scopeRef, reasoning }` shape above. The user message + any path the user surfaced (e.g. `/analyze src/foo.ts`) is the input. Validation: target ∈ enum, scope ∈ enum, scopeRef.kind matches target (a `connection` scope on a `code` target gets rejected).
+Before the classifier runs, the Context Builder's **classification-shaper** produces a small target-agnostic bundle: registered repos with primary language, declared data connections, detected IaC dirs, and a kind-count per surface. This bundle gives the classifier enough workspace signal to pick a target + a scope bucket without committing to a per-target shaper before the target is known. See [`analyze-context-builder.md`](analyze-context-builder.md) for the bundle shape.
+
+### 2. Classify
+
+LLM call (small, local Ollama) emits the `{ target, scope, focused, focus?, scopeRef, reasoning }` shape above, consuming the classification-context bundle from step 1. The user message + any path the user surfaced (e.g. `/analyze src/foo.ts`) is the input. Validation: target ∈ enum, scope ∈ enum, scopeRef.kind matches target (a `connection` scope on a `code` target gets rejected). `target` can be `generic` when the request is broad ("analyze this repo") and the planner is expected to dispatch sub-plans across multiple per-target shapers.
 
 If `scopeRef.value` doesn't resolve (e.g. path doesn't exist) the classifier reruns with a corrective note. After two failures, the analyze run aborts with a clear `scopeRef-unresolved` error.
 
-### 2. Build context (top-level)
+### 3. Scope warning
 
-The per-target Context Builder (see `analyze-context-builder.md`) produces the run-level bundle. This is the context the **Plan Builder** sees — large enough to let the planner enumerate sub-units, small enough to fit the model's context window with room for the planner's own output budget.
+Immediately after classification and before context-building begins, the framework emits a one-shot informational warning over the `analyze.run.start` IPC when `scope ∈ { L, XL }`:
 
-### 3. Plan
+```
+This run is classified <scope> scope; expect significant token consumption
+from your CLI provider's quota during planning + task execution.
+```
+
+The warning is **dismissable, never blocks**, and surfaces in the IDE's notification area + the CLI stdout. The user has no explicit recourse — they manage their own LLM budgets (per the project's accuracy-primary principle, the framework does not cap or compress to save tokens). The warning fires exactly once per run; it does not re-fire when nested planner-template tasks spawn child Plans whose own scope is L/XL.
+
+### 4. Build run context
+
+The per-target Context Builder (see [`analyze-context-builder.md`](analyze-context-builder.md)) produces the run-level bundle. Dispatch is on `intent.target`: `code → code-shaper`, `data → data-shaper`, `infra → infra-shaper`, `generic → generic-shaper`. This is the context the **Plan Builder** sees.
+
+### 5. Plan
 
 The Plan Builder (see `analyze-plan-builder.md`) takes the run-level bundle + the catalog of typed task templates and emits a Plan Task. Plan Task shape:
 
@@ -201,7 +219,7 @@ The Plan Builder (see `analyze-plan-builder.md`) takes the run-level bundle + th
 {
   goal: string;                         // 1 sentence
   scope: 'XS'|'S'|'M'|'L'|'XL';
-  target: 'code'|'data'|'infrastructure';
+  target: 'code'|'data'|'infra'|'generic';
   tasks: PlannedTask[];                 // serial-execution order
   reasoning: string;
 }
@@ -224,7 +242,7 @@ Invariants the validator enforces:
 - `dependsOnOutputs` only references outputs declared by an earlier task in the list (DAG over outputs, but the LIST itself is a flat serial schedule)
 - No task nests another task. The Plan Task is one level deep. (Per-target verticals may chain plans across iterations — see "Iteration" below — but a single Plan Task is flat.)
 
-### 4. Task list — iterate
+### 6. Task list — iterate
 
 For each task in the current Plan's `tasks`, in order:
 
@@ -239,7 +257,7 @@ For each task in the current Plan's `tasks`, in order:
 
 The aggregator rolls up bottom-up: each Plan's terminal aggregator produces this Plan's report; the parent task that spawned this Plan consumes that report as its output value; the parent Plan's aggregator stitches those values into the parent report. The Run's final report is the root Plan's aggregator output.
 
-### 5. Aggregate
+### 7. Aggregate
 
 The aggregator reads all task outputs in dependency order and stitches the target-specific report shape (see per-target docs). It:
 
