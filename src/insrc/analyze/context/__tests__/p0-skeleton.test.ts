@@ -105,14 +105,14 @@ test("shaperFor('classification') returns a Shaper with buildClassificationBundl
 	assert.equal(typeof shaper.buildClassificationBundle, 'function');
 });
 
-test("shaperFor('classification') stub throws on call (P3 fills it in)", async () => {
+test("shaperFor('classification') rejects when its prompt file is missing (P5 owns prompts)", async () => {
 	const shaper = shaperFor('classification');
 	const input: ClassificationShapeInput = {
 		scopeRef:   SCOPE_REF,
 		userPrompt: 'analyze this',
 	};
 	await assert.rejects(() => shaper.buildClassificationBundle(input, OPTS), {
-		message: /P3 stub/,
+		name: 'ShaperPromptMissingError',
 	});
 });
 
@@ -126,11 +126,11 @@ for (const target of ['code', 'data', 'infra', 'generic'] as const) {
 		assert.equal(typeof shaper.buildRunBundle, 'function');
 	});
 
-	test(`shaperFor('run', '${target}') stub throws on call`, async () => {
+	test(`shaperFor('run', '${target}') rejects when its prompt file is missing`, async () => {
 		const shaper = shaperFor('run', target);
 		const input: RunShapeInput = { intent: INTENT };
 		await assert.rejects(() => shaper.buildRunBundle(input, OPTS), {
-			message: /P3 stub/,
+			name: 'ShaperPromptMissingError',
 		});
 	});
 }
@@ -153,7 +153,7 @@ for (const target of ['code', 'data', 'infra'] as const) {
 		assert.equal(typeof shaper.buildTaskBundle, 'function');
 	});
 
-	test(`shaperFor('task', '${target}') stub throws on call`, async () => {
+	test(`shaperFor('task', '${target}') rejects when its prompt file is missing`, async () => {
 		const shaper = shaperFor('task', target);
 		const input: TaskShapeInput = {
 			intent:        INTENT,
@@ -162,7 +162,7 @@ for (const target of ['code', 'data', 'infra'] as const) {
 			upstreamTasks: new Map(),
 		};
 		await assert.rejects(() => shaper.buildTaskBundle(input, OPTS), {
-			message: /P3 stub/,
+			name: 'ShaperPromptMissingError',
 		});
 	});
 }

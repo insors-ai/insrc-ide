@@ -79,6 +79,15 @@ export const PATHS = {
   // meta-task run owns `<meta>/<metaTaskId>/` with meta.json + plan.json
   // + per-step deliverables + phase-1/2 JSONL traces + synthesis.
   meta:        join(INSRC_DIR, 'meta'),
+  // Analyze framework root (design/analyze-framework.md). Each analyze
+  // run owns `<analyze>/<runId>/` with meta.json + plan/ + context/
+  // (cached classification + run + per-task bundles) + tasks/.
+  // Per-target shapers + planner + leaf templates all write under this
+  // root; resumable runs read the cached state back.
+  analyze:     join(INSRC_DIR, 'analyze'),
+  analyzeRun:  (runId: string): string => join(INSRC_DIR, 'analyze', runId),
+  analyzeContext: (runId: string): string =>
+    join(INSRC_DIR, 'analyze', runId, 'context'),
   logDir:      LOG_DIR,
   daemonLog:   join(LOG_DIR, 'daemon.log'),
   agentLog:    join(LOG_DIR, 'agent.log'),
