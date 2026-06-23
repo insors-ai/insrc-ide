@@ -6,15 +6,20 @@
 /**
  * P0 acceptance test -- skeleton + factory dispatch.
  *
- * Verifies:
- *   - shaperFor returns the expected method set per (mode, target)
- *   - generic target is rejected at task scope
- *   - missing target is rejected at run + task scope
- *   - every shaper-stub throws at call time (real driver lands in P3)
+ * Verifies the structural contract of `shaperFor`:
+ *   - returns a Shaper with the right method set per (mode, target)
+ *   - rejects task-mode with target='generic' (task family namespace dispatch)
+ *   - rejects 'run' / 'task' modes without a target argument
  *   - CONTRACT_FOOTER_MD is present + non-empty
  *   - PROMPT_PATHS has the expected five entries
  *
  * No LLM, no I/O, no Ollama dependency. Pure structural test.
+ *
+ * Earlier revisions of this file also asserted "stub throws on call".
+ * Once P3 wired the real driver and P5 added the prompt files, that
+ * assertion stopped being meaningful (the driver no longer throws a
+ * stub-message; it makes a real Ollama call). End-to-end behaviour is
+ * now covered by driver.live.test.ts + the per-shaper live tests.
  *
  * Run:
  *   npx tsx --test src/insrc/analyze/context/__tests__/p0-skeleton.test.ts
@@ -28,47 +33,6 @@ import {
 	PROMPT_PATHS,
 	shaperFor,
 } from '../../index.js';
-import type {
-	AnalyzeScopeRef,
-	ClassificationShapeInput,
-	ClassifiedIntent,
-	PlannedTask,
-	AnalyzeTaskTemplate,
-	RunShapeInput,
-	ShapeOpts,
-	TaskShapeInput,
-} from '../../index.js';
-
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-const SCOPE_REF: AnalyzeScopeRef = { kind: 'workspace', value: '/tmp/test-ws' };
-
-const INTENT: ClassifiedIntent = {
-	target:    'code',
-	scope:     'M',
-	focused:   false,
-	scopeRef:  SCOPE_REF,
-	reasoning: 'test fixture',
-};
-
-const TASK: PlannedTask = {
-	taskId:   't01',
-	template: 'code.surface.functional',
-	params:   {},
-	outputs:  ['surface'],
-};
-
-const TEMPLATE: AnalyzeTaskTemplate = {
-	id:       'code.surface.functional',
-	target:   'code',
-	family:   'surface',
-	kind:     'leaf',
-	revision: 'pre-registry',
-};
-
-const OPTS: ShapeOpts = { runId: 'test-run' };
 
 // ---------------------------------------------------------------------------
 // Contract footer
@@ -105,16 +69,13 @@ test("shaperFor('classification') returns a Shaper with buildClassificationBundl
 	assert.equal(typeof shaper.buildClassificationBundle, 'function');
 });
 
-test("shaperFor('classification') rejects when its prompt file is missing (P5 owns prompts)", async () => {
-	const shaper = shaperFor('classification');
-	const input: ClassificationShapeInput = {
-		scopeRef:   SCOPE_REF,
-		userPrompt: 'analyze this',
-	};
-	await assert.rejects(() => shaper.buildClassificationBundle(input, OPTS), {
-		name: 'ShaperPromptMissingError',
-	});
-});
+// (P0 had a "stub throws on call" test here; once P3 wired the real
+// driver and P5 added the prompt files, the failure mode shifted from
+// 'stub' -> 'ShaperPromptMissingError' -> 'real Ollama invocation'.
+// End-to-end behaviour is now covered by driver.live.test.ts and the
+// per-shaper live tests; what remains valuable here is the structural
+// factory contract (return type + method presence), which the
+// individual cases below pin.)
 
 // ---------------------------------------------------------------------------
 // shaperFor -- run-mode
@@ -126,13 +87,8 @@ for (const target of ['code', 'data', 'infra', 'generic'] as const) {
 		assert.equal(typeof shaper.buildRunBundle, 'function');
 	});
 
-	test(`shaperFor('run', '${target}') rejects when its prompt file is missing`, async () => {
-		const shaper = shaperFor('run', target);
-		const input: RunShapeInput = { intent: INTENT };
-		await assert.rejects(() => shaper.buildRunBundle(input, OPTS), {
-			name: 'ShaperPromptMissingError',
-		});
-	});
+	// (see classification note above; end-to-end behaviour covered
+	// elsewhere)
 }
 
 test("shaperFor('run') without a target throws TypeError", () => {
@@ -153,18 +109,8 @@ for (const target of ['code', 'data', 'infra'] as const) {
 		assert.equal(typeof shaper.buildTaskBundle, 'function');
 	});
 
-	test(`shaperFor('task', '${target}') rejects when its prompt file is missing`, async () => {
-		const shaper = shaperFor('task', target);
-		const input: TaskShapeInput = {
-			intent:        INTENT,
-			task:          TASK,
-			template:      TEMPLATE,
-			upstreamTasks: new Map(),
-		};
-		await assert.rejects(() => shaper.buildTaskBundle(input, OPTS), {
-			name: 'ShaperPromptMissingError',
-		});
-	});
+	// (see classification note above; end-to-end behaviour covered
+	// elsewhere)
 }
 
 test("shaperFor('task') without a target throws TypeError", () => {

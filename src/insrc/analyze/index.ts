@@ -11,4 +11,5 @@
 
 export { CONTRACT_FOOTER_MD } from './contract.js';
 export { shaperFor, PROMPT_PATHS } from './context/index.js';
+export { validateAnalyzePrompts, AnalyzePromptValidationError } from './context/boot-validator.js';
 export type * from './context/types.js';

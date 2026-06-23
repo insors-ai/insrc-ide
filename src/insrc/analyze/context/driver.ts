@@ -258,11 +258,7 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 // ---------------------------------------------------------------------------
 
 function loadPromptFile(promptPath: string): string {
-	// Prompt paths in PROMPT_PATHS are relative to the repo root (the
-	// directory that holds prompts/analyze/...). Resolve relative paths
-	// against process.cwd() at first; the daemon's boot validator (P5)
-	// will tighten this to a fixed prompts root once it lands.
-	const abs = isAbsolute(promptPath) ? promptPath : resolveRelativeToRepoRoot(promptPath);
+	const abs = isAbsolute(promptPath) ? promptPath : resolveRelativeToInsrcRoot(promptPath);
 	try {
 		return readFileSync(abs, 'utf8');
 	} catch (err) {
@@ -273,21 +269,28 @@ function loadPromptFile(promptPath: string): string {
 	}
 }
 
-function resolveRelativeToRepoRoot(relativePath: string): string {
-	// Resolve relative to the analyze module's grand-parent at runtime,
-	// which is the daemon's `src/insrc` root in dev and `out/insrc` in
-	// the compiled tree. Both layouts host `prompts/` at the project
-	// root, which sits one level above. We compute the project root
-	// by walking up from this file: out/insrc/analyze/context/driver.js
-	// -> out/insrc -> .
-	//
-	// This is intentional simplicity for P3; P5's boot validator will
-	// take over with a configured prompts root.
+/**
+ * Resolve a prompt-relative path against the insrc root -- the
+ * directory at the head of the compiled tree.
+ *
+ * Layouts handled (driver.js position in parens):
+ *   - dev source (src/insrc/analyze/context/driver.ts)
+ *       -> insrcRoot = src/insrc
+ *   - compiled (out/insrc/analyze/context/driver.js)
+ *       -> insrcRoot = out/insrc
+ *   - production daemon (~/.insrc/daemon/out/insrc/analyze/context/driver.js)
+ *       -> insrcRoot = ~/.insrc/daemon/out/insrc
+ *
+ * Prompt files live at `src/insrc/prompts/analyze/<shaper>.system.md`
+ * and are mirrored to `out/insrc/prompts/analyze/...` by the build
+ * script's *.md copy pass, so the same relative-from-insrc-root path
+ * works in every layout.
+ */
+function resolveRelativeToInsrcRoot(relativePath: string): string {
 	const thisFile = fileURLToPath(import.meta.url);
-	// .../analyze/context/driver.js -> .../analyze/context -> .../analyze -> .../insrc -> ...
+	// .../analyze/context/driver.js -> .../analyze/context -> .../analyze -> .../insrc
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
-	const projectRoot = resolve(insrcRoot, '..', '..');
-	return resolve(projectRoot, relativePath);
+	return resolve(insrcRoot, relativePath);
 }
 
 function computeCacheKey(

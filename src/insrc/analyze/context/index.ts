@@ -36,9 +36,17 @@ import type {
 } from './types.js';
 
 /**
- * Resolved prompt-file paths for each shaper. Loaded by the boot-time
- * validator (P5) and by the driver (P3). The actual files are
- * authored in P5.
+ * Resolved prompt-file paths for each shaper.
+ *
+ * Paths are relative to the insrc root (`src/insrc` in dev,
+ * `out/insrc` in compiled, `~/.insrc/daemon/out/insrc` in
+ * production); the driver's `resolveRelativeToInsrcRoot` handles
+ * the layout differences uniformly. The build script mirrors
+ * `*.md` files from `src/insrc/prompts/` to `out/insrc/prompts/`
+ * so the same relative path resolves in either tree.
+ *
+ * The boot-time validator (P5) asserts every entry's file exists
+ * + is non-empty before the daemon starts serving requests.
  */
 const PROMPT_PATHS: Readonly<Record<ShaperId, string>> = {
 	classification: 'prompts/analyze/classification.system.md',

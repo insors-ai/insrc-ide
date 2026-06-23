@@ -79,16 +79,17 @@ build_daemon() {
 		# -a preserves timestamps so incremental builds stay cheap.
 		cp -a src/insrc/assets/. out/insrc/assets/
 	fi
-	# Mirror all *.md prompt files from src/insrc to out/insrc preserving
-	# the directory layout. Daemon prompts (e.g. agent/tasks/code-analyzer/
-	# prompts/**/*.md) are loaded at runtime via paths relative to
-	# import.meta.url, so they must live next to the compiled .js. Generic
-	# glob -- no per-directory edit when new prompts are added. Excludes
-	# node_modules/ (third-party READMEs) and __tests__/ (test fixtures).
-	# Prompt MDs are mirrored to out/ by `npm run build` (which now
-	# chains `tsc` + `node scripts/copy-prompts.mjs`). The build above
-	# already invoked `npm run build`, so out/insrc/.../prompts/ is
-	# populated. No extra step needed here.
+	# Mirror src/insrc/prompts/ to out/insrc/prompts/. The analyze
+	# Context Builder + future per-target task templates load prompt
+	# .md files at runtime via paths relative to import.meta.url
+	# (resolved to <insrcRoot>/prompts/...), so the .md files must
+	# live next to the compiled .js. tsc does not copy .md files;
+	# rsync handles it deterministically.
+	if [ -d "src/insrc/prompts" ]; then
+		echo "[insrc-build] copying daemon prompt files"
+		mkdir -p out/insrc/prompts
+		rsync -a --delete src/insrc/prompts/ out/insrc/prompts/
+	fi
 }
 
 cmd="${1:-all}"

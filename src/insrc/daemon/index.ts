@@ -257,6 +257,16 @@ async function main(): Promise<void> {
 	const { registerBuiltinDataDrivers } = await import('./db/drivers/index.js');
 	registerBuiltinDataDrivers();
 
+	// 6d. Validate every analyze-framework shaper prompt exists at boot
+	//     (design/analyze-context-builder.md "Per-shaper prompts": missing
+	//     file -> daemon refuses to start). The validator throws
+	//     AnalyzePromptValidationError listing every failure; we re-raise
+	//     so the daemon's top-level fatal handler logs + exits cleanly,
+	//     rather than discovering the missing file at the first shaper
+	//     invocation.
+	const { validateAnalyzePrompts } = await import('../analyze/index.js');
+	validateAnalyzePrompts();
+
 	// Phase 1 cleanup: cross-agent / skill registry / prompt writers /
 	// substrate runtime / meta-task template registration all stripped.
 	// Their backing modules (daemon/cross-agent/, daemon/skills/,
