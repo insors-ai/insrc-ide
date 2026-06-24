@@ -48,7 +48,7 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { OllamaProvider } from '../../agent/providers/ollama.js';
@@ -600,16 +600,42 @@ function inferRepoPath(inputs: RunShaperArgs['inputs']): string {
 	// Order: ClassificationShapeInput carries scopeRef directly;
 	// RunShapeInput + TaskShapeInput nest it under intent.
 	if ('scopeRef' in inputs) {
-		return (inputs as ClassificationShapeInput).scopeRef.value;
+		return resolveRepoPath((inputs as ClassificationShapeInput).scopeRef);
 	}
 	if ('intent' in inputs) {
-		const intent = (inputs as RunShapeInput | TaskShapeInput).intent;
-		const v = intent.scopeRef.value;
-		// 'connection' kind has no filesystem path; the executor's tools
-		// that need it will fall back to cwd.
-		return intent.scopeRef.kind === 'connection' ? process.cwd() : v;
+		return resolveRepoPath((inputs as RunShapeInput | TaskShapeInput).intent.scopeRef);
 	}
 	return process.cwd();
+}
+
+/**
+ * Map a scopeRef onto the directory that should be used as the tool
+ * deps' repoPath:
+ *   - repo / workspace / manifest-dir / module: value is already a
+ *     directory; use as-is.
+ *   - file / symbol: value points at a file or symbol-in-file; walk
+ *     up to the containing directory so tool-deps repoPath is a real
+ *     directory. (search_glob, file_read with relative paths, the
+ *     data-driver pool's repo-root check all assume a directory.)
+ *   - connection: no filesystem path; fall back to cwd. Connection-
+ *     scope tests should NOT rely on this path -- the driver routes
+ *     data tools via the connection id, not repoPath.
+ */
+function resolveRepoPath(ref: { kind: string; value: string }): string {
+	switch (ref.kind) {
+		case 'file':
+		case 'symbol': {
+			// Walk up to the containing dir. If value already lacks a
+			// trailing file segment (e.g. caller passed a dir by
+			// mistake), dirname returns the dir itself; harmless.
+			const dir = dirname(ref.value);
+			return dir === '' || dir === '.' ? process.cwd() : dir;
+		}
+		case 'connection':
+			return process.cwd();
+		default:
+			return ref.value;
+	}
 }
 
 /**
