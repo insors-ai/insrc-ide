@@ -73,6 +73,7 @@ import {
 	writeBundle,
 	type CacheKey,
 } from './cache.js';
+import { ensureNonEmptyClosure } from './invariants.js';
 import {
 	ANALYZE_CONTEXT_BUNDLE_SCHEMA,
 	SCHEMA_VERSION,
@@ -190,6 +191,20 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 			'shaper cache hit',
 		);
 		return cached;
+	}
+
+	// (4.5) Pre-LLM invariant: code-shaper at run-mode against an
+	// unindexed scope is a useless invocation (graph queries return
+	// empty, dep-closure analysis is impossible) -- abort before
+	// paying the Ollama cost. Only the code shaper depends on the
+	// indexed graph; data + infra + classification + generic produce
+	// reasonable bundles via the filesystem + DB-driver fallbacks
+	// even without graph state, so we skip the invariant for them.
+	// classification + task modes skip this check too -- by the time
+	// a task fires, the run-mode invocation has already validated
+	// the closure.
+	if (invocationMode === 'run' && shaperId === 'code') {
+		await ensureNonEmptyClosure((inputs as RunShapeInput).intent);
 	}
 
 	// (4) Build the LLM message list.
@@ -352,6 +367,8 @@ function buildMessages(
 	const systemContent = `${promptContent.trimEnd()}\n\n${CONTRACT_FOOTER_MD}`;
 	const serializedInputs = stableStringify(inputs);
 
+	const upstreamSection = renderUpstreamSection(inputs);
+
 	const userContent =
 		`Mode: ${mode}\n` +
 		`Shaper: ${shaperId}\n` +
@@ -361,6 +378,7 @@ function buildMessages(
 		'```json\n' +
 		serializedInputs +
 		'\n```\n' +
+		(upstreamSection.length > 0 ? `\n${upstreamSection}\n` : '') +
 		'\n' +
 		'Use the available tools as needed to gather context, then emit an ' +
 		'`AnalyzeContextBundle` matching the schema. Layers you have nothing ' +
@@ -371,6 +389,45 @@ function buildMessages(
 		{ role: 'system', content: systemContent },
 		{ role: 'user',   content: userContent },
 	];
+}
+
+/**
+ * Render the upstream-tasks section of the user message for task-mode
+ * invocations. Each upstream task gets a dedicated block; tasks whose
+ * stored output is `null` (the planner / orchestrator stamps null when
+ * the upstream task failed or was skipped) get an explicit
+ * `[unavailable: <taskId>]` marker the prompt is instructed to surface
+ * in the `upstream` layer.
+ *
+ * Returns the empty string when the inputs aren't task-mode or when
+ * there are no upstream tasks declared.
+ */
+function renderUpstreamSection(inputs: RunShaperArgs['inputs']): string {
+	if (!('task' in inputs)) return '';
+	const map = (inputs as TaskShapeInput).upstreamTasks;
+	if (map.size === 0) return '';
+
+	const blocks: string[] = ['Upstream task outputs:'];
+	const ids = Array.from(map.keys()).sort();
+	for (const id of ids) {
+		const out = map.get(id);
+		if (out === null || out === undefined) {
+			blocks.push(
+				`### ${id}\n` +
+				`[unavailable: upstream task ${id} failed or produced no output; ` +
+				`surface this in the bundle's \`upstream\` layer and note that ` +
+				`downstream claims may be limited.]`,
+			);
+		} else {
+			blocks.push(
+				`### ${id}\n` +
+				'```json\n' +
+				stableStringify(out) +
+				'\n```',
+			);
+		}
+	}
+	return blocks.join('\n\n');
 }
 
 interface ToolLoopResult {
@@ -720,3 +777,4 @@ export const _classifyOllamaErrorForTest = classifyOllamaError;
 export const _deriveEmptyLayersForTest = deriveEmptyLayers;
 export const _resolveRepoLastIndexedAtForTest = resolveRepoLastIndexedAt;
 export const _inferScopePathForTest = inferScopePath;
+export const _renderUpstreamSectionForTest = renderUpstreamSection;

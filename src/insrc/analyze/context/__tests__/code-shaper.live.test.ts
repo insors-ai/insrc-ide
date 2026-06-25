@@ -49,6 +49,7 @@ import { existsSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { _resetAnalyzeConfigCacheForTests } from '../../../config/analyze.js';
+import { closeGraphStore, setGraphStorePath } from '../../../db/graph/store.js';
 import { registerBuiltinTools } from '../../../daemon/tools/builtins/index.js';
 import { _resetRegistryForTests } from '../../../daemon/tools/registry.js';
 import { shaperFor } from '../index.js';
@@ -78,17 +79,31 @@ if (!GATE) {
 // ---------------------------------------------------------------------------
 
 let fixtures: FixtureSet;
+let lmdbDir:  string;
 
-test.before(() => {
+test.before(async () => {
 	if (!GATE) return;
 	_resetAnalyzeConfigCacheForTests();
 	_resetRegistryForTests();
 	registerBuiltinTools();
 	fixtures = setupFixtures();
+
+	// Sandbox the LMDB graph store so ensureNonEmptyClosure sees a
+	// pristine registry (no repos registered) and skips the invariant
+	// silently. Without this, the user's production registry would be
+	// visible during tests, and fixture paths under /tmp would fail
+	// the longest-prefix containment check -> ScopeNotIndexedError.
+	// (P6 design: the invariant only applies to the code shaper; the
+	// other shapers fall back to filesystem / DB-driver tools cleanly
+	// with an empty graph.)
+	await closeGraphStore();
+	lmdbDir = join(fixtures.root, 'lmdb-sandbox');
+	setGraphStorePath(join(lmdbDir, 'graph.lmdb'));
 });
 
-test.after(() => {
+test.after(async () => {
 	if (!GATE) return;
+	await closeGraphStore();
 	if (fixtures) teardownFixtures(fixtures);
 });
 

@@ -33,9 +33,20 @@ import {
 	ShaperToolLoopExhausted,
 	_classifyOllamaErrorForTest,
 	_deriveEmptyLayersForTest,
+	_renderUpstreamSectionForTest,
 	_stableStringifyForTest,
 } from '../driver.js';
-import type { AnalyzeContextBundle } from '../types.js';
+import type {
+	AnalyzeContextBundle,
+	ClassificationShapeInput,
+	RunShapeInput,
+	TaskShapeInput,
+} from '../types.js';
+import type {
+	AnalyzeTaskTemplate,
+	ClassifiedIntent,
+	PlannedTask,
+} from '../../../shared/analyze-types.js';
 
 // ---------------------------------------------------------------------------
 // _stableStringifyForTest
@@ -216,4 +227,124 @@ test('ShaperPromptMissingError carries the absolute prompt path', () => {
 	const e = new ShaperPromptMissingError('/abs/path/to/prompt.md');
 	assert.equal(e.name, 'ShaperPromptMissingError');
 	assert.match(e.message, /\/abs\/path\/to\/prompt\.md/);
+});
+
+// ---------------------------------------------------------------------------
+// renderUpstreamSection (P6 missing-upstream rendering)
+// ---------------------------------------------------------------------------
+
+function classificationInputs(): ClassificationShapeInput {
+	return {
+		scopeRef:   { kind: 'workspace', value: '/ws' },
+		userPrompt: 'hello',
+	};
+}
+
+function runInputs(): RunShapeInput {
+	const intent: ClassifiedIntent = {
+		target:    'code',
+		scope:     'M',
+		focused:   false,
+		scopeRef:  { kind: 'repo', value: '/repo' },
+		reasoning: 'test',
+	};
+	return { intent };
+}
+
+function taskInputs(upstream: ReadonlyMap<string, unknown | null>): TaskShapeInput {
+	const intent: ClassifiedIntent = {
+		target:    'code',
+		scope:     'S',
+		focused:   true,
+		focus:     'test',
+		scopeRef:  { kind: 'repo', value: '/repo' },
+		reasoning: 'test',
+	};
+	const task: PlannedTask = {
+		taskId:   't99',
+		template: 'code.structure.dep-tree',
+		params:   {},
+		outputs:  ['out'],
+	};
+	const template: AnalyzeTaskTemplate = {
+		id:       'code.structure.dep-tree',
+		target:   'code',
+		family:   'structure',
+		kind:     'leaf',
+		revision: 'pre-registry',
+	};
+	return { intent, task, template, upstreamTasks: upstream };
+}
+
+test('renderUpstreamSection: classification mode returns empty string', () => {
+	const out = _renderUpstreamSectionForTest(classificationInputs());
+	assert.equal(out, '');
+});
+
+test('renderUpstreamSection: run mode returns empty string', () => {
+	const out = _renderUpstreamSectionForTest(runInputs());
+	assert.equal(out, '');
+});
+
+test('renderUpstreamSection: task mode with empty upstream map returns empty string', () => {
+	const out = _renderUpstreamSectionForTest(taskInputs(new Map()));
+	assert.equal(out, '');
+});
+
+test('renderUpstreamSection: task mode with one populated upstream renders a JSON block', () => {
+	const upstream = new Map<string, unknown>([
+		['t01', { foo: 1, bar: ['a', 'b'] }],
+	]);
+	const out = _renderUpstreamSectionForTest(taskInputs(upstream));
+	assert.match(out, /^Upstream task outputs:/);
+	assert.match(out, /### t01/);
+	assert.match(out, /```json/);
+	assert.match(out, /"foo":\s*1/);
+	assert.match(out, /"bar":\s*\["a","b"\]/);
+});
+
+test('renderUpstreamSection: null upstream value renders [unavailable: ...] marker', () => {
+	const upstream = new Map<string, unknown | null>([
+		['t02', null],
+	]);
+	const out = _renderUpstreamSectionForTest(taskInputs(upstream));
+	assert.match(out, /### t02/);
+	assert.match(out, /\[unavailable: upstream task t02 failed/);
+	assert.match(out, /surface this in the bundle's `upstream` layer/);
+	// Must NOT emit a JSON block for the null value.
+	assert.equal(out.includes('```json'), false);
+});
+
+test('renderUpstreamSection: undefined upstream value also renders unavailable marker', () => {
+	const upstream = new Map<string, unknown>();
+	upstream.set('t03', undefined);
+	const out = _renderUpstreamSectionForTest(taskInputs(upstream));
+	assert.match(out, /\[unavailable: upstream task t03 failed/);
+});
+
+test('renderUpstreamSection: mixed populated + null upstream renders both', () => {
+	const upstream = new Map<string, unknown | null>([
+		['t01', { ok: true }],
+		['t02', null],
+		['t03', { count: 7 }],
+	]);
+	const out = _renderUpstreamSectionForTest(taskInputs(upstream));
+	assert.match(out, /### t01[\s\S]*```json[\s\S]*"ok"\s*:\s*true/);
+	assert.match(out, /### t02[\s\S]*\[unavailable: upstream task t02 failed/);
+	assert.match(out, /### t03[\s\S]*```json[\s\S]*"count"\s*:\s*7/);
+});
+
+test('renderUpstreamSection: upstream task ids are sorted alphabetically', () => {
+	const upstream = new Map<string, unknown>([
+		['tbb', { x: 2 }],
+		['taa', { x: 1 }],
+		['tcc', { x: 3 }],
+	]);
+	const out = _renderUpstreamSectionForTest(taskInputs(upstream));
+	const aaIdx = out.indexOf('### taa');
+	const bbIdx = out.indexOf('### tbb');
+	const ccIdx = out.indexOf('### tcc');
+	assert.ok(aaIdx >= 0 && bbIdx >= 0 && ccIdx >= 0);
+	assert.ok(aaIdx < bbIdx);
+	assert.ok(bbIdx < ccIdx);
 });
