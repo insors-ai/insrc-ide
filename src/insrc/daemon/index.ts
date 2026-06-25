@@ -1277,6 +1277,25 @@ async function main(): Promise<void> {
 			return mod.testConnectionRpc(params as { repoRoot?: unknown; config?: unknown });
 		},
 
+		// ----- analyze.context.* IPCs (analyze framework Context Builder) -----
+		// design/analyze-context-builder.md "Public API"
+		// plans/analyze-context-builder.md Phase 7
+		// Each handler returns a tagged union AnalyzeRpcResponse so typed
+		// shaper errors (ScopeNotIndexedError, ShaperLlmUnavailable, ...)
+		// surface with stable error codes instead of generic string errors.
+		'analyze.context.buildClassification': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.buildClassification(params);
+		},
+		'analyze.context.buildRun': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.buildRun(params);
+		},
+		'analyze.context.buildTask': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.buildTask(params);
+		},
+
 		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
 		// backing files (substrate-coupled access store, skill registry).
 		// Both surfaces return `backend offline` to the workbench panes.
