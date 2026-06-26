@@ -25,23 +25,38 @@ import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { CLASSIFY_PROMPT_PATH } from '../classifier/index.js';
 import { getLogger } from '../../shared/logger.js';
 
 import { PROMPT_PATHS } from './index.js';
-import type { ShaperId } from './types.js';
 
 const log = getLogger('analyze:context:boot-validator');
 
-export class AnalyzePromptValidationError extends Error {
-	readonly missing: readonly { shaperId: ShaperId; path: string; reason: string }[];
+/**
+ * Identifier for a prompt component the validator checks. Wide
+ * `string` rather than the narrow ShaperId so non-shaper prompts
+ * (the classifier, future planner, ...) participate in the same
+ * boot-time check without per-component validators duplicating
+ * the file-stat / empty-body logic.
+ */
+export type AnalyzePromptComponentId = string;
 
-	constructor(missing: { shaperId: ShaperId; path: string; reason: string }[]) {
+export interface AnalyzePromptFailure {
+	readonly componentId: AnalyzePromptComponentId;
+	readonly path:        string;
+	readonly reason:      string;
+}
+
+export class AnalyzePromptValidationError extends Error {
+	readonly missing: readonly AnalyzePromptFailure[];
+
+	constructor(missing: AnalyzePromptFailure[]) {
 		const list = missing
-			.map(m => `  - ${m.shaperId}: ${m.path} (${m.reason})`)
+			.map(m => `  - ${m.componentId}: ${m.path} (${m.reason})`)
 			.join('\n');
 		super(
-			`analyze: shaper prompt validation failed:\n${list}\n` +
-				'Fix: ensure every prompts/analyze/<shaper>.system.md exists and is non-empty.',
+			`analyze: prompt validation failed:\n${list}\n` +
+				'Fix: ensure every prompts/analyze/<component>.system.md exists and is non-empty.',
 		);
 		this.name = 'AnalyzePromptValidationError';
 		this.missing = missing;
@@ -64,18 +79,35 @@ export class AnalyzePromptValidationError extends Error {
  *   - Successful prompts are debug-logged so the daemon log carries
  *     a record of which prompts loaded cleanly.
  */
-export function validateAnalyzePrompts(): void {
-	const failures: { shaperId: ShaperId; path: string; reason: string }[] = [];
+/**
+ * Every analyze-framework prompt the daemon validates at boot.
+ * Shaper prompts come from PROMPT_PATHS (one per shaper id);
+ * the classifier prompt is a single additional component.
+ *
+ * Add new component prompts (planner, etc.) here as they land --
+ * the validator picks them up automatically.
+ */
+function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath: string }> {
+	const out: { componentId: string; relPath: string }[] = [];
+	for (const [shaperId, relPath] of Object.entries(PROMPT_PATHS)) {
+		out.push({ componentId: shaperId, relPath });
+	}
+	out.push({ componentId: 'classifier', relPath: CLASSIFY_PROMPT_PATH });
+	return out;
+}
 
-	for (const [shaperIdRaw, relPath] of Object.entries(PROMPT_PATHS)) {
-		const shaperId = shaperIdRaw as ShaperId;
+export function validateAnalyzePrompts(): void {
+	const failures: AnalyzePromptFailure[] = [];
+	const components = collectComponentPrompts();
+
+	for (const { componentId, relPath } of components) {
 		const abs = isAbsolute(relPath) ? relPath : resolveRelativeToInsrcRoot(relPath);
 
 		try {
 			statSync(abs);
 		} catch (err) {
 			failures.push({
-				shaperId,
+				componentId,
 				path:   abs,
 				reason: (err as NodeJS.ErrnoException).code === 'ENOENT'
 					? 'file not found'
@@ -89,7 +121,7 @@ export function validateAnalyzePrompts(): void {
 			body = readFileSync(abs, 'utf8');
 		} catch (err) {
 			failures.push({
-				shaperId,
+				componentId,
 				path:   abs,
 				reason: `read failed: ${(err as Error).message}`,
 			});
@@ -97,18 +129,18 @@ export function validateAnalyzePrompts(): void {
 		}
 
 		if (body.trim().length === 0) {
-			failures.push({ shaperId, path: abs, reason: 'file is empty' });
+			failures.push({ componentId, path: abs, reason: 'file is empty' });
 			continue;
 		}
 
-		log.debug({ shaperId, path: abs, bytes: body.length }, 'shaper prompt loaded');
+		log.debug({ componentId, path: abs, bytes: body.length }, 'analyze prompt loaded');
 	}
 
 	if (failures.length > 0) {
 		throw new AnalyzePromptValidationError(failures);
 	}
 
-	log.info({ count: Object.keys(PROMPT_PATHS).length }, 'shaper prompts validated');
+	log.info({ count: components.length }, 'analyze prompts validated');
 }
 
 function resolveRelativeToInsrcRoot(relativePath: string): string {

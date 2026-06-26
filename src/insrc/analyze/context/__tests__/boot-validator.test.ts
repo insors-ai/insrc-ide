@@ -93,10 +93,10 @@ test('validateAnalyzePrompts: throws when a prompt file is missing', () => {
 			(err: unknown) => {
 				assert.ok(err instanceof AnalyzePromptValidationError);
 				assert.equal(err.missing.length, 1);
-				assert.equal(err.missing[0]!.shaperId, targetId);
+				assert.equal(err.missing[0]!.componentId, targetId);
 				assert.equal(err.missing[0]!.path, abs);
 				assert.match(err.missing[0]!.reason, /file not found/);
-				assert.match(err.message, /shaper prompt validation failed/);
+				assert.match(err.message, /prompt validation failed/);
 				assert.match(err.message, new RegExp(targetId));
 				return true;
 			},
@@ -125,7 +125,7 @@ test('validateAnalyzePrompts: throws when a prompt file is empty', () => {
 			(err: unknown) => {
 				assert.ok(err instanceof AnalyzePromptValidationError);
 				assert.equal(err.missing.length, 1);
-				assert.equal(err.missing[0]!.shaperId, targetId);
+				assert.equal(err.missing[0]!.componentId, targetId);
 				assert.match(err.missing[0]!.reason, /empty/);
 				return true;
 			},
@@ -155,7 +155,7 @@ test('validateAnalyzePrompts: collects ALL failures in one error', () => {
 			(err: unknown) => {
 				assert.ok(err instanceof AnalyzePromptValidationError);
 				assert.equal(err.missing.length, 2);
-				const ids = err.missing.map(m => m.shaperId).sort();
+				const ids = err.missing.map(m => m.componentId).sort();
 				assert.deepEqual(ids, ['classification', 'generic']);
 				return true;
 			},
@@ -172,11 +172,11 @@ test('validateAnalyzePrompts: collects ALL failures in one error', () => {
 
 test('AnalyzePromptValidationError preserves the failures array on the instance', () => {
 	const e = new AnalyzePromptValidationError([
-		{ shaperId: 'code', path: '/abs/path/code.md', reason: 'file not found' },
+		{ componentId: 'code', path: '/abs/path/code.md', reason: 'file not found' },
 	]);
 	assert.equal(e.name, 'AnalyzePromptValidationError');
 	assert.equal(e.missing.length, 1);
-	assert.equal(e.missing[0]!.shaperId, 'code');
+	assert.equal(e.missing[0]!.componentId, 'code');
 	assert.match(e.message, /code: \/abs\/path\/code\.md \(file not found\)/);
 });
 
