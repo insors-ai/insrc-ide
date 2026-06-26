@@ -4,9 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Daemon RPC surface for the analyze framework's Context Builder.
+ * Daemon RPC surface for the analyze framework -- Context Builder +
+ * Classifier.
  *
- * Three methods, one per invocation mode:
+ * Context Builder methods (one per invocation mode):
  *
  *   analyze.context.buildClassification(params)
  *     params: { runId, scopeRef, userPrompt }
@@ -17,26 +18,38 @@
  *   analyze.context.buildTask(params)
  *     params: { runId, intent, task, template, upstream }
  *
+ * Classifier method:
+ *
+ *   analyze.classify(params)
+ *     params: { runId, userPrompt, scopeRef }
+ *
  * Each method returns a tagged union:
  *
- *   { ok: true,  bundle: AnalyzeContextBundle }
- *   { ok: false, error:  { code: string; message: string; data?: unknown } }
+ *   Context Builder: { ok: true,  bundle: AnalyzeContextBundle }
+ *   Classifier:      { ok: true,  intent: ClassifiedIntent      }
+ *   either:          { ok: false, error:  { code, message, data? } }
  *
  * Tagged-union return (rather than throwing across the IPC layer)
- * lets every typed shaper error from P6 surface to the client
- * verbatim with a stable error code. Unexpected errors -- network
- * faults below the shaper layer, programming bugs in the params
- * validators -- fall through and the server's standard error handler
- * converts them to a string `error` field on the JSON-RPC envelope.
+ * lets every typed shaper / classifier error surface to the client
+ * verbatim with a stable error code. Unexpected errors fall through
+ * and the server's standard error handler converts them to a string
+ * `error` field on the JSON-RPC envelope.
  *
- * No IDE / CLI surface yet -- the framework's outer-loop RPC (P7+)
- * is the eventual caller of these handlers.
+ * No IDE / CLI surface yet -- the framework's outer-loop RPC is the
+ * eventual caller of these handlers.
  *
  * See: design/analyze-framework.md "Surfaces" (Daemon RPC)
  *      plans/analyze-context-builder.md Phase 7
  */
 
-import { shaperFor } from '../analyze/index.js';
+import { classify as runClassifier, shaperFor } from '../analyze/index.js';
+import {
+	ClassifierLlmUnavailableError,
+	ClassifierPromptMissingError,
+	ClassifierSchemaUnrecoverable,
+	ClassifierValidationExhausted,
+} from '../analyze/classifier/driver.js';
+import type { ClassifyInput, ClassifyOpts } from '../analyze/classifier/types.js';
 import {
 	ShaperLlmUnavailableError,
 	ShaperPromptMissingError,
@@ -84,9 +97,9 @@ export interface AnalyzeRpcErrorPayload {
 export type AnalyzeRpcResponse = AnalyzeRpcOk | AnalyzeRpcErr;
 
 /**
- * Stable error codes for typed shaper failures. The orchestrator
- * (P7+) and the IDE dispatch on these codes; new code values
- * land in lock-step with new typed errors in the shaper.
+ * Stable error codes for typed shaper + classifier failures. The
+ * orchestrator + IDE dispatch on these codes; new values land in
+ * lock-step with new typed errors.
  */
 export type AnalyzeRpcErrorCode =
 	| 'invalid-params'
@@ -95,7 +108,25 @@ export type AnalyzeRpcErrorCode =
 	| 'shaper-tool-loop-exhausted'
 	| 'shaper-schema-unrecoverable'
 	| 'shaper-prompt-missing'
+	| 'classifier-llm-unavailable'
+	| 'classifier-schema-unrecoverable'
+	| 'classifier-prompt-missing'
+	| 'scope-ref-unresolved'
+	| 'scope-ref-kind-target-mismatch'
 	| 'internal-error';
+
+// ---------------------------------------------------------------------------
+// Classifier response shape -- separate union since it returns
+// `intent` instead of `bundle`. Errors share the AnalyzeRpcErrorPayload
+// shape so the orchestrator's error-dispatch surface is uniform.
+// ---------------------------------------------------------------------------
+
+export interface ClassifyRpcOk {
+	readonly ok:     true;
+	readonly intent: ClassifiedIntent;
+}
+
+export type ClassifyRpcResponse = ClassifyRpcOk | AnalyzeRpcErr;
 
 // ---------------------------------------------------------------------------
 // Public handlers
@@ -156,6 +187,77 @@ export async function buildTask(params: unknown): Promise<AnalyzeRpcResponse> {
 	};
 	const opts: ShapeOpts = { runId: parsed.runId };
 	return invoke(() => shaper.buildTaskBundle(input, opts), 'task', parsed.runId);
+}
+
+// ---------------------------------------------------------------------------
+// analyze.classify
+// ---------------------------------------------------------------------------
+
+export async function classify(params: unknown): Promise<ClassifyRpcResponse> {
+	let parsed: ClassifyParams;
+	try {
+		parsed = parseClassifyParams(params);
+	} catch (err) {
+		return invalidParams(err);
+	}
+
+	const input: ClassifyInput = {
+		userPrompt: parsed.userPrompt,
+		scopeRef:   parsed.scopeRef,
+	};
+	const opts: ClassifyOpts = { runId: parsed.runId };
+
+	try {
+		const intent = await runClassifier({ input, opts });
+		log.debug({ runId: parsed.runId }, 'analyze.classify complete');
+		return { ok: true, intent };
+	} catch (err) {
+		const payload = classifyClassifierError(err);
+		log.info(
+			{ runId: parsed.runId, code: payload.code, message: payload.message },
+			'analyze.classify failed',
+		);
+		return { ok: false, error: payload };
+	}
+}
+
+/**
+ * Map a typed classifier error onto an AnalyzeRpcErrorPayload. The
+ * `ClassifierValidationExhausted` case carries the inner
+ * `lastFailure` -- we surface its code (scope-ref-unresolved or
+ * scope-ref-kind-target-mismatch) as the RPC error code directly so
+ * the orchestrator can dispatch on the precise reason without
+ * having to peek at `data`.
+ */
+function classifyClassifierError(err: unknown): AnalyzeRpcErrorPayload {
+	if (err instanceof ClassifierValidationExhausted) {
+		const code = err.lastFailure.code as AnalyzeRpcErrorCode;
+		return {
+			code,
+			message: err.message,
+			data:    {
+				lastFailure: {
+					code:    err.lastFailure.code,
+					message: err.lastFailure.message,
+				},
+			},
+		};
+	}
+	if (err instanceof ClassifierLlmUnavailableError) {
+		return { code: 'classifier-llm-unavailable', message: err.message };
+	}
+	if (err instanceof ClassifierSchemaUnrecoverable) {
+		return { code: 'classifier-schema-unrecoverable', message: err.message };
+	}
+	if (err instanceof ClassifierPromptMissingError) {
+		return { code: 'classifier-prompt-missing', message: err.message };
+	}
+	// The classifier's shaper-side pre-step can also throw shaper-typed
+	// errors (e.g. ShaperLlmUnavailableError if the classification shaper
+	// itself can't reach Ollama, or ScopeNotIndexedError for code-shaper
+	// runs -- though classification-mode doesn't trigger the closure
+	// invariant). Defer to the shaper error classifier for those.
+	return classifyShaperError(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +338,12 @@ interface RunParams {
 	readonly intent: ClassifiedIntent;
 }
 
+interface ClassifyParams {
+	readonly runId:      string;
+	readonly userPrompt: string;
+	readonly scopeRef:   AnalyzeScopeRef;
+}
+
 interface TaskParams {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
@@ -258,6 +366,15 @@ function parseRunParams(params: unknown): RunParams {
 	return {
 		runId:  requireString(obj, 'runId'),
 		intent: parseIntent(obj['intent']),
+	};
+}
+
+function parseClassifyParams(params: unknown): ClassifyParams {
+	const obj = requireObject(params, 'params');
+	return {
+		runId:      requireString(obj, 'runId'),
+		userPrompt: requireString(obj, 'userPrompt'),
+		scopeRef:   parseScopeRef(obj['scopeRef']),
 	};
 }
 

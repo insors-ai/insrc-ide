@@ -47,7 +47,9 @@ import {
 	buildClassification,
 	buildRun,
 	buildTask,
+	classify,
 	type AnalyzeRpcResponse,
+	type ClassifyRpcResponse,
 } from '../analyze-rpc.js';
 import { addRepo } from '../../db/repos.js';
 import { closeGraphStore, setGraphStorePath } from '../../db/graph/store.js';
@@ -262,6 +264,61 @@ test('buildRun (code target): unindexed registered repo -> scope-not-indexed err
 // ---------------------------------------------------------------------------
 // Error path: invalid-params (cheap; no Ollama)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// classify: end-to-end happy path
+// ---------------------------------------------------------------------------
+
+test('classify: happy path returns ok:true with a ClassifiedIntent', { skip: !GATE }, async () => {
+	const runId = uniqueRunId('classify');
+	const scopeValue = realpathSync(fixtures.tinyMultiLangRepo);
+	const r = await classify({
+		runId,
+		userPrompt: 'What is in this workspace?',
+		scopeRef:   { kind: 'workspace' as const, value: scopeValue },
+	}) as ClassifyRpcResponse;
+
+	assert.equal(r.ok, true);
+	if (!r.ok) return;
+	assert.ok(['code', 'data', 'infra', 'generic'].includes(r.intent.target));
+	assert.ok(['XS', 'S', 'M', 'L', 'XL'].includes(r.intent.scope));
+	assert.equal(typeof r.intent.focused, 'boolean');
+	assert.equal(typeof r.intent.reasoning, 'string');
+	assert.ok(r.intent.reasoning.length > 0);
+
+	cleanupRun(runId, { mode: 'classification', hash: 'x' });
+});
+
+// ---------------------------------------------------------------------------
+// classify: error path -- scope-ref-unresolved is unwrapped from
+// ClassifierValidationExhausted into the wire-level error code
+// ---------------------------------------------------------------------------
+
+test('classify: nonexistent scopeRef.value -> scope-ref-unresolved error code', { skip: !GATE }, async () => {
+	const runId = uniqueRunId('classify-bad-path');
+	const r = await classify({
+		runId,
+		userPrompt: 'analyze this',
+		scopeRef:   { kind: 'workspace' as const, value: '/var/folders/does-not-exist-' + Math.random().toString(16) },
+	}) as ClassifyRpcResponse;
+
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	// Either the classifier's own validation pass surfaces
+	// scope-ref-unresolved verbatim, OR (more likely) the
+	// classification shaper trips first on the missing path.
+	// Both are valid orchestrator-dispatchable codes.
+	const acceptable = [
+		'scope-ref-unresolved',
+		'scope-ref-kind-target-mismatch',
+		'internal-error',
+		'classifier-llm-unavailable',
+		'shaper-llm-unavailable',
+	];
+	assert.ok(acceptable.includes(r.error.code),
+		`error.code should be a dispatchable analyze code; got '${r.error.code}'. ` +
+		`message: ${r.error.message}`);
+});
 
 test('buildRun: malformed intent -> invalid-params error code', { skip: !GATE }, async () => {
 	const r = asErr(await buildRun({

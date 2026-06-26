@@ -25,7 +25,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildClassification, buildRun, buildTask } from '../analyze-rpc.js';
+import { buildClassification, buildRun, buildTask, classify } from '../analyze-rpc.js';
 
 // ---------------------------------------------------------------------------
 // Params validation -- invalid-params responses for malformed input
@@ -284,6 +284,61 @@ test('invalid-params responses carry { code, message }', async () => {
 	assert.equal(typeof err.code, 'string');
 	assert.equal(typeof err.message, 'string');
 	assert.ok(err.message.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// classify: params validation
+// ---------------------------------------------------------------------------
+
+test('classify rejects non-object params with invalid-params', async () => {
+	const r = await classify(null);
+	assert.equal(r.ok, false);
+	assert.equal((r as { error: { code: string } }).error.code, 'invalid-params');
+});
+
+test('classify rejects missing runId', async () => {
+	const r = await classify({
+		userPrompt: 'hi',
+		scopeRef:   { kind: 'workspace', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	assert.equal((r as { error: { code: string } }).error.code, 'invalid-params');
+	assert.match((r as { error: { message: string } }).error.message, /runId/);
+});
+
+test('classify rejects missing userPrompt', async () => {
+	const r = await classify({
+		runId:    'rid',
+		scopeRef: { kind: 'workspace', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /userPrompt/);
+});
+
+test('classify rejects missing scopeRef', async () => {
+	const r = await classify({ runId: 'rid', userPrompt: 'hi' });
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /scopeRef/);
+});
+
+test('classify rejects bad scopeRef.kind', async () => {
+	const r = await classify({
+		runId:      'rid',
+		userPrompt: 'hi',
+		scopeRef:   { kind: 'invalid-kind', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /scopeRef\.kind/);
+});
+
+test('classify rejects empty-string userPrompt', async () => {
+	const r = await classify({
+		runId:      'rid',
+		userPrompt: '',
+		scopeRef:   { kind: 'workspace', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /userPrompt/);
 });
 
 test('AnalyzeRpcOk responses have ok:true and a bundle field', async () => {

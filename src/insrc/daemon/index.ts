@@ -1295,6 +1295,17 @@ async function main(): Promise<void> {
 			const mod = await import('./analyze-rpc.js');
 			return mod.buildTask(params);
 		},
+		// Classifier (LLM-driven ClassifiedIntent producer). Tagged
+		// union response with `intent` (not `bundle`) on success;
+		// shared error-payload shape with analyze.context.* so the
+		// orchestrator dispatches uniformly. ClassifierValidationExhausted
+		// is unwrapped at the wire: error.code carries the inner
+		// failure code (scope-ref-unresolved or
+		// scope-ref-kind-target-mismatch) directly.
+		'analyze.classify': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.classify(params);
+		},
 
 		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
 		// backing files (substrate-coupled access store, skill registry).
