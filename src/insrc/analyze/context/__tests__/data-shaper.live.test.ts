@@ -211,8 +211,10 @@ async function runDataTaskShaper(
 	const task: PlannedTask = {
 		taskId:   't01',
 		template: 'data.schema.table',
-		params:   { connectionId: connId, table: tableName },
-		outputs:  ['table-schema'],
+		kind:      'leaf',
+		params:    { connectionId: connId, table: tableName },
+		produces:  ['table-schema'],
+		rationale: 'data-shaper.live task-mode fixture',
 	};
 	const template: AnalyzeTaskTemplate = {
 		id:       'data.schema.table',

@@ -59,24 +59,52 @@ export interface ClassifiedIntent {
 
 /**
  * Plan Builder output -- one entry per task in a flat-per-Plan list.
- * Structural only; the Plan Builder will own the validator that
- * enforces the 15 invariants (see design/analyze-plan-builder.md).
+ * See design/analyze-plan-builder.md "Plan Task contract".
+ *
+ * `taskPath` is computed by the executor at scheduling time (not by
+ * the planner), so it is optional at plan-emit time. The 15
+ * invariants validator does NOT enforce taskPath.
  */
 export interface PlannedTask {
-	readonly taskId:             string;
-	readonly template:           string;
-	readonly params:             Readonly<Record<string, unknown>>;
-	readonly outputs:            readonly string[];
-	readonly dependsOnOutputs?:  readonly string[];
+	readonly taskId:    string;
+	readonly taskPath?: string;
+	readonly template:  string;
+	readonly kind:      'leaf' | 'planner';
+	readonly params:    Readonly<Record<string, unknown>>;
+	readonly produces:  readonly string[];
+	readonly consumes?: readonly string[];
+	readonly rationale: string;
 }
 
 /**
- * Template registry entry -- structural only. The real template
- * registry will widen this with `kind`, `preconditions`,
- * `crossTargetDependencies`, `inputSchema`, `outputSchema`,
- * `prompt` fields per design/analyze-framework.md "Template
- * definition". The Context Builder only needs the identifier
- * fields for task-mode bundle staging.
+ * The Plan Builder's top-level output -- one Plan in the recursive
+ * Plan tree. Every Plan is flat (no nested tasks); recursion happens
+ * by selecting a `kind: 'planner'` task whose execution spawns a
+ * child Plan at runtime.
+ *
+ * See design/analyze-plan-builder.md "Plan Task contract".
+ */
+export interface PlanTask {
+	readonly planId:          string;
+	readonly parentTaskPath?: string;
+	readonly goal:            string;
+	readonly target:          AnalyzeTarget;
+	readonly scope:           AnalyzeScope;
+	readonly tasks:           readonly PlannedTask[];
+	readonly reasoning:       string;
+}
+
+/**
+ * Template registry entry. The Plan Builder picks tasks from a
+ * catalog of these; the Context Builder uses the identifier fields
+ * for task-mode bundle staging.
+ *
+ * The planner-relevant fields (`description`, `inputSchema`,
+ * `produces`, `outputSchema`, `isAggregator`) are populated by the
+ * template registry once it lands; per-template modules export these
+ * directly. They are optional in the type so consumers that only
+ * need identification (shaper task-mode) don't need to construct a
+ * full template.
  */
 export interface AnalyzeTaskTemplate {
 	readonly id:       string;
@@ -84,4 +112,19 @@ export interface AnalyzeTaskTemplate {
 	readonly family:   string;
 	readonly kind:     'leaf' | 'planner';
 	readonly revision: string;
+
+	/** One-sentence human-readable summary the planner sees. */
+	readonly description?: string;
+	/** JSON Schema for the task's `params`. Planner emits params, validator runs ajv against this. */
+	readonly inputSchema?: Readonly<Record<string, unknown>>;
+	/** Names of outputs this task produces. Planner's `produces` must equal this set. */
+	readonly produces?: readonly string[];
+	/** JSON Schema for each output; consumed by aggregator + per-task validators. */
+	readonly outputSchema?: Readonly<Record<string, unknown>>;
+	/**
+	 * Marks the per-target terminal aggregator (one per target). The
+	 * Plan validator's "exactly one aggregator, must be last" rule
+	 * dispatches on this flag.
+	 */
+	readonly isAggregator?: boolean;
 }

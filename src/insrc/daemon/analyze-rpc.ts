@@ -435,22 +435,31 @@ function parseTask(value: unknown): PlannedTask {
 	if (params === undefined || params === null || typeof params !== 'object') {
 		throw new TypeError("task.params: must be an object");
 	}
-	const outputs = obj['outputs'];
-	if (!Array.isArray(outputs) || outputs.some(o => typeof o !== 'string')) {
-		throw new TypeError("task.outputs: must be string[]");
+	const produces = obj['produces'];
+	if (!Array.isArray(produces) || produces.some(o => typeof o !== 'string')) {
+		throw new TypeError("task.produces: must be string[]");
+	}
+	const kind = requireString(obj, 'kind');
+	if (kind !== 'leaf' && kind !== 'planner') {
+		throw new TypeError(`task.kind: must be 'leaf' or 'planner'; got '${kind}'`);
 	}
 	const result: Record<string, unknown> = {
-		taskId:   requireString(obj, 'taskId'),
-		template: requireString(obj, 'template'),
-		params:   params as Record<string, unknown>,
-		outputs:  outputs as string[],
+		taskId:    requireString(obj, 'taskId'),
+		template:  requireString(obj, 'template'),
+		kind:      kind as 'leaf' | 'planner',
+		params:    params as Record<string, unknown>,
+		produces:  produces as string[],
+		rationale: requireString(obj, 'rationale'),
 	};
-	if (Array.isArray(obj['dependsOnOutputs'])) {
-		const deps = obj['dependsOnOutputs'];
-		if (deps.some((d: unknown) => typeof d !== 'string')) {
-			throw new TypeError("task.dependsOnOutputs: must be string[]");
+	if (Array.isArray(obj['consumes'])) {
+		const cons = obj['consumes'];
+		if (cons.some((d: unknown) => typeof d !== 'string')) {
+			throw new TypeError("task.consumes: must be string[]");
 		}
-		result['dependsOnOutputs'] = deps as string[];
+		result['consumes'] = cons as string[];
+	}
+	if (typeof obj['taskPath'] === 'string') {
+		result['taskPath'] = obj['taskPath'];
 	}
 	return result as unknown as PlannedTask;
 }

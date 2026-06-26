@@ -152,11 +152,13 @@ async function runCodeTaskShaper(args: {
 		reasoning: 'code-shaper.live task-mode fixture',
 	};
 	const task: PlannedTask = {
-		taskId:           't02',
-		template:         args.template,
-		params:           args.params,
-		outputs:          ['structural-summary'],
-		dependsOnOutputs: ['exports'],
+		taskId:    't02',
+		template:  args.template,
+		kind:      'leaf',
+		params:    args.params,
+		produces:  ['structural-summary'],
+		consumes:  ['exports'],
+		rationale: 'code-shaper.live task-mode fixture',
 	};
 	const template: AnalyzeTaskTemplate = {
 		id:       args.template,

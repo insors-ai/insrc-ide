@@ -126,10 +126,12 @@ test('buildTask rejects target=generic at task scope', async () => {
 			reasoning: 'test',
 		},
 		task: {
-			taskId:   't01',
-			template: 'code.foo',
-			params:   {},
-			outputs:  ['out'],
+			taskId:    't01',
+			template:  'code.foo',
+			kind:      'leaf',
+			params:    {},
+			produces:  ['out'],
+			rationale: 'test fixture',
 		},
 		template: {
 			id:       'code.foo',
@@ -145,7 +147,7 @@ test('buildTask rejects target=generic at task scope', async () => {
 	assert.match((r as { error: { message: string } }).error.message, /generic.*not valid at task scope/);
 });
 
-test('buildTask rejects bad task.outputs shape', async () => {
+test('buildTask rejects bad task.produces shape', async () => {
 	const r = await buildTask({
 		runId: 'rid',
 		intent: {
@@ -157,10 +159,12 @@ test('buildTask rejects bad task.outputs shape', async () => {
 			reasoning: 'test',
 		},
 		task: {
-			taskId:   't01',
-			template: 'code.foo',
-			params:   {},
-			outputs:  [1, 2],  // bad
+			taskId:    't01',
+			template:  'code.foo',
+			kind:      'leaf',
+			params:    {},
+			produces:  [1, 2],  // bad
+			rationale: 'test fixture',
 		},
 		template: {
 			id:       'code.foo',
@@ -172,7 +176,7 @@ test('buildTask rejects bad task.outputs shape', async () => {
 		upstream: {},
 	});
 	assert.equal(r.ok, false);
-	assert.match((r as { error: { message: string } }).error.message, /task\.outputs/);
+	assert.match((r as { error: { message: string } }).error.message, /task\.produces/);
 });
 
 test('buildTask accepts undefined upstream as an empty Map', async () => {
@@ -187,10 +191,12 @@ test('buildTask accepts undefined upstream as an empty Map', async () => {
 			reasoning: 'test',
 		},
 		task: {
-			taskId:   't01',
-			template: 'code.foo',
-			params:   {},
-			outputs:  ['out'],
+			taskId:    't01',
+			template:  'code.foo',
+			kind:      'leaf',
+			params:    {},
+			produces:  ['out'],
+			rationale: 'test fixture',
 		},
 		template: {
 			id:       'code.foo',
@@ -220,10 +226,12 @@ test('buildTask accepts array-form upstream', async () => {
 			reasoning: 'test',
 		},
 		task: {
-			taskId:   't01',
-			template: 'code.foo',
-			params:   {},
-			outputs:  ['out'],
+			taskId:    't01',
+			template:  'code.foo',
+			kind:      'leaf',
+			params:    {},
+			produces:  ['out'],
+			rationale: 'test fixture',
 		},
 		template: {
 			id:       'code.foo',
@@ -250,10 +258,12 @@ test('buildTask rejects bad upstream array entries', async () => {
 			reasoning: 'test',
 		},
 		task: {
-			taskId:   't01',
-			template: 'code.foo',
-			params:   {},
-			outputs:  ['out'],
+			taskId:    't01',
+			template:  'code.foo',
+			kind:      'leaf',
+			params:    {},
+			produces:  ['out'],
+			rationale: 'test fixture',
 		},
 		template: {
 			id:       'code.foo',

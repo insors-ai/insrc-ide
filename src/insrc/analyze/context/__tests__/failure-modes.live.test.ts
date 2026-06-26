@@ -134,10 +134,12 @@ async function runCodeShaperTaskWithUpstream(
 	};
 	const task: PlannedTask = {
 		taskId:           't99',
-		template:         'code.structure.dep-tree',
-		params:           { module: 'index.ts' },
-		outputs:          ['continuation'],
-		dependsOnOutputs: ['exports'],
+		template:  'code.structure.dep-tree',
+		kind:      'leaf',
+		params:    { module: 'index.ts' },
+		produces:  ['continuation'],
+		consumes:  ['exports'],
+		rationale: 'failure-modes.live task fixture',
 	};
 	const template: AnalyzeTaskTemplate = {
 		id:       'code.structure.dep-tree',

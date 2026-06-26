@@ -263,8 +263,10 @@ function taskInputs(upstream: ReadonlyMap<string, unknown | null>): TaskShapeInp
 	const task: PlannedTask = {
 		taskId:   't99',
 		template: 'code.structure.dep-tree',
-		params:   {},
-		outputs:  ['out'],
+		kind:      'leaf',
+		params:    {},
+		produces:  ['out'],
+		rationale: 'driver-unit fixture',
 	};
 	const template: AnalyzeTaskTemplate = {
 		id:       'code.structure.dep-tree',

@@ -189,11 +189,13 @@ test('buildTask (code target): happy path with upstream mix', { skip: !GATE }, a
 			reasoning: 'analyze-rpc.live task fixture',
 		},
 		task: {
-			taskId:           't42',
-			template:         'code.structure.dep-tree',
-			params:           { module: 'index.ts' },
-			outputs:          ['continuation'],
-			dependsOnOutputs: ['exports'],
+			taskId:    't42',
+			template:  'code.structure.dep-tree',
+			kind:      'leaf',
+			params:    { module: 'index.ts' },
+			produces:  ['continuation'],
+			consumes:  ['exports'],
+			rationale: 'analyze-rpc.live task fixture',
 		},
 		template: {
 			id:       'code.structure.dep-tree',
