@@ -98,6 +98,14 @@ export type {
 	TemplateExecuteResult,
 	TemplateRuntime,
 } from './executor/index.js';
+
+// Per-target runtime bootstrap -- registers every implemented
+// per-template runtime with the executor's registry. Called by the
+// daemon at boot (alongside registerBuiltinTemplates).
+export {
+	registerBuiltinRuntimes,
+	_resetRuntimeBootstrapLatchForTests,
+} from './runtimes/bootstrap.js';
 export type {
 	PlanBuilderInput,
 	PlanBuilderOpts,

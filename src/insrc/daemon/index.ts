@@ -274,6 +274,16 @@ async function main(): Promise<void> {
 	//     boot didn't populate the registry.
 	registerBuiltinTemplates();
 
+	// 6f. Register the executor's per-template RUNTIMES. Each
+	//     registered runtime implements the actual analysis behind one
+	//     template id; the executor's task walker dispatches leaf
+	//     tasks via this registry. Templates without a runtime yet
+	//     surface as 'runtime-missing' at task execution time, which
+	//     is the correct failure mode while the per-target rollout is
+	//     in progress.
+	const { registerBuiltinRuntimes } = await import('../analyze/runtimes/bootstrap.js');
+	registerBuiltinRuntimes();
+
 	// Phase 1 cleanup: cross-agent / skill registry / prompt writers /
 	// substrate runtime / meta-task template registration all stripped.
 	// Their backing modules (daemon/cross-agent/, daemon/skills/,
