@@ -264,8 +264,15 @@ async function main(): Promise<void> {
 	//     so the daemon's top-level fatal handler logs + exits cleanly,
 	//     rather than discovering the missing file at the first shaper
 	//     invocation.
-	const { validateAnalyzePrompts } = await import('../analyze/index.js');
+	const { validateAnalyzePrompts, registerBuiltinTemplates } = await import('../analyze/index.js');
 	validateAnalyzePrompts();
+
+	// 6e. Register the analyze framework's task-template catalog
+	//     (design/analyze-plan-builder.md "Param resolution from
+	//     context"). The Plan Builder picks tasks from this catalog;
+	//     INV-3 (templates exist) fires loudly during planning if the
+	//     boot didn't populate the registry.
+	registerBuiltinTemplates();
 
 	// Phase 1 cleanup: cross-agent / skill registry / prompt writers /
 	// substrate runtime / meta-task template registration all stripped.

@@ -56,3 +56,16 @@ export type {
 	AnalyzeTaskTemplate,
 	ClassifiedIntent,
 } from './types.js';
+
+// Template registry surface -- the Plan Builder validator + LLM driver
+// both read from these.
+export {
+	registerTemplate,
+	getTemplateCatalog,
+	getTemplatesForTarget,
+	getTemplate,
+	getAggregatorFor,
+	TemplateRegistrationError,
+	_resetTemplateRegistryForTests,
+} from './templates/registry.js';
+export { registerBuiltinTemplates } from './templates/bootstrap.js';

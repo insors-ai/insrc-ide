@@ -1,0 +1,142 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/**
+ * Code-target template catalog. Five templates -- enough for a real
+ * M-bucket plan: discovery (modules + entrypoints), surface, structure,
+ * aggregator.
+ *
+ * Per-family families are documented in design/analyze-framework-code.md;
+ * this barrel registers the foundational five. Subsequent fanout
+ * (integration, non-functional, tests, usage, cross-reference) lands
+ * in later commits.
+ */
+
+import type { AnalyzeTaskTemplate } from '../../types.js';
+import {
+	AGGREGATOR_INPUT_SCHEMA,
+	AGGREGATOR_OUTPUT_SCHEMA,
+	SCOPE_REF_SCHEMA,
+} from '../shared-schemas.js';
+import { registerTemplate } from '../registry.js';
+
+export const codeDiscoveryModules: AnalyzeTaskTemplate = {
+	id:          'code.discovery.modules',
+	target:      'code',
+	family:      'discovery',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Enumerate the modules in scope (top-level packages or directories with build-system manifests).',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['scopeRef'],
+		properties: {
+			scopeRef: SCOPE_REF_SCHEMA,
+		},
+	},
+	produces:    ['modules'],
+	outputSchema: {
+		type:     'object',
+		required: ['modules'],
+		properties: {
+			modules: {
+				type:  'array',
+				items: {
+					type:                 'object',
+					additionalProperties: true,
+					required:             ['name', 'path'],
+					properties: {
+						name: { type: 'string' },
+						path: { type: 'string' },
+					},
+				},
+			},
+		},
+	},
+};
+
+export const codeDiscoveryEntrypoints: AnalyzeTaskTemplate = {
+	id:          'code.discovery.entrypoints',
+	target:      'code',
+	family:      'discovery',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Enumerate the functional entrypoints (top-level exports, CLI commands, HTTP route registrations, RPC handlers, cron jobs) in scope.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['scopeRef'],
+		properties: {
+			scopeRef: SCOPE_REF_SCHEMA,
+		},
+	},
+	produces:    ['entrypoints'],
+};
+
+export const codeSurfaceFunctional: AnalyzeTaskTemplate = {
+	id:          'code.surface.functional',
+	target:      'code',
+	family:      'surface',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Extract the functional surface (APIs, exports, endpoints) of a single module.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['module'],
+		properties: {
+			module: { type: 'string', minLength: 1 },
+			depth:  { type: 'string', enum: ['shallow', 'deep'] },
+		},
+	},
+	produces:    ['functional-surface'],
+};
+
+export const codeStructureModuleTree: AnalyzeTaskTemplate = {
+	id:          'code.structure.module-tree',
+	target:      'code',
+	family:      'structure',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Walk the module-dependency graph rooted at the scope target and emit the abbreviated tree.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['scopeRef'],
+		properties: {
+			scopeRef: SCOPE_REF_SCHEMA,
+			maxDepth: { type: 'integer', minimum: 1, maximum: 12 },
+		},
+	},
+	produces:    ['module-tree'],
+};
+
+export const codeAggregateReport: AnalyzeTaskTemplate = {
+	id:           'code.aggregate.report',
+	target:       'code',
+	family:       'aggregate',
+	kind:         'leaf',
+	revision:     'r1',
+	description:  'Terminal aggregator for code-target plans. Consumes every upstream task output + emits the final report.',
+	inputSchema:  AGGREGATOR_INPUT_SCHEMA,
+	outputSchema: AGGREGATOR_OUTPUT_SCHEMA,
+	produces:     ['report'],
+	isAggregator: true,
+};
+
+export const CODE_TEMPLATES: readonly AnalyzeTaskTemplate[] = [
+	codeDiscoveryModules,
+	codeDiscoveryEntrypoints,
+	codeSurfaceFunctional,
+	codeStructureModuleTree,
+	codeAggregateReport,
+];
+
+export function registerCodeTemplates(): void {
+	for (const t of CODE_TEMPLATES) {
+		registerTemplate(t);
+	}
+}

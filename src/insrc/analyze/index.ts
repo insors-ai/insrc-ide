@@ -41,3 +41,29 @@ export type {
 	ClassifyErrorPayload,
 	ValidationFailure,
 } from './classifier/index.js';
+
+// Planner surface -- types + validator + template registry.
+export {
+	validatePlan,
+	SCOPE_BAND,
+	PLAN_TASK_SCHEMA,
+	PLANNED_TASK_SCHEMA,
+	registerTemplate,
+	registerBuiltinTemplates,
+	getTemplateCatalog,
+	getTemplatesForTarget,
+	getTemplate,
+	getAggregatorFor,
+	TemplateRegistrationError,
+} from './planner/index.js';
+export type {
+	PlanBuilderInput,
+	PlanBuilderOpts,
+	PlanBuilderResponse,
+	PlanBuilderErrorCode,
+	PlanBuilderErrorPayload,
+	PlanTask,
+	PlannedTask,
+	PlanInvariantId,
+	PlanValidationFailure,
+} from './planner/index.js';
