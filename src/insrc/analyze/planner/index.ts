@@ -69,3 +69,18 @@ export {
 	_resetTemplateRegistryForTests,
 } from './templates/registry.js';
 export { registerBuiltinTemplates } from './templates/bootstrap.js';
+
+// LLM driver -- runPlanner + typed errors + the prompt path the
+// boot validator checks.
+export {
+	runPlanner,
+	PLANNER_PROMPT_PATH,
+	PlanBuilderExhausted,
+	PlanBuilderLlmUnavailableError,
+	PlanBuilderPromptMissingError,
+	PlanBuilderSchemaUnrecoverable,
+} from './driver.js';
+
+// Catalog rendering helper -- exposed for tests + future planner
+// orchestration that needs to materialise the prompt body.
+export { renderCatalog, renderDepthPolicy } from './render-catalog.js';

@@ -42,7 +42,7 @@ export type {
 	ValidationFailure,
 } from './classifier/index.js';
 
-// Planner surface -- types + validator + template registry.
+// Planner surface -- types + validator + template registry + driver.
 export {
 	validatePlan,
 	SCOPE_BAND,
@@ -55,6 +55,14 @@ export {
 	getTemplate,
 	getAggregatorFor,
 	TemplateRegistrationError,
+	runPlanner,
+	PLANNER_PROMPT_PATH,
+	PlanBuilderExhausted,
+	PlanBuilderLlmUnavailableError,
+	PlanBuilderPromptMissingError,
+	PlanBuilderSchemaUnrecoverable,
+	renderCatalog,
+	renderDepthPolicy,
 } from './planner/index.js';
 export type {
 	PlanBuilderInput,
