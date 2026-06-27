@@ -130,10 +130,10 @@ test('registerTemplate: family=aggregate AND isAggregator:true is accepted', () 
 // registerBuiltinTemplates -- expected count + collision-free + idempotent
 // ---------------------------------------------------------------------------
 
-test('registerBuiltinTemplates registers exactly 14 builtins (5 code + 4 data + 4 infra + 1 generic) without collision', () => {
+test('registerBuiltinTemplates registers exactly 15 builtins (6 code + 4 data + 4 infra + 1 generic) without collision', () => {
 	freshRegistry();
 	assert.doesNotThrow(() => registerBuiltinTemplates());
-	assert.equal(getTemplateCatalog().length, 14);
+	assert.equal(getTemplateCatalog().length, 15);
 });
 
 test('registerBuiltinTemplates is idempotent (latch prevents double-register)', () => {
@@ -161,14 +161,18 @@ test('every per-target subset has its own aggregator', () => {
 // getTemplatesForTarget
 // ---------------------------------------------------------------------------
 
-test('getTemplatesForTarget(code) returns 5 code templates', () => {
+test('getTemplatesForTarget(code) returns 6 code templates (5 leaf + 1 planner)', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
 	const code = getTemplatesForTarget('code');
-	assert.equal(code.length, 5);
+	assert.equal(code.length, 6);
 	for (const t of code) {
 		assert.equal(t.target, 'code');
 	}
+	// Exactly one planner-kind template (code.subrun.deep-dive); rest are leaf.
+	const planners = code.filter(t => t.kind === 'planner');
+	assert.equal(planners.length, 1);
+	assert.equal(planners[0]!.id, 'code.subrun.deep-dive');
 });
 
 test('getTemplatesForTarget(data) returns 4 data templates', () => {

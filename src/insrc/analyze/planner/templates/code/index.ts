@@ -95,6 +95,44 @@ export const codeSurfaceFunctional: AnalyzeTaskTemplate = {
 	produces:    ['functional-surface'],
 };
 
+export const codeSubrunDeepDive: AnalyzeTaskTemplate = {
+	id:          'code.subrun.deep-dive',
+	target:      'code',
+	family:      'subrun',
+	kind:        'planner',
+	revision:    'r1',
+	description: 'Recursively plan a deep-dive into a sub-target (module, repo, central component). The task\'s `childIntent` param carries the classified intent for the child plan; the executor spawns a child Plan Builder invocation against it and materialises the terminal aggregator output as `report`.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['childIntent'],
+		properties: {
+			childIntent: {
+				type:                 'object',
+				additionalProperties: false,
+				required:             ['target', 'scope', 'focused', 'scopeRef', 'reasoning'],
+				properties: {
+					target:    { type: 'string', enum: ['code', 'data', 'infra', 'generic'] },
+					scope:     { type: 'string', enum: ['XS', 'S', 'M', 'L', 'XL'] },
+					focused:   { type: 'boolean' },
+					focus:     { type: 'string', minLength: 1 },
+					scopeRef:  {
+						type:                 'object',
+						additionalProperties: false,
+						required:             ['kind', 'value'],
+						properties: {
+							kind:  { type: 'string', enum: ['repo', 'module', 'file', 'symbol', 'connection', 'manifest-dir', 'workspace'] },
+							value: { type: 'string', minLength: 1 },
+						},
+					},
+					reasoning: { type: 'string', minLength: 1 },
+				},
+			},
+		},
+	},
+	produces:    ['report'],
+};
+
 export const codeStructureModuleTree: AnalyzeTaskTemplate = {
 	id:          'code.structure.module-tree',
 	target:      'code',
@@ -132,6 +170,7 @@ export const CODE_TEMPLATES: readonly AnalyzeTaskTemplate[] = [
 	codeDiscoveryEntrypoints,
 	codeSurfaceFunctional,
 	codeStructureModuleTree,
+	codeSubrunDeepDive,
 	codeAggregateReport,
 ];
 

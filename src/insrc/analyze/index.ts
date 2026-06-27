@@ -64,8 +64,12 @@ export {
 	MaxPlanDepthExceededError,
 	renderCatalog,
 	renderDepthPolicy,
+	runRecursivePlanner,
+	countNodes,
+	countPlannerTasks,
+	maxDepth,
 } from './planner/index.js';
-export type { MaxPlanDepthMap } from './planner/index.js';
+export type { MaxPlanDepthMap, PlanTreeNode } from './planner/index.js';
 export type {
 	PlanBuilderInput,
 	PlanBuilderOpts,

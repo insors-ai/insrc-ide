@@ -87,6 +87,17 @@ export type { MaxPlanDepthMap } from './types.js';
 // orchestration that needs to materialise the prompt body.
 export { renderCatalog, renderDepthPolicy } from './render-catalog.js';
 
+// Recursive plan-tree builder -- drives a root plan + every
+// planner-template task's child plan; returns the full tree.
+export {
+	runRecursivePlanner,
+	countNodes,
+	countPlannerTasks,
+	maxDepth,
+	type PlanTreeNode,
+	type RecursivePlannerArgs,
+} from './recursive.js';
+
 // Plan persistence -- audit trail + final-accepted-plan read/write
 // per (runId, parentTaskPath?). The driver writes through these
 // automatically; the framework outer-loop reads for resume.
