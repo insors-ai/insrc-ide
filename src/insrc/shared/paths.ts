@@ -86,6 +86,13 @@ export const PATHS = {
   // root; resumable runs read the cached state back.
   analyze:     join(INSRC_DIR, 'analyze'),
   analyzeRun:  (runId: string): string => join(INSRC_DIR, 'analyze', runId),
+  // Per-task output: ~/.insrc/analyze/<runId>/tasks/<taskId>.json
+  // Leaf tasks land here; planner-template tasks ALSO land here
+  // (carrying the child plan's aggregator output) and additionally
+  // hold a sibling directory <runRoot>/tasks/<taskId>/ for the
+  // child plan's persistence layout.
+  analyzeTaskOutput: (runId: string, taskId: string): string =>
+    join(INSRC_DIR, 'analyze', runId, 'tasks', `${taskId}.json`),
   analyzeContext: (runId: string): string =>
     join(INSRC_DIR, 'analyze', runId, 'context'),
   logDir:      LOG_DIR,

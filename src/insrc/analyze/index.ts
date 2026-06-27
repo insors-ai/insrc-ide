@@ -70,6 +70,34 @@ export {
 	maxDepth,
 } from './planner/index.js';
 export type { MaxPlanDepthMap, PlanTreeNode } from './planner/index.js';
+
+// Executor surface -- task walker + per-template runtime registry +
+// per-task persistence. Per-target runtime IMPLEMENTATIONS land per
+// per-target work; this barrel exports the skeleton + registry.
+export {
+	runExecutor,
+	registerTemplateRuntime,
+	getRuntime as getTemplateRuntime,
+	listRegisteredRuntimes as listRegisteredTemplateRuntimes,
+	TemplateRuntimeRegistrationError,
+	taskOutputPathFor,
+	writeTaskOutput,
+	readTaskOutput,
+	purgeTaskOutput,
+	purgeAllTaskOutputs,
+	ExecutorOutputShapeError,
+	ExecutorRuntimeMissingError,
+} from './executor/index.js';
+export type {
+	ExecutorErrorCode,
+	ExecutorResult,
+	PlanExecutionResult,
+	RunExecutorArgs,
+	TaskExecutionRecord,
+	TemplateExecuteArgs,
+	TemplateExecuteResult,
+	TemplateRuntime,
+} from './executor/index.js';
 export type {
 	PlanBuilderInput,
 	PlanBuilderOpts,
