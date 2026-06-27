@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { CLASSIFY_PROMPT_PATH } from '../classifier/index.js';
 import { PLANNER_PROMPT_PATH } from '../planner/index.js';
+import { CODE_AGGREGATE_PROMPT_PATH } from '../runtimes/code/index.js';
 import { getLogger } from '../../shared/logger.js';
 
 import { PROMPT_PATHS } from './index.js';
@@ -93,8 +94,9 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	for (const [shaperId, relPath] of Object.entries(PROMPT_PATHS)) {
 		out.push({ componentId: shaperId, relPath });
 	}
-	out.push({ componentId: 'classifier', relPath: CLASSIFY_PROMPT_PATH });
-	out.push({ componentId: 'planner',    relPath: PLANNER_PROMPT_PATH });
+	out.push({ componentId: 'classifier',        relPath: CLASSIFY_PROMPT_PATH });
+	out.push({ componentId: 'planner',           relPath: PLANNER_PROMPT_PATH });
+	out.push({ componentId: 'code.aggregate.report', relPath: CODE_AGGREGATE_PROMPT_PATH });
 	return out;
 }
 

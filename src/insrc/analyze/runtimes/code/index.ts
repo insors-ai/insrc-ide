@@ -18,10 +18,12 @@
  */
 
 import { codeDiscoveryModulesRuntime } from './discovery-modules.js';
+import { codeAggregateReportRuntime  } from './aggregate-report.js';
 
 import type { TemplateRuntime } from '../../executor/types.js';
 
 export { codeDiscoveryModulesRuntime } from './discovery-modules.js';
+export { codeAggregateReportRuntime, CODE_AGGREGATE_PROMPT_PATH } from './aggregate-report.js';
 
 /**
  * Every code-target template runtime currently implemented. Bootstrap
@@ -32,9 +34,9 @@ export { codeDiscoveryModulesRuntime } from './discovery-modules.js';
  *   - code.discovery.entrypoints
  *   - code.surface.functional
  *   - code.structure.module-tree
- *   - code.aggregate.report          (LLM-driven; lands with the aggregator phase)
  *   - code.subrun.deep-dive          (planner-kind, dispatched by walker -- no runtime needed)
  */
 export const CODE_RUNTIMES: readonly TemplateRuntime[] = [
 	codeDiscoveryModulesRuntime,
+	codeAggregateReportRuntime,
 ];
