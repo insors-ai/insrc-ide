@@ -34,10 +34,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { realpathSync } from 'node:fs';
 
+import { existsSync, readFileSync } from 'node:fs';
+
 import { _resetAnalyzeConfigCacheForTests } from '../../../config/analyze.js';
 import { registerBuiltinTools } from '../../../daemon/tools/builtins/index.js';
 import { _resetRegistryForTests as _resetToolRegistryForTests } from '../../../daemon/tools/registry.js';
 import { shaperFor } from '../../context/index.js';
+import {
+	planFinalPathFor,
+	purgePlan,
+	readPlanFinal,
+} from '../cache.js';
 import {
 	_resetTemplateRegistryForTests,
 	getTemplateCatalog,
@@ -135,58 +142,72 @@ test('runPlanner: infra target + XS scope -> validated PlanTask using the regist
 	};
 	const opts: PlanBuilderOpts = { runId };
 
-	const plan = await runPlanner({ input, opts });
+	try {
+		const plan = await runPlanner({ input, opts });
 
-	// Wire-layer shape check.
-	assert.ok(validatePlanShape(plan), 'returned plan must satisfy the wire schema');
+		// Wire-layer shape check.
+		assert.ok(validatePlanShape(plan), 'returned plan must satisfy the wire schema');
 
-	// Semantic invariants: re-run validate -- the driver ran it
-	// already, but the live test pins that the returned plan is
-	// PASSING the same checks the driver gates on.
-	const failure = validatePlan(plan, getTemplatesForTarget('infra'), {
-		focused:     intent.focused,
-		isChildPlan: false,
-	});
-	assert.equal(failure, null,
-		`plan should pass every invariant; got: ${JSON.stringify(failure)}`);
+		// Persistence: the driver should have written plan.json + at least
+		// one attempt under plan.attempts/ for the run-id.
+		const finalPath = planFinalPathFor({ runId });
+		assert.ok(existsSync(finalPath), `final plan.json should exist at ${finalPath}`);
+		const persisted = readPlanFinal({ runId });
+		assert.deepEqual(persisted, plan,
+			'persisted plan.json should match the returned plan exactly');
+		// Spot-check via readFileSync that the file is JSON (catches encoding bugs).
+		assert.doesNotThrow(() => JSON.parse(readFileSync(finalPath, 'utf8')));
 
-	// Spot checks per the design's expectations:
-	assert.equal(plan.target, 'infra');
-	assert.equal(plan.scope,  'XS');
-	assert.equal(plan.parentTaskPath, undefined);
-	assert.ok(plan.tasks.length >= 3 && plan.tasks.length <= 8,
-		`XS task count should be 3-8; got ${plan.tasks.length}`);
+		// Semantic invariants: re-run validate -- the driver ran it
+		// already, but the live test pins that the returned plan is
+		// PASSING the same checks the driver gates on.
+		const failure = validatePlan(plan, getTemplatesForTarget('infra'), {
+			focused:     intent.focused,
+			isChildPlan: false,
+		});
+		assert.equal(failure, null,
+			`plan should pass every invariant; got: ${JSON.stringify(failure)}`);
 
-	// Last task must be the infra aggregator (INV-12).
-	const last = plan.tasks[plan.tasks.length - 1]!;
-	assert.equal(last.template, 'infra.aggregate.report');
-	assert.equal(last.kind, 'leaf');
+		// Spot checks per the design's expectations:
+		assert.equal(plan.target, 'infra');
+		assert.equal(plan.scope,  'XS');
+		assert.equal(plan.parentTaskPath, undefined);
+		assert.ok(plan.tasks.length >= 3 && plan.tasks.length <= 8,
+			`XS task count should be 3-8; got ${plan.tasks.length}`);
 
-	// First task is typically discovery.families to bring the catalog
-	// into structured form. We don't pin this rigidly -- the LLM may
-	// pick a different ordering -- but if it's not discovery, the
-	// downstream inventory tasks have less to fan out over. Soft
-	// assertion: the plan references at least one discovery template.
-	const usesDiscovery = plan.tasks.some(t => t.template.startsWith('infra.discovery.'));
-	assert.ok(usesDiscovery,
-		`plan should reference at least one discovery template; got templates: ${plan.tasks.map(t => t.template).join(', ')}`);
+		// Last task must be the infra aggregator (INV-12).
+		const last = plan.tasks[plan.tasks.length - 1]!;
+		assert.equal(last.template, 'infra.aggregate.report');
+		assert.equal(last.kind, 'leaf');
+
+		// First task is typically discovery.families to bring the catalog
+		// into structured form. We don't pin this rigidly -- the LLM may
+		// pick a different ordering -- but if it's not discovery, the
+		// downstream inventory tasks have less to fan out over. Soft
+		// assertion: the plan references at least one discovery template.
+		const usesDiscovery = plan.tasks.some(t => t.template.startsWith('infra.discovery.'));
+		assert.ok(usesDiscovery,
+			`plan should reference at least one discovery template; got templates: ${plan.tasks.map(t => t.template).join(', ')}`);
 
 	// Every task's template must be in the registered catalog
 	// (INV-3 -- already enforced by validatePlan above, but assert
 	// explicitly as a sanity check the test framework is wired
-	// correctly).
-	const validIds = new Set(getTemplatesForTarget('infra').map(t => t.id));
-	for (const t of plan.tasks) {
-		assert.ok(validIds.has(t.template),
-			`task ${t.taskId}: template '${t.template}' not in registered catalog`);
-	}
+		// correctly).
+		const validIds = new Set(getTemplatesForTarget('infra').map(t => t.id));
+		for (const t of plan.tasks) {
+			assert.ok(validIds.has(t.template),
+				`task ${t.taskId}: template '${t.template}' not in registered catalog`);
+		}
 
-	// Plan reasoning + per-task rationale meet length floors (INV-14).
-	assert.ok(plan.reasoning.trim().length >= 50,
-		`plan reasoning should be >= 50 chars; got ${plan.reasoning.trim().length}`);
-	for (const t of plan.tasks) {
-		assert.ok(t.rationale.trim().length >= 20,
-			`task ${t.taskId} rationale should be >= 20 chars; got ${t.rationale.trim().length}`);
+		// Plan reasoning + per-task rationale meet length floors (INV-14).
+		assert.ok(plan.reasoning.trim().length >= 50,
+			`plan reasoning should be >= 50 chars; got ${plan.reasoning.trim().length}`);
+		for (const t of plan.tasks) {
+			assert.ok(t.rationale.trim().length >= 20,
+				`task ${t.taskId} rationale should be >= 20 chars; got ${t.rationale.trim().length}`);
+		}
+	} finally {
+		purgePlan({ runId });
 	}
 });
 

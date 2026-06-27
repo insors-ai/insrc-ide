@@ -84,3 +84,20 @@ export {
 // Catalog rendering helper -- exposed for tests + future planner
 // orchestration that needs to materialise the prompt body.
 export { renderCatalog, renderDepthPolicy } from './render-catalog.js';
+
+// Plan persistence -- audit trail + final-accepted-plan read/write
+// per (runId, parentTaskPath?). The driver writes through these
+// automatically; the framework outer-loop reads for resume.
+export {
+	planDirFor,
+	planFinalPathFor,
+	planAttemptsDirFor,
+	planAttemptPathFor,
+	planFeedbackPathFor,
+	writeAttempt,
+	writeFeedback,
+	writePlanFinal,
+	readPlanFinal,
+	purgePlan,
+	type PersistArgs,
+} from './cache.js';

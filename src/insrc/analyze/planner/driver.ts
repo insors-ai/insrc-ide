@@ -42,6 +42,11 @@ import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import { CONTRACT_FOOTER_MD } from '../contract.js';
 import { assembleMarkdown } from '../context/bundle.js';
 
+import {
+	writeAttempt,
+	writeFeedback,
+	writePlanFinal,
+} from './cache.js';
 import { renderCatalog, renderDepthPolicy } from './render-catalog.js';
 import {
 	PLAN_TASK_SCHEMA,
@@ -143,6 +148,9 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 	const attempts: PlanTask[] = [];
 	const failures: PlanValidationFailure[] = [];
 	const maxAttempts = cfg.shaper.structuredOutputRetries;
+	const persistArgs = parentTaskPath !== undefined
+		? { runId: opts.runId, parentTaskPath }
+		: { runId: opts.runId };
 
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
 		let raw: PlanTask;
@@ -175,12 +183,19 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 			throw new PlanBuilderSchemaUnrecoverable(shape.errors);
 		}
 
+		// Persist this attempt to the audit trail BEFORE the validator
+		// runs -- so a mid-validation crash still leaves the attempt on
+		// disk for diagnosis.
+		writeAttempt(persistArgs, attempt + 1, stamped);
+
 		// Semantic invariants.
 		const failure = validatePlan(stamped, catalog, {
 			focused:     intent.focused,
 			isChildPlan: parentTaskPath !== undefined,
 		});
 		if (failure === null) {
+			// Promote the accepted attempt to the final slot.
+			writePlanFinal(persistArgs, stamped);
 			log.info(
 				{
 					runId:       opts.runId,
@@ -197,6 +212,11 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 
 		attempts.push(stamped);
 		failures.push(failure);
+
+		// Persist the validator feedback alongside the rejected attempt
+		// so the audit trail has both halves of the round-trip.
+		writeFeedback(persistArgs, attempt + 1, failure);
+
 		log.info(
 			{
 				runId:       opts.runId,
