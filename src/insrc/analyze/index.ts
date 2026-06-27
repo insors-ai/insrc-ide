@@ -61,9 +61,11 @@ export {
 	PlanBuilderLlmUnavailableError,
 	PlanBuilderPromptMissingError,
 	PlanBuilderSchemaUnrecoverable,
+	MaxPlanDepthExceededError,
 	renderCatalog,
 	renderDepthPolicy,
 } from './planner/index.js';
+export type { MaxPlanDepthMap } from './planner/index.js';
 export type {
 	PlanBuilderInput,
 	PlanBuilderOpts,

@@ -43,8 +43,19 @@ export interface PlanBuilderInput {
 	 * Current depth in the Plan tree (0 = root). The Plan Builder
 	 * uses this against the root Run's `maxPlanDepth` config to
 	 * decide whether to refuse a recursive invocation.
+	 *
+	 * `currentDepth: 0 + 1 > maxPlanDepth[rootScope]` triggers
+	 * MaxPlanDepthExceededError BEFORE any LLM call.
 	 */
 	readonly currentDepth?: number;
+	/**
+	 * The ROOT Run's classified scope bucket -- governs the depth
+	 * cap regardless of this Plan's local scope. A child plan
+	 * classified as M inside an XL root run still uses XL's depth
+	 * ceiling. Defaults to `intent.scope` when undefined (root
+	 * invocations).
+	 */
+	readonly rootScope?: import('../../shared/analyze-types.js').AnalyzeScope;
 }
 
 /** Plan Builder per-invocation options. */
@@ -81,6 +92,12 @@ export type PlanBuilderErrorCode =
 	| 'plan-builder-prompt-missing'
 	| 'max-plan-depth-exceeded'
 	| 'internal-error';
+
+/**
+ * Per-bucket depth ceiling re-exported so callers can wire the
+ * type without round-tripping through config/analyze.js.
+ */
+export type { MaxPlanDepthMap } from '../../config/analyze.js';
 
 /** Re-exports so consumers don't double-import. */
 export type {

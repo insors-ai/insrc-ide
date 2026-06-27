@@ -79,7 +79,9 @@ export {
 	PlanBuilderLlmUnavailableError,
 	PlanBuilderPromptMissingError,
 	PlanBuilderSchemaUnrecoverable,
+	MaxPlanDepthExceededError,
 } from './driver.js';
+export type { MaxPlanDepthMap } from './types.js';
 
 // Catalog rendering helper -- exposed for tests + future planner
 // orchestration that needs to materialise the prompt body.

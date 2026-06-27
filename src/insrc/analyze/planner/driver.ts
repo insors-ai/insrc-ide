@@ -108,6 +108,26 @@ export class PlanBuilderPromptMissingError extends Error {
 	}
 }
 
+export class MaxPlanDepthExceededError extends Error {
+	readonly currentDepth: number;
+	readonly rootScope:    string;
+	readonly cap:          number;
+
+	constructor(currentDepth: number, rootScope: string, cap: number) {
+		super(
+			`Plan Builder refused: currentDepth=${currentDepth}+1 exceeds ` +
+				`max-plan-depth for root scope ${rootScope} (cap=${cap}). ` +
+				`Adjust models.analyze.maxPlanDepth.${rootScope} or restructure ` +
+				`the parent plan to use leaf templates instead of planner-template ` +
+				`tasks at this depth.`,
+		);
+		this.name = 'MaxPlanDepthExceededError';
+		this.currentDepth = currentDepth;
+		this.rootScope = rootScope;
+		this.cap = cap;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // runPlanner -- public entry point
 // ---------------------------------------------------------------------------
@@ -122,6 +142,16 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 	const cfg = loadAnalyzeConfig();
 	const { input, opts } = args;
 	const { intent, contextBundle, parentTaskPath, catalog: catalogArg } = input;
+
+	// (0) Depth cap. The Plan Builder refuses to invoke when
+	// currentDepth + 1 would exceed the root scope's ceiling. Fires
+	// BEFORE any LLM cost is paid.
+	const currentDepth = input.currentDepth ?? 0;
+	const rootScope = input.rootScope ?? intent.scope;
+	const cap = cfg.maxPlanDepth[rootScope];
+	if (currentDepth + 1 > cap) {
+		throw new MaxPlanDepthExceededError(currentDepth, rootScope, cap);
+	}
 
 	// (1) Catalog: use the provided catalog or fall back to the
 	// registered builtins filtered to this plan's target.

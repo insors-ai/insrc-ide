@@ -57,6 +57,21 @@ import {
 	ShaperToolLoopExhausted,
 } from '../analyze/context/driver.js';
 import { ScopeNotIndexedError } from '../analyze/context/invariants.js';
+import {
+	MaxPlanDepthExceededError,
+	PlanBuilderExhausted,
+	PlanBuilderLlmUnavailableError,
+	PlanBuilderPromptMissingError,
+	PlanBuilderSchemaUnrecoverable,
+	runPlanner,
+} from '../analyze/planner/driver.js';
+import { getTemplatesForTarget } from '../analyze/planner/templates/registry.js';
+import type {
+	PlanBuilderInput,
+	PlanBuilderOpts,
+	PlanTask,
+} from '../analyze/planner/types.js';
+import type { AnalyzeScope } from '../shared/analyze-types.js';
 import type {
 	AnalyzeContextBundle,
 	ClassificationShapeInput,
@@ -113,6 +128,12 @@ export type AnalyzeRpcErrorCode =
 	| 'classifier-prompt-missing'
 	| 'scope-ref-unresolved'
 	| 'scope-ref-kind-target-mismatch'
+	| 'plan-builder-llm-unavailable'
+	| 'plan-builder-schema-unrecoverable'
+	| 'plan-builder-prompt-missing'
+	| 'plan-builder-exhausted'
+	| 'plan-invariant-failed'
+	| 'max-plan-depth-exceeded'
 	| 'internal-error';
 
 // ---------------------------------------------------------------------------
@@ -127,6 +148,18 @@ export interface ClassifyRpcOk {
 }
 
 export type ClassifyRpcResponse = ClassifyRpcOk | AnalyzeRpcErr;
+
+// ---------------------------------------------------------------------------
+// Plan Builder response shape -- separate `plan` field; shared
+// AnalyzeRpcErr surface.
+// ---------------------------------------------------------------------------
+
+export interface PlanRpcOk {
+	readonly ok:   true;
+	readonly plan: PlanTask;
+}
+
+export type PlanRpcResponse = PlanRpcOk | AnalyzeRpcErr;
 
 // ---------------------------------------------------------------------------
 // Public handlers
@@ -261,6 +294,128 @@ function classifyClassifierError(err: unknown): AnalyzeRpcErrorPayload {
 }
 
 // ---------------------------------------------------------------------------
+// analyze.plan.build
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a Plan Task for a (runId, intent) pair. Internally:
+ *   1. Builds (or cache-hits) the run-level context bundle via
+ *      shaperFor('run', intent.target).buildRunBundle.
+ *   2. Resolves the catalog via getTemplatesForTarget(intent.target).
+ *   3. Calls runPlanner with the bundle + catalog + depth context.
+ *
+ * Tagged-union response. Typed errors map to stable codes:
+ *   PlanBuilderLlmUnavailableError   -> plan-builder-llm-unavailable
+ *   PlanBuilderSchemaUnrecoverable   -> plan-builder-schema-unrecoverable
+ *   PlanBuilderPromptMissingError    -> plan-builder-prompt-missing
+ *   PlanBuilderExhausted             -> plan-invariant-failed (carries
+ *     lastFailure + all attempts in `data`)
+ *   MaxPlanDepthExceededError        -> max-plan-depth-exceeded
+ *   Shaper-side errors (from the bundle build) fall through to
+ *     classifyShaperError so the wire codes stay stable.
+ */
+export async function plan(params: unknown): Promise<PlanRpcResponse> {
+	let parsed: PlanParams;
+	try {
+		parsed = parsePlanParams(params);
+	} catch (err) {
+		return invalidParams(err);
+	}
+
+	try {
+		// (0) Hoist the depth-cap check ABOVE the shaper call so a
+		// refused invocation never pays for the bundle build. The
+		// driver's runPlanner runs the same check internally as
+		// defense-in-depth.
+		const { loadAnalyzeConfig } = await import('../config/analyze.js');
+		const cfg = loadAnalyzeConfig();
+		const currentDepth = parsed.currentDepth ?? 0;
+		const rootScope    = parsed.rootScope    ?? parsed.intent.scope;
+		const cap          = cfg.maxPlanDepth[rootScope];
+		if (currentDepth + 1 > cap) {
+			throw new MaxPlanDepthExceededError(currentDepth, rootScope, cap);
+		}
+
+		// (1) Build (or read-from-cache) the run-level bundle. Shaper
+		// errors propagate to the outer catch + classifyShaperError.
+		const shaper = shaperFor('run', parsed.intent.target);
+		const contextBundle = await shaper.buildRunBundle(
+			{ intent: parsed.intent },
+			{ runId: parsed.runId },
+		);
+
+		// (2) + (3) Run the planner.
+		const catalog = getTemplatesForTarget(parsed.intent.target);
+		const input: PlanBuilderInput = {
+			intent:        parsed.intent,
+			contextBundle,
+			catalog,
+			...(parsed.parentTaskPath !== undefined ? { parentTaskPath: parsed.parentTaskPath } : {}),
+			...(parsed.currentDepth   !== undefined ? { currentDepth:   parsed.currentDepth   } : {}),
+			...(parsed.rootScope      !== undefined ? { rootScope:      parsed.rootScope      } : {}),
+		};
+		const opts: PlanBuilderOpts = { runId: parsed.runId };
+
+		const planResult = await runPlanner({ input, opts });
+		log.debug({ runId: parsed.runId, taskCount: planResult.tasks.length }, 'analyze.plan.build complete');
+		return { ok: true, plan: planResult };
+	} catch (err) {
+		const payload = classifyPlannerError(err);
+		log.info(
+			{ runId: parsed.runId, code: payload.code, message: payload.message },
+			'analyze.plan.build failed',
+		);
+		return { ok: false, error: payload };
+	}
+}
+
+/**
+ * Map a typed Plan-Builder error onto an AnalyzeRpcErrorPayload.
+ * PlanBuilderExhausted's `lastFailure` carries the invariant id +
+ * message; we attach the full failures + last-attempt summary in
+ * `data` so the orchestrator can build a diagnostic UI without
+ * re-reading plan.attempts/ from disk.
+ */
+function classifyPlannerError(err: unknown): AnalyzeRpcErrorPayload {
+	if (err instanceof MaxPlanDepthExceededError) {
+		return {
+			code:    'max-plan-depth-exceeded',
+			message: err.message,
+			data:    {
+				currentDepth: err.currentDepth,
+				rootScope:    err.rootScope,
+				cap:          err.cap,
+			},
+		};
+	}
+	if (err instanceof PlanBuilderExhausted) {
+		return {
+			code:    'plan-invariant-failed',
+			message: err.message,
+			data:    {
+				lastFailure: {
+					invariantId: err.lastFailure.invariantId,
+					message:     err.lastFailure.message,
+				},
+				totalAttempts: err.attempts.length,
+			},
+		};
+	}
+	if (err instanceof PlanBuilderLlmUnavailableError) {
+		return { code: 'plan-builder-llm-unavailable', message: err.message };
+	}
+	if (err instanceof PlanBuilderSchemaUnrecoverable) {
+		return { code: 'plan-builder-schema-unrecoverable', message: err.message };
+	}
+	if (err instanceof PlanBuilderPromptMissingError) {
+		return { code: 'plan-builder-prompt-missing', message: err.message };
+	}
+	// Shaper-side errors (the buildRunBundle pre-step can raise its
+	// own typed errors) get dispatched through the shaper classifier.
+	return classifyShaperError(err);
+}
+
+// ---------------------------------------------------------------------------
 // invoke -- single error-classification path for every handler
 // ---------------------------------------------------------------------------
 
@@ -344,6 +499,14 @@ interface ClassifyParams {
 	readonly scopeRef:   AnalyzeScopeRef;
 }
 
+interface PlanParams {
+	readonly runId:           string;
+	readonly intent:          ClassifiedIntent;
+	readonly parentTaskPath?: string;
+	readonly currentDepth?:   number;
+	readonly rootScope?:      AnalyzeScope;
+}
+
 interface TaskParams {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
@@ -376,6 +539,32 @@ function parseClassifyParams(params: unknown): ClassifyParams {
 		userPrompt: requireString(obj, 'userPrompt'),
 		scopeRef:   parseScopeRef(obj['scopeRef']),
 	};
+}
+
+function parsePlanParams(params: unknown): PlanParams {
+	const obj = requireObject(params, 'params');
+	const result: Record<string, unknown> = {
+		runId:  requireString(obj, 'runId'),
+		intent: parseIntent(obj['intent']),
+	};
+	if (typeof obj['parentTaskPath'] === 'string' && obj['parentTaskPath'].length > 0) {
+		result['parentTaskPath'] = obj['parentTaskPath'];
+	}
+	if (typeof obj['currentDepth'] === 'number') {
+		if (!Number.isInteger(obj['currentDepth']) || (obj['currentDepth'] as number) < 0) {
+			throw new TypeError('currentDepth: must be a non-negative integer');
+		}
+		result['currentDepth'] = obj['currentDepth'];
+	}
+	if (obj['rootScope'] !== undefined) {
+		const rs = obj['rootScope'];
+		const validScopes = ['XS', 'S', 'M', 'L', 'XL'];
+		if (typeof rs !== 'string' || !validScopes.includes(rs)) {
+			throw new TypeError(`rootScope: must be one of ${validScopes.join(', ')}; got ${JSON.stringify(rs)}`);
+		}
+		result['rootScope'] = rs;
+	}
+	return result as unknown as PlanParams;
 }
 
 function parseTaskParams(params: unknown): TaskParams {

@@ -36,9 +36,27 @@ export interface AnalyzeShaperConfig {
 	readonly ollamaNumCtx:            number;
 }
 
+/**
+ * Max Plan-tree depth keyed by the ROOT Run's classified scope.
+ * Per design/analyze-plan-builder.md "XL -> planner-template tasks":
+ * "The cap is the absolute ceiling across the whole tree; each Plan
+ * Builder invocation knows its currentDepth and refuses to invoke
+ * when currentDepth + 1 would exceed the root's ceiling."
+ *
+ * Defaults match the design: XS 2, S 3, M 4, L 5, XL 6.
+ */
+export interface MaxPlanDepthMap {
+	readonly XS: number;
+	readonly S:  number;
+	readonly M:  number;
+	readonly L:  number;
+	readonly XL: number;
+}
+
 export interface AnalyzeConfig {
-	readonly shaperModel: string;
-	readonly shaper:      AnalyzeShaperConfig;
+	readonly shaperModel:   string;
+	readonly shaper:        AnalyzeShaperConfig;
+	readonly maxPlanDepth:  MaxPlanDepthMap;
 }
 
 /**
@@ -52,6 +70,20 @@ const DEFAULT_SHAPER: AnalyzeShaperConfig = {
 	maxToolTurns:            40,
 	structuredOutputRetries: 3,
 	ollamaNumCtx:            32_768,
+};
+
+/**
+ * Design defaults for max Plan-tree depth per root scope bucket.
+ * XS: a single function rarely needs recursion (2 deep).
+ * XL: org -> repo cluster -> repo -> family -> module -> central
+ *     component (6 deep).
+ */
+const DEFAULT_MAX_PLAN_DEPTH: MaxPlanDepthMap = {
+	XS: 2,
+	S:  3,
+	M:  4,
+	L:  5,
+	XL: 6,
 };
 
 /**
@@ -83,7 +115,11 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 	const fallbackModel = DEFAULT_SHAPER_MODEL;
 
 	if (!existsSync(PATHS.config)) {
-		cached = { shaperModel: fallbackModel, shaper: DEFAULT_SHAPER };
+		cached = {
+			shaperModel:  fallbackModel,
+			shaper:       DEFAULT_SHAPER,
+			maxPlanDepth: DEFAULT_MAX_PLAN_DEPTH,
+		};
 		return cached;
 	}
 
@@ -95,6 +131,9 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 			: {};
 		const shaperObj = isObject(analyze['shaper'])
 			? (analyze['shaper'] as Record<string, unknown>)
+			: {};
+		const depthObj = isObject(analyze['maxPlanDepth'])
+			? (analyze['maxPlanDepth'] as Record<string, unknown>)
 			: {};
 
 		cached = {
@@ -116,6 +155,13 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 						? (shaperObj['ollamaNumCtx'] as number)
 						: DEFAULT_SHAPER.ollamaNumCtx,
 			},
+			maxPlanDepth: {
+				XS: typeof depthObj['XS'] === 'number' ? (depthObj['XS'] as number) : DEFAULT_MAX_PLAN_DEPTH.XS,
+				S:  typeof depthObj['S']  === 'number' ? (depthObj['S']  as number) : DEFAULT_MAX_PLAN_DEPTH.S,
+				M:  typeof depthObj['M']  === 'number' ? (depthObj['M']  as number) : DEFAULT_MAX_PLAN_DEPTH.M,
+				L:  typeof depthObj['L']  === 'number' ? (depthObj['L']  as number) : DEFAULT_MAX_PLAN_DEPTH.L,
+				XL: typeof depthObj['XL'] === 'number' ? (depthObj['XL'] as number) : DEFAULT_MAX_PLAN_DEPTH.XL,
+			},
 		};
 		return cached;
 	} catch (err) {
@@ -123,7 +169,11 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 			{ err: (err as Error).message },
 			'failed to parse config.json; using analyze defaults',
 		);
-		cached = { shaperModel: fallbackModel, shaper: DEFAULT_SHAPER };
+		cached = {
+			shaperModel:  fallbackModel,
+			shaper:       DEFAULT_SHAPER,
+			maxPlanDepth: DEFAULT_MAX_PLAN_DEPTH,
+		};
 		return cached;
 	}
 }

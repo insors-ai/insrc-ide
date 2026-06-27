@@ -22,13 +22,39 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	MaxPlanDepthExceededError,
 	PlanBuilderExhausted,
 	PlanBuilderLlmUnavailableError,
 	PlanBuilderPromptMissingError,
 	PlanBuilderSchemaUnrecoverable,
 	renderCatalog,
 	renderDepthPolicy,
+	runPlanner,
 } from '../index.js';
+import { _resetAnalyzeConfigCacheForTests } from '../../../config/analyze.js';
+import type { AnalyzeContextBundle } from '../../context/types.js';
+import type { LLMProvider } from '../../../shared/types.js';
+
+/**
+ * A minimal LLMProvider stub that throws on every call. Used by the
+ * depth-check tests that want to exercise the pre-LLM gate but
+ * never actually pay for a model call.
+ */
+const STUB_PROVIDER: LLMProvider = {
+	supportsTools: true,
+	capabilities:  {
+		structuredOutput: true,
+		toolCalling:      true,
+		vision:           false,
+		webSearch:        false,
+		streaming:        true,
+		embeddings:       false,
+	},
+	complete:        async () => { throw new Error('stub: complete should not be called'); },
+	completeStructured: async () => { throw new Error('stub: completeStructured should not be called'); },
+	stream:          async function* () { yield ''; throw new Error('stub: stream should not be called'); },
+	embed:           async () => [],
+};
 import {
 	_appendCorrectionTurnForTest,
 	_buildInitialMessagesForTest,
@@ -279,6 +305,141 @@ test('appendCorrectionTurn: re-issues with the assistant turn + VALIDATOR FEEDBA
 	assert.match(userBody, /VALIDATOR FEEDBACK/);
 	assert.match(userBody, /INV-1/);
 	assert.match(userBody, /tasks list must be non-empty/);
+});
+
+// ---------------------------------------------------------------------------
+// MaxPlanDepthExceededError + depth-cap pre-check
+// ---------------------------------------------------------------------------
+
+test('MaxPlanDepthExceededError carries currentDepth, rootScope, cap on the instance', () => {
+	const e = new MaxPlanDepthExceededError(5, 'M', 4);
+	assert.equal(e.name, 'MaxPlanDepthExceededError');
+	assert.equal(e.currentDepth, 5);
+	assert.equal(e.rootScope, 'M');
+	assert.equal(e.cap, 4);
+	assert.match(e.message, /currentDepth=5/);
+	assert.match(e.message, /max-plan-depth/);
+	assert.match(e.message, /root scope M/);
+	assert.match(e.message, /cap=4/);
+});
+
+test('runPlanner: refuses BEFORE any LLM call when currentDepth+1 > cap', async () => {
+	_resetAnalyzeConfigCacheForTests();
+	const emptyBundle: AnalyzeContextBundle = {
+		system: '', focus: '', summary: '', structure: '', surface: '',
+		artefacts: '', upstream: '',
+	};
+	// Root scope = M -> default cap = 4. currentDepth = 5 -> refuses
+	// (5 + 1 > 4). Provider would never be touched; we omit it.
+	await assert.rejects(
+		() => runPlanner({
+			input: {
+				intent: {
+					target:    'code',
+					scope:     'M',
+					focused:   false,
+					scopeRef:  { kind: 'repo', value: '/r' },
+					reasoning: 'depth-cap test fixture',
+				},
+				contextBundle: emptyBundle,
+				catalog:       [],
+				currentDepth:  5,
+				// rootScope defaults to intent.scope = 'M'
+			},
+			opts: { runId: 'depth-cap-test' },
+		}),
+		MaxPlanDepthExceededError,
+	);
+});
+
+test('runPlanner: rootScope overrides intent.scope for the depth cap', async () => {
+	_resetAnalyzeConfigCacheForTests();
+	const emptyBundle: AnalyzeContextBundle = {
+		system: '', focus: '', summary: '', structure: '', surface: '',
+		artefacts: '', upstream: '',
+	};
+	// Child plan classified as XS (cap=2), but root is XL (cap=6).
+	// currentDepth=3 against XL cap=6 -> 3+1=4, within cap -> proceeds
+	// past the depth check. Stub provider throws on completeStructured
+	// so we can confirm depth-pass without paying for a real LLM call.
+	const err = await runPlanner({
+		input: {
+			intent: {
+				target:    'code',
+				scope:     'XS',
+				focused:   false,
+				scopeRef:  { kind: 'repo', value: '/r' },
+				reasoning: 'rootScope override fixture',
+			},
+			contextBundle: emptyBundle,
+			catalog:       [],
+			currentDepth:  3,
+			rootScope:     'XL',
+		},
+		opts:     { runId: 'rootscope-override-test' },
+		provider: STUB_PROVIDER,
+	}).catch((e: unknown) => e);
+	// We expect a non-MaxPlanDepthExceeded error (the depth check
+	// passed; the stub provider's throw triggered the failure later).
+	assert.ok(err instanceof Error);
+	assert.equal((err as Error).name === 'MaxPlanDepthExceededError', false,
+		`expected non-depth error; got: ${err}`);
+});
+
+test('runPlanner: rootScope=XS at currentDepth=2 (exactly the cap) is rejected', async () => {
+	_resetAnalyzeConfigCacheForTests();
+	const emptyBundle: AnalyzeContextBundle = {
+		system: '', focus: '', summary: '', structure: '', surface: '',
+		artefacts: '', upstream: '',
+	};
+	// XS cap=2. currentDepth=2 means we're about to build a 3rd-level
+	// plan. 2+1=3 > 2 -> rejected.
+	await assert.rejects(
+		() => runPlanner({
+			input: {
+				intent: {
+					target:    'code',
+					scope:     'XS',
+					focused:   false,
+					scopeRef:  { kind: 'repo', value: '/r' },
+					reasoning: 'XS boundary fixture',
+				},
+				contextBundle: emptyBundle,
+				catalog:       [],
+				currentDepth:  2,
+				rootScope:     'XS',
+			},
+			opts: { runId: 'xs-boundary-test' },
+		}),
+		MaxPlanDepthExceededError,
+	);
+});
+
+test('runPlanner: default currentDepth=0 always passes the depth check (cap >= 2)', async () => {
+	_resetAnalyzeConfigCacheForTests();
+	const emptyBundle: AnalyzeContextBundle = {
+		system: '', focus: '', summary: '', structure: '', surface: '',
+		artefacts: '', upstream: '',
+	};
+	// No currentDepth supplied -> defaults to 0 -> 0+1=1, within every
+	// bucket's cap. Should pass the depth check; the stub provider's
+	// throw provides the downstream failure.
+	const err = await runPlanner({
+		input: {
+			intent: {
+				target:    'code',
+				scope:     'XS',
+				focused:   false,
+				scopeRef:  { kind: 'repo', value: '/r' },
+				reasoning: 'default-depth fixture',
+			},
+			contextBundle: emptyBundle,
+			catalog:       [],
+		},
+		opts:     { runId: 'default-depth-test' },
+		provider: STUB_PROVIDER,
+	}).catch((e: unknown) => e);
+	assert.equal((err as Error).name === 'MaxPlanDepthExceededError', false);
 });
 
 test('appendCorrectionTurn with failure.target renders the pointer', () => {

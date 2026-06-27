@@ -1313,6 +1313,16 @@ async function main(): Promise<void> {
 			const mod = await import('./analyze-rpc.js');
 			return mod.classify(params);
 		},
+		// Plan Builder. Internally builds the run-level context bundle
+		// + calls runPlanner. Tagged union: ok:true carries `plan`,
+		// ok:false carries the typed planner error (plan-invariant-failed
+		// with the inner invariant id in `data`, max-plan-depth-exceeded,
+		// etc.). Shaper-side errors from the pre-step bundle build
+		// surface with the shaper's stable codes.
+		'analyze.plan.build': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.plan(params);
+		},
 
 		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
 		// backing files (substrate-coupled access store, skill registry).

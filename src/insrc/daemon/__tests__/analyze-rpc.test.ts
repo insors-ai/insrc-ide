@@ -25,7 +25,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildClassification, buildRun, buildTask, classify } from '../analyze-rpc.js';
+import { buildClassification, buildRun, buildTask, classify, plan } from '../analyze-rpc.js';
 
 // ---------------------------------------------------------------------------
 // Params validation -- invalid-params responses for malformed input
@@ -349,6 +349,100 @@ test('classify rejects empty-string userPrompt', async () => {
 	});
 	assert.equal(r.ok, false);
 	assert.match((r as { error: { message: string } }).error.message, /userPrompt/);
+});
+
+// ---------------------------------------------------------------------------
+// plan: params validation
+// ---------------------------------------------------------------------------
+
+test('plan rejects non-object params with invalid-params', async () => {
+	const r = await plan(null);
+	assert.equal(r.ok, false);
+	assert.equal((r as { error: { code: string } }).error.code, 'invalid-params');
+});
+
+test('plan rejects missing runId', async () => {
+	const r = await plan({
+		intent: {
+			target:    'code',
+			scope:     'M',
+			focused:   false,
+			scopeRef:  { kind: 'repo', value: '/x' },
+			reasoning: 'test',
+		},
+	});
+	assert.equal(r.ok, false);
+	assert.equal((r as { error: { code: string } }).error.code, 'invalid-params');
+	assert.match((r as { error: { message: string } }).error.message, /runId/);
+});
+
+test('plan rejects missing intent', async () => {
+	const r = await plan({ runId: 'rid' });
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /intent/);
+});
+
+test('plan rejects bad intent.target', async () => {
+	const r = await plan({
+		runId: 'rid',
+		intent: {
+			target:    'invented',
+			scope:     'M',
+			focused:   false,
+			scopeRef:  { kind: 'repo', value: '/x' },
+			reasoning: 'test',
+		},
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /intent\.target/);
+});
+
+test('plan rejects bad rootScope value', async () => {
+	const r = await plan({
+		runId: 'rid',
+		intent: {
+			target:    'code',
+			scope:     'M',
+			focused:   false,
+			scopeRef:  { kind: 'repo', value: '/x' },
+			reasoning: 'test',
+		},
+		rootScope: 'XXL',
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /rootScope/);
+});
+
+test('plan rejects non-integer currentDepth', async () => {
+	const r = await plan({
+		runId: 'rid',
+		intent: {
+			target:    'code',
+			scope:     'M',
+			focused:   false,
+			scopeRef:  { kind: 'repo', value: '/x' },
+			reasoning: 'test',
+		},
+		currentDepth: 1.5,
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /currentDepth/);
+});
+
+test('plan rejects negative currentDepth', async () => {
+	const r = await plan({
+		runId: 'rid',
+		intent: {
+			target:    'code',
+			scope:     'M',
+			focused:   false,
+			scopeRef:  { kind: 'repo', value: '/x' },
+			reasoning: 'test',
+		},
+		currentDepth: -1,
+	});
+	assert.equal(r.ok, false);
+	assert.match((r as { error: { message: string } }).error.message, /currentDepth/);
 });
 
 test('AnalyzeRpcOk responses have ok:true and a bundle field', async () => {

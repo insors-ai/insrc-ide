@@ -48,9 +48,20 @@ import {
 	buildRun,
 	buildTask,
 	classify,
+	plan,
 	type AnalyzeRpcResponse,
 	type ClassifyRpcResponse,
+	type PlanRpcResponse,
 } from '../analyze-rpc.js';
+import {
+	_resetTemplateBootstrapLatchForTests,
+	registerBuiltinTemplates,
+} from '../../analyze/planner/templates/bootstrap.js';
+import {
+	_resetTemplateRegistryForTests,
+} from '../../analyze/planner/templates/registry.js';
+import { purgePlan } from '../../analyze/planner/cache.js';
+import { validatePlanShape } from '../../analyze/planner/schema.js';
 import { addRepo } from '../../db/repos.js';
 import { closeGraphStore, setGraphStorePath } from '../../db/graph/store.js';
 import { registerBuiltinTools } from '../tools/builtins/index.js';
@@ -78,6 +89,9 @@ test.before(async () => {
 	_resetAnalyzeConfigCacheForTests();
 	_resetRegistryForTests();
 	registerBuiltinTools();
+	_resetTemplateBootstrapLatchForTests();
+	_resetTemplateRegistryForTests();
+	registerBuiltinTemplates();
 	fixtures = setupFixtures();
 
 	await closeGraphStore();
@@ -320,6 +334,66 @@ test('classify: nonexistent scopeRef.value -> scope-ref-unresolved error code', 
 	assert.ok(acceptable.includes(r.error.code),
 		`error.code should be a dispatchable analyze code; got '${r.error.code}'. ` +
 		`message: ${r.error.message}`);
+});
+
+// ---------------------------------------------------------------------------
+// plan: end-to-end happy path through the daemon RPC layer
+// ---------------------------------------------------------------------------
+
+test('plan (infra XS): end-to-end -> ok:true with a validator-passing PlanTask', { skip: !GATE }, async () => {
+	const runId = uniqueRunId('plan');
+	const intent = {
+		target:    'infra' as const,
+		scope:     'XS' as const,
+		focused:   false,
+		scopeRef:  { kind: 'manifest-dir' as const, value: realpathSync(fixtures.seededManifests) },
+		reasoning: 'analyze-rpc.live plan happy-path fixture',
+	};
+	try {
+		const r = await plan({ runId, intent }) as PlanRpcResponse;
+		assert.equal(r.ok, true,
+			`expected ok response; got: ${JSON.stringify('error' in r ? r.error : '?')}`);
+		if (!r.ok) return;
+		assert.ok(validatePlanShape(r.plan));
+		assert.equal(r.plan.target, 'infra');
+		assert.equal(r.plan.scope,  'XS');
+		assert.equal(r.plan.parentTaskPath, undefined);
+		// XS band: 3-8 tasks. Last task is the infra aggregator.
+		assert.ok(r.plan.tasks.length >= 3 && r.plan.tasks.length <= 8);
+		const last = r.plan.tasks[r.plan.tasks.length - 1]!;
+		assert.equal(last.template, 'infra.aggregate.report');
+	} finally {
+		purgePlan({ runId });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// plan: max-plan-depth-exceeded fires pre-LLM (cheap)
+// ---------------------------------------------------------------------------
+
+test('plan: currentDepth=99 -> max-plan-depth-exceeded error code in <5s', { skip: !GATE }, async () => {
+	const runId = uniqueRunId('plan-depth');
+	const intent = {
+		target:    'infra' as const,
+		scope:     'XS' as const,
+		focused:   false,
+		scopeRef:  { kind: 'manifest-dir' as const, value: realpathSync(fixtures.seededManifests) },
+		reasoning: 'analyze-rpc.live depth-cap fixture',
+	};
+	const t0 = Date.now();
+	const r = await plan({ runId, intent, currentDepth: 99 }) as PlanRpcResponse;
+	const ms = Date.now() - t0;
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'max-plan-depth-exceeded');
+	const data = r.error.data as { currentDepth?: number; rootScope?: string; cap?: number } | undefined;
+	assert.ok(data);
+	assert.equal(data.currentDepth, 99);
+	assert.equal(data.rootScope, 'XS');
+	assert.equal(data.cap, 2);
+	// Must short-circuit before any shaper / LLM call.
+	assert.ok(ms < 5_000,
+		`max-plan-depth-exceeded should fire pre-LLM (<5s); got ${ms}ms`);
 });
 
 test('buildRun: malformed intent -> invalid-params error code', { skip: !GATE }, async () => {
