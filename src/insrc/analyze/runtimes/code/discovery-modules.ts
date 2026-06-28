@@ -34,7 +34,9 @@ import type {
 	TemplateExecuteResult,
 	TemplateRuntime,
 } from '../../executor/types.js';
+import { readScopeRef, resolveRepoPath } from './_shared.js';
 
+const TEMPLATE_ID = 'code.discovery.modules';
 const log = getLogger('analyze:runtimes:code:discovery-modules');
 
 interface ModuleRecord {
@@ -45,11 +47,11 @@ interface ModuleRecord {
 }
 
 export const codeDiscoveryModulesRuntime: TemplateRuntime = {
-	templateId: 'code.discovery.modules',
+	templateId: TEMPLATE_ID,
 
 	async execute(args: TemplateExecuteArgs): Promise<TemplateExecuteResult> {
-		const scopeRef = readScopeRef(args);
-		const repoPath = resolveRepoPath(scopeRef);
+		const scopeRef = readScopeRef(args, TEMPLATE_ID);
+		const repoPath = resolveRepoPath(scopeRef, TEMPLATE_ID);
 
 		const db       = await getDb();
 		const entities = await listEntitiesForRepo(db, repoPath);
@@ -85,52 +87,10 @@ export const codeDiscoveryModulesRuntime: TemplateRuntime = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Test hooks (helpers themselves are exported from _shared.ts).
 // ---------------------------------------------------------------------------
 
-interface ScopeRef {
-	readonly kind:  string;
-	readonly value: string;
-}
-
-function readScopeRef(args: TemplateExecuteArgs): ScopeRef {
-	// Per the template's inputSchema, params.scopeRef is required. If
-	// it's missing, INV-5 should have rejected the plan at validation
-	// time -- defense-in-depth only.
-	const raw = (args.task.params as Record<string, unknown>)['scopeRef'];
-	if (raw === null || typeof raw !== 'object') {
-		throw new Error(
-			`code.discovery.modules: task.params.scopeRef missing (taskId=${args.task.taskId}). ` +
-				'INV-5 should have rejected this plan -- check the planner validator.',
-		);
-	}
-	const obj  = raw as Record<string, unknown>;
-	const kind = obj['kind'];
-	const value = obj['value'];
-	if (typeof kind !== 'string' || typeof value !== 'string') {
-		throw new Error(
-			`code.discovery.modules: task.params.scopeRef has wrong shape (taskId=${args.task.taskId})`,
-		);
-	}
-	return { kind, value };
-}
-
-function resolveRepoPath(scopeRef: ScopeRef): string {
-	switch (scopeRef.kind) {
-		case 'repo':
-		case 'manifest-dir':
-			return scopeRef.value;
-		default:
-			throw new Error(
-				`code.discovery.modules: scopeRef.kind='${scopeRef.kind}' not supported yet. ` +
-					'Supported in this revision: repo, manifest-dir.',
-			);
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test hooks
-// ---------------------------------------------------------------------------
-
-export const _readScopeRefForTest    = readScopeRef;
-export const _resolveRepoPathForTest = resolveRepoPath;
+export {
+	readScopeRef as _readScopeRefForTest,
+	resolveRepoPath as _resolveRepoPathForTest,
+} from './_shared.js';

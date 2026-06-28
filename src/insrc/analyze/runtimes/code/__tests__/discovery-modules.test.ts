@@ -92,35 +92,35 @@ function mkArgs(task: PlannedTask): TemplateExecuteArgs {
 }
 
 test('readScopeRef: well-formed scopeRef -> returned verbatim', () => {
-	const sr = _readScopeRefForTest(mkArgs(mkTask({ scopeRef: { kind: 'repo', value: '/r' } })));
+	const sr = _readScopeRefForTest(mkArgs(mkTask({ scopeRef: { kind: 'repo', value: '/r' } })), 'code.discovery.modules');
 	assert.deepEqual(sr, { kind: 'repo', value: '/r' });
 });
 
 test('readScopeRef: missing scopeRef -> throws with INV-5 message', () => {
 	assert.throws(
-		() => _readScopeRefForTest(mkArgs(mkTask({}))),
+		() => _readScopeRefForTest(mkArgs(mkTask({})), 'code.discovery.modules'),
 		/scopeRef missing/,
 	);
 });
 
 test('readScopeRef: scopeRef with wrong shape -> throws', () => {
 	assert.throws(
-		() => _readScopeRefForTest(mkArgs(mkTask({ scopeRef: { kind: 1, value: 'x' } }))),
+		() => _readScopeRefForTest(mkArgs(mkTask({ scopeRef: { kind: 1, value: 'x' } })), 'code.discovery.modules'),
 		/wrong shape/,
 	);
 });
 
 test('resolveRepoPath: repo kind -> value passthrough', () => {
-	assert.equal(_resolveRepoPathForTest({ kind: 'repo', value: '/r' }), '/r');
+	assert.equal(_resolveRepoPathForTest({ kind: 'repo', value: '/r' }, 'code.discovery.modules'), '/r');
 });
 
 test('resolveRepoPath: manifest-dir kind -> value passthrough', () => {
-	assert.equal(_resolveRepoPathForTest({ kind: 'manifest-dir', value: '/r/mod' }), '/r/mod');
+	assert.equal(_resolveRepoPathForTest({ kind: 'manifest-dir', value: '/r/mod' }, 'code.discovery.modules'), '/r/mod');
 });
 
 test('resolveRepoPath: unsupported kind -> throws with supported-list hint', () => {
 	assert.throws(
-		() => _resolveRepoPathForTest({ kind: 'symbol', value: 'foo' }),
+		() => _resolveRepoPathForTest({ kind: 'symbol', value: 'foo' }, 'code.discovery.modules'),
 		/not supported yet.*repo, manifest-dir/,
 	);
 });

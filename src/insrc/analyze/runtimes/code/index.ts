@@ -17,26 +17,32 @@
  * plan.
  */
 
-import { codeDiscoveryModulesRuntime } from './discovery-modules.js';
-import { codeAggregateReportRuntime  } from './aggregate-report.js';
+import { codeDiscoveryModulesRuntime     } from './discovery-modules.js';
+import { codeDiscoveryEntrypointsRuntime } from './discovery-entrypoints.js';
+import { codeSurfaceFunctionalRuntime    } from './surface-functional.js';
+import { codeStructureModuleTreeRuntime  } from './structure-module-tree.js';
+import { codeAggregateReportRuntime      } from './aggregate-report.js';
 
 import type { TemplateRuntime } from '../../executor/types.js';
 
-export { codeDiscoveryModulesRuntime } from './discovery-modules.js';
+export { codeDiscoveryModulesRuntime     } from './discovery-modules.js';
+export { codeDiscoveryEntrypointsRuntime } from './discovery-entrypoints.js';
+export { codeSurfaceFunctionalRuntime    } from './surface-functional.js';
+export { codeStructureModuleTreeRuntime  } from './structure-module-tree.js';
 export { codeAggregateReportRuntime, CODE_AGGREGATE_PROMPT_PATH } from './aggregate-report.js';
 
 /**
- * Every code-target template runtime currently implemented. Bootstrap
- * passes this array to registerTemplateRuntime() in order.
+ * Every code-target template runtime currently implemented.
+ * Bootstrap passes this array to registerTemplateRuntime() in order.
  *
- * Templates without runtimes yet (the executor surfaces these as
- * 'runtime-missing' at task execution time):
- *   - code.discovery.entrypoints
- *   - code.surface.functional
- *   - code.structure.module-tree
- *   - code.subrun.deep-dive          (planner-kind, dispatched by walker -- no runtime needed)
+ * code.subrun.deep-dive is planner-kind and dispatched by the
+ * executor's walker directly -- it intentionally has no runtime
+ * entry here.
  */
 export const CODE_RUNTIMES: readonly TemplateRuntime[] = [
 	codeDiscoveryModulesRuntime,
+	codeDiscoveryEntrypointsRuntime,
+	codeSurfaceFunctionalRuntime,
+	codeStructureModuleTreeRuntime,
 	codeAggregateReportRuntime,
 ];
