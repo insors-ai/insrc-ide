@@ -29,6 +29,7 @@ import { CLASSIFY_PROMPT_PATH } from '../classifier/index.js';
 import { PLANNER_PROMPT_PATH } from '../planner/index.js';
 import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
 import { DATA_AGGREGATE_PROMPT_PATH    } from '../runtimes/data/index.js';
+import { INFRA_AGGREGATE_PROMPT_PATH   } from '../runtimes/infra/index.js';
 import { GENERIC_AGGREGATE_PROMPT_PATH } from '../runtimes/generic/index.js';
 import { getLogger } from '../../shared/logger.js';
 
@@ -100,6 +101,7 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	out.push({ componentId: 'planner',           relPath: PLANNER_PROMPT_PATH });
 	out.push({ componentId: 'code.aggregate.report',    relPath: CODE_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });
+	out.push({ componentId: 'infra.aggregate.report',   relPath: INFRA_AGGREGATE_PROMPT_PATH   });
 	out.push({ componentId: 'generic.aggregate.report', relPath: GENERIC_AGGREGATE_PROMPT_PATH });
 	return out;
 }

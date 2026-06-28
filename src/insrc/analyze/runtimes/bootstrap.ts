@@ -26,6 +26,7 @@ import type { TemplateRuntime } from '../executor/types.js';
 
 import { CODE_RUNTIMES    } from './code/index.js';
 import { DATA_RUNTIMES    } from './data/index.js';
+import { INFRA_RUNTIMES   } from './infra/index.js';
 import { GENERIC_RUNTIMES } from './generic/index.js';
 
 const log = getLogger('analyze:runtimes:bootstrap');
@@ -49,6 +50,7 @@ export function registerBuiltinRuntimes(): void {
 	const families: ReadonlyArray<{ name: string; runtimes: readonly TemplateRuntime[] }> = [
 		{ name: 'code',    runtimes: CODE_RUNTIMES    },
 		{ name: 'data',    runtimes: DATA_RUNTIMES    },
+		{ name: 'infra',   runtimes: INFRA_RUNTIMES   },
 		{ name: 'generic', runtimes: GENERIC_RUNTIMES },
 	];
 
