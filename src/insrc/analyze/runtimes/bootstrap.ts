@@ -24,7 +24,8 @@ import {
 } from '../executor/registry.js';
 import type { TemplateRuntime } from '../executor/types.js';
 
-import { CODE_RUNTIMES } from './code/index.js';
+import { CODE_RUNTIMES    } from './code/index.js';
+import { GENERIC_RUNTIMES } from './generic/index.js';
 
 const log = getLogger('analyze:runtimes:bootstrap');
 
@@ -45,7 +46,8 @@ export function registerBuiltinRuntimes(): void {
 	LATCHED = true;
 
 	const families: ReadonlyArray<{ name: string; runtimes: readonly TemplateRuntime[] }> = [
-		{ name: 'code', runtimes: CODE_RUNTIMES },
+		{ name: 'code',    runtimes: CODE_RUNTIMES    },
+		{ name: 'generic', runtimes: GENERIC_RUNTIMES },
 	];
 
 	let total = 0;
