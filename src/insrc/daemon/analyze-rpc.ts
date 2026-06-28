@@ -42,7 +42,17 @@
  *      plans/analyze-context-builder.md Phase 7
  */
 
-import { classify as runClassifier, shaperFor } from '../analyze/index.js';
+import {
+	classify as runClassifier,
+	readRunRecord,
+	runAnalyze,
+	shaperFor,
+} from '../analyze/index.js';
+import type {
+	RunAnalyzeArgs,
+	RunAnalyzeResult,
+	RunRecord,
+} from '../analyze/index.js';
 import {
 	ClassifierLlmUnavailableError,
 	ClassifierPromptMissingError,
@@ -134,6 +144,9 @@ export type AnalyzeRpcErrorCode =
 	| 'plan-builder-exhausted'
 	| 'plan-invariant-failed'
 	| 'max-plan-depth-exceeded'
+	| 'executor-aggregator-failed'
+	| 'classifier-validation-exhausted'
+	| 'invalid-input'
 	| 'internal-error';
 
 // ---------------------------------------------------------------------------
@@ -160,6 +173,52 @@ export interface PlanRpcOk {
 }
 
 export type PlanRpcResponse = PlanRpcOk | AnalyzeRpcErr;
+
+// ---------------------------------------------------------------------------
+// Run RPC response shapes
+// ---------------------------------------------------------------------------
+
+/**
+ * analyze.run.start: full end-to-end pipeline. Tagged union on
+ * `ok`. The success shape carries the orchestrator's
+ * RunAnalyzeOk verbatim minus the discriminator; the failure
+ * shape splices the orchestrator's stage + intent (when known)
+ * onto the shared AnalyzeRpcErr error payload so clients have
+ * a single dispatch path.
+ */
+export interface RunStartRpcOk {
+	readonly ok:             true;
+	readonly runId:          string;
+	readonly intent:         ClassifiedIntent;
+	readonly finalReport:    unknown;
+	readonly tasksCompleted: number;
+	readonly tasksFailed:    ReadonlyArray<{ taskId: string; reason: string }>;
+	readonly durationMs:     number;
+}
+
+export interface RunStartRpcErr {
+	readonly ok:         false;
+	readonly runId:      string;
+	readonly stage:      'classify' | 'plan' | 'execute' | 'done';
+	readonly intent?:    ClassifiedIntent | undefined;
+	readonly durationMs: number;
+	readonly error:      AnalyzeRpcErrorPayload;
+}
+
+export type RunStartRpcResponse = RunStartRpcOk | RunStartRpcErr;
+
+/**
+ * analyze.run.status: read-only lookup of <runRoot>/run.json. Used
+ * by the IDE to poll a running run's progress + by resume callers.
+ * Returns `ok: false / code: invalid-input` when the run record
+ * doesn't exist.
+ */
+export interface RunStatusRpcOk {
+	readonly ok:     true;
+	readonly record: RunRecord;
+}
+
+export type RunStatusRpcResponse = RunStatusRpcOk | AnalyzeRpcErr;
 
 // ---------------------------------------------------------------------------
 // Public handlers
@@ -369,6 +428,151 @@ export async function plan(params: unknown): Promise<PlanRpcResponse> {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// analyze.run.start -- full end-to-end pipeline
+// ---------------------------------------------------------------------------
+
+/**
+ * Drive the full analyze pipeline (classify -> plan -> execute)
+ * and return the terminal RunAnalyzeResult on the wire. Internally
+ * delegates to runAnalyze (analyze/orchestrator/driver.ts); this
+ * handler just shapes the response + maps the orchestrator's
+ * RunErrorCode onto the wire-stable AnalyzeRpcErrorCode (which is
+ * a superset).
+ *
+ * Persistence (run.json) happens inside runAnalyze regardless of
+ * how the RPC ends -- so even if the IPC connection drops, the
+ * run's terminal state is on disk for resume / status reads.
+ *
+ * Tagged-union response with the orchestrator's runId / stage /
+ * intent / durationMs preserved on both halves.
+ */
+export async function runStart(params: unknown): Promise<RunStartRpcResponse> {
+	let parsed: RunStartParams;
+	try {
+		parsed = parseRunStartParams(params);
+	} catch (err) {
+		// Pre-validation failure -- no runId in the record sense; we
+		// surface invalid-params with the parser's message.
+		const message = err instanceof Error ? err.message : String(err);
+		log.info({ message }, 'analyze.run.start invalid params');
+		return {
+			ok:         false,
+			runId:      '',
+			stage:      'classify',
+			durationMs: 0,
+			error:      { code: 'invalid-params', message },
+		};
+	}
+
+	const args: RunAnalyzeArgs = {
+		runId:      parsed.runId,
+		userPrompt: parsed.userPrompt,
+		scopeRef:   parsed.scopeRef,
+	};
+
+	let result: RunAnalyzeResult;
+	try {
+		result = await runAnalyze(args);
+	} catch (err) {
+		// runAnalyze is expected to capture every typed error as a
+		// failure result. An uncaught throw here means a bug in the
+		// orchestrator OR an OS-level failure (out of memory, etc.).
+		// Surface as internal-error so the IDE has something
+		// structured.
+		const message = err instanceof Error ? err.message : String(err);
+		log.error({ runId: parsed.runId, message }, 'analyze.run.start: uncaught orchestrator error');
+		return {
+			ok:         false,
+			runId:      parsed.runId,
+			stage:      'classify',
+			durationMs: 0,
+			error:      { code: 'internal-error', message },
+		};
+	}
+
+	if (result.ok) {
+		log.info(
+			{ runId: result.runId, tasksCompleted: result.tasksCompleted, durationMs: result.durationMs },
+			'analyze.run.start ok',
+		);
+		return {
+			ok:             true,
+			runId:          result.runId,
+			intent:         result.intent,
+			finalReport:    result.finalReport,
+			tasksCompleted: result.tasksCompleted,
+			tasksFailed:    result.tasksFailed,
+			durationMs:     result.durationMs,
+		};
+	}
+
+	const payload: AnalyzeRpcErrorPayload = {
+		code:    result.error.code as AnalyzeRpcErrorCode,
+		message: result.error.message,
+		...(result.error.data !== undefined ? { data: result.error.data } : {}),
+	};
+	log.info(
+		{
+			runId:      result.runId,
+			stage:      result.stage,
+			code:       payload.code,
+			durationMs: result.durationMs,
+		},
+		'analyze.run.start failed',
+	);
+	return {
+		ok:         false,
+		runId:      result.runId,
+		stage:      result.stage,
+		...(result.intent !== undefined ? { intent: result.intent } : {}),
+		durationMs: result.durationMs,
+		error:      payload,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// analyze.run.status -- read-only lookup of <runRoot>/run.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the persisted RunRecord for a runId. Used by the IDE to poll
+ * a running run + by callers that want to know the terminal state
+ * after an analyze.run.start invocation (e.g. after a transport
+ * disconnect).
+ *
+ * Returns ok:false / code:invalid-input when the record doesn't
+ * exist. Genuinely unrecoverable read errors surface as
+ * internal-error.
+ */
+export async function runStatus(params: unknown): Promise<RunStatusRpcResponse> {
+	let parsed: RunStatusParams;
+	try {
+		parsed = parseRunStatusParams(params);
+	} catch (err) {
+		return invalidParams(err);
+	}
+
+	let record: RunRecord | null;
+	try {
+		record = readRunRecord(parsed.runId);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { ok: false, error: { code: 'internal-error', message } };
+	}
+
+	if (record === null) {
+		return {
+			ok: false,
+			error: {
+				code:    'invalid-input',
+				message: `analyze.run.status: no run record for runId='${parsed.runId}'`,
+			},
+		};
+	}
+	return { ok: true, record };
+}
+
 /**
  * Map a typed Plan-Builder error onto an AnalyzeRpcErrorPayload.
  * PlanBuilderExhausted's `lastFailure` carries the invariant id +
@@ -507,6 +711,16 @@ interface PlanParams {
 	readonly rootScope?:      AnalyzeScope;
 }
 
+interface RunStartParams {
+	readonly runId:      string;
+	readonly userPrompt: string;
+	readonly scopeRef:   AnalyzeScopeRef;
+}
+
+interface RunStatusParams {
+	readonly runId: string;
+}
+
 interface TaskParams {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
@@ -538,6 +752,22 @@ function parseClassifyParams(params: unknown): ClassifyParams {
 		runId:      requireString(obj, 'runId'),
 		userPrompt: requireString(obj, 'userPrompt'),
 		scopeRef:   parseScopeRef(obj['scopeRef']),
+	};
+}
+
+function parseRunStartParams(params: unknown): RunStartParams {
+	const obj = requireObject(params, 'params');
+	return {
+		runId:      requireString(obj, 'runId'),
+		userPrompt: requireString(obj, 'userPrompt'),
+		scopeRef:   parseScopeRef(obj['scopeRef']),
+	};
+}
+
+function parseRunStatusParams(params: unknown): RunStatusParams {
+	const obj = requireObject(params, 'params');
+	return {
+		runId: requireString(obj, 'runId'),
 	};
 }
 

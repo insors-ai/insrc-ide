@@ -49,10 +49,19 @@ import {
 	buildTask,
 	classify,
 	plan,
+	runStart,
+	runStatus,
 	type AnalyzeRpcResponse,
 	type ClassifyRpcResponse,
 	type PlanRpcResponse,
+	type RunStartRpcResponse,
+	type RunStatusRpcResponse,
 } from '../analyze-rpc.js';
+import {
+	_resetRuntimeBootstrapLatchForTests,
+	registerBuiltinRuntimes,
+} from '../../analyze/runtimes/bootstrap.js';
+import { purgeRunForTests } from '../../analyze/orchestrator/index.js';
 import {
 	_resetTemplateBootstrapLatchForTests,
 	registerBuiltinTemplates,
@@ -92,6 +101,8 @@ test.before(async () => {
 	_resetTemplateBootstrapLatchForTests();
 	_resetTemplateRegistryForTests();
 	registerBuiltinTemplates();
+	_resetRuntimeBootstrapLatchForTests();
+	registerBuiltinRuntimes();
 	fixtures = setupFixtures();
 
 	await closeGraphStore();
@@ -408,4 +419,86 @@ test('buildRun: malformed intent -> invalid-params error code', { skip: !GATE },
 		},
 	}));
 	assert.equal(r.error.code, 'invalid-params');
+});
+
+// ---------------------------------------------------------------------------
+// analyze.run.start -- end-to-end via the daemon RPC handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Drives the full pipeline through the RPC handler against the
+ * seeded-manifests infra fixture. Asserts that the wire response
+ * is structured + the persisted run record mirrors it.
+ *
+ * Wall-clock: 4-5 LLM calls (10-20 min ceiling). Decoupled from
+ * "happy path always" -- a transient shaper schema flake (e.g.
+ * artifacts/artefacts) is a legitimate failure outcome AS LONG
+ * AS it surfaces through the orchestrator's structured failure
+ * path with a recognised error code. Use
+ *   --test-timeout=1500000
+ * when running this directly.
+ */
+test('runStart (infra workspace): end-to-end via RPC; response mirrors run.json', { skip: !GATE }, async () => {
+	const runId = uniqueRunId('runstart');
+	const repoPath = realpathSync(fixtures.seededManifests);
+	try {
+		const r = await runStart({
+			runId,
+			userPrompt: 'Give me a brief inventory of the infrastructure in this repo.',
+			scopeRef:   { kind: 'workspace', value: repoPath },
+		}) as RunStartRpcResponse;
+
+		// runId echoed regardless of outcome.
+		assert.equal(r.runId, runId);
+
+		// status RPC reflects the same outcome.
+		const status = await runStatus({ runId }) as RunStatusRpcResponse;
+		assert.equal(status.ok, true);
+		if (!status.ok) return;
+		assert.equal(status.record.runId, runId);
+
+		if (r.ok) {
+			// Happy path: AggregateReport shape.
+			const report = r.finalReport as {
+				summary: string;
+				findings: Array<{ title: string; detail: string; sources: string[] }>;
+				metadata: { target: string; scope: string; runId: string; tasksAnalyzed: number };
+			};
+			assert.ok(typeof report.summary === 'string' && report.summary.length >= 40);
+			assert.ok(Array.isArray(report.findings) && report.findings.length >= 1);
+			assert.equal(report.metadata.target, 'infra');
+			assert.equal(report.metadata.runId, runId);
+
+			assert.equal(status.record.status, 'ok');
+			assert.equal(status.record.stage,  'done');
+			assert.equal(status.record.intent?.target, 'infra');
+		} else {
+			// Failure path -- must be a recognised orchestrator code,
+			// NEVER internal-error (that would mean a typed error escaped
+			// the orchestrator's classifier).
+			assert.notEqual(r.error.code, 'internal-error',
+				`runStart produced an unmapped error: ${r.error.message}`);
+			assert.equal(status.record.status, 'failed');
+			assert.equal(status.record.stage,  r.stage,
+				`status record stage should mirror response stage`);
+			assert.equal(status.record.error?.code, r.error.code,
+				`status record error.code should mirror response error.code`);
+		}
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
+test('runStart: invalid scopeRef.kind -> invalid-params (fast, no LLM)', { skip: !GATE }, async () => {
+	const t0 = Date.now();
+	const r = await runStart({
+		runId:      'runstart-invalid',
+		userPrompt: 'analyze this',
+		scopeRef:   { kind: 'frobnicate', value: '/x' },
+	}) as RunStartRpcResponse;
+	const ms = Date.now() - t0;
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.ok(ms < 1_000, `param validation should be fast (<1s); got ${ms}ms`);
 });

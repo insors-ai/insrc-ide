@@ -1333,6 +1333,24 @@ async function main(): Promise<void> {
 			const mod = await import('./analyze-rpc.js');
 			return mod.plan(params);
 		},
+		// Orchestrator end-to-end. Drives the full pipeline
+		// (classify -> buildRunBundle -> plan -> execute), persists
+		// run.json at every stage transition, and returns the terminal
+		// RunAnalyzeResult on the wire. Long-running -- callers should
+		// be prepared for minute-scale latency (LLM calls). Persistence
+		// happens inside runAnalyze regardless of IPC disconnect, so
+		// the terminal state is recoverable via analyze.run.status.
+		'analyze.run.start': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.runStart(params);
+		},
+		// Read-only lookup of <runRoot>/run.json. Returns
+		// ok:false/code:invalid-input when the runId has no on-disk
+		// record. Used by IDE polling + by resume callers.
+		'analyze.run.status': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.runStatus(params);
+		},
 
 		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
 		// backing files (substrate-coupled access store, skill registry).

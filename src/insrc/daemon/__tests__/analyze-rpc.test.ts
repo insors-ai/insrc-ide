@@ -25,7 +25,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildClassification, buildRun, buildTask, classify, plan } from '../analyze-rpc.js';
+import {
+	buildClassification,
+	buildRun,
+	buildTask,
+	classify,
+	plan,
+	runStart,
+	runStatus,
+} from '../analyze-rpc.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeRunRecord, purgeRunForTests } from '../../analyze/orchestrator/index.js';
 
 // ---------------------------------------------------------------------------
 // Params validation -- invalid-params responses for malformed input
@@ -443,6 +455,121 @@ test('plan rejects negative currentDepth', async () => {
 	});
 	assert.equal(r.ok, false);
 	assert.match((r as { error: { message: string } }).error.message, /currentDepth/);
+});
+
+// ---------------------------------------------------------------------------
+// analyze.run.start -- params validation
+// ---------------------------------------------------------------------------
+
+test('runStart rejects non-object params with invalid-params + empty runId', async () => {
+	const r = await runStart(null);
+	assert.equal(r.ok, false);
+	if (r.ok) return;  // type narrowing
+	assert.equal(r.error.code, 'invalid-params');
+	assert.equal(r.runId, '');
+	assert.equal(r.stage, 'classify');
+});
+
+test('runStart rejects missing runId', async () => {
+	const r = await runStart({
+		userPrompt: 'hi',
+		scopeRef:   { kind: 'workspace', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.match(r.error.message, /runId/);
+});
+
+test('runStart rejects missing userPrompt', async () => {
+	const r = await runStart({
+		runId:    'r1',
+		scopeRef: { kind: 'workspace', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.match(r.error.message, /userPrompt/);
+});
+
+test('runStart rejects missing scopeRef', async () => {
+	const r = await runStart({ runId: 'r1', userPrompt: 'hi' });
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.match(r.error.message, /scopeRef/);
+});
+
+test('runStart rejects bad scopeRef.kind', async () => {
+	const r = await runStart({
+		runId: 'r1', userPrompt: 'hi',
+		scopeRef: { kind: 'frobnicate', value: '/x' },
+	});
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.match(r.error.message, /scopeRef\.kind/);
+});
+
+// ---------------------------------------------------------------------------
+// analyze.run.status
+// ---------------------------------------------------------------------------
+
+test('runStatus rejects non-object params with invalid-params', async () => {
+	const r = await runStatus(null);
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+});
+
+test('runStatus rejects missing runId', async () => {
+	const r = await runStatus({});
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+});
+
+test('runStatus on missing runId record returns invalid-input', async () => {
+	const r = await runStatus({ runId: 'no-such-' + Math.random().toString(36).slice(2) });
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-input');
+	assert.match(r.error.message, /no run record/);
+});
+
+test('runStatus returns the persisted RunRecord round-trip', async () => {
+	const runId = `rpc-status-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-27T00:00:00.000Z',
+			updatedAt:       '2026-06-27T00:00:01.000Z',
+			userPrompt:      'fixture',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'done',
+			status:          'ok',
+			intent: {
+				target:    'infra',
+				scope:     'XS',
+				focused:   false,
+				scopeRef:  { kind: 'workspace', value: '/r' },
+				reasoning: 'fixture',
+			},
+			finalReport:    { summary: 'all good', findings: [], metadata: {} as never },
+			tasksCompleted: 3,
+			tasksFailed:    [],
+		});
+		const r = await runStatus({ runId });
+		assert.equal(r.ok, true);
+		if (!r.ok) return;
+		assert.equal(r.record.runId, runId);
+		assert.equal(r.record.status, 'ok');
+		assert.equal(r.record.intent?.target, 'infra');
+	} finally {
+		purgeRunForTests(runId);
+		// Touch unused imports to keep TS happy on the test build path.
+		void mkdtempSync; void rmSync; void tmpdir; void join;
+	}
 });
 
 test('AnalyzeRpcOk responses have ok:true and a bundle field', async () => {
