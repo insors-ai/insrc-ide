@@ -55,7 +55,7 @@ import {
 } from '../planner/index.js';
 import { runExecutor } from '../executor/index.js';
 
-import { writeRunRecord } from './persistence.js';
+import { readRunRecord, writeRunRecord } from './persistence.js';
 import type {
 	RunAnalyzeArgs,
 	RunAnalyzeResult,
@@ -74,6 +74,39 @@ const log = getLogger('analyze:orchestrator:driver');
 export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult> {
 	const start = Date.now();
 	const { runId, userPrompt, scopeRef: initialScopeRef } = args;
+
+	// (resume) If <runRoot>/run.json shows a previously-completed run
+	// (status='ok' + stage='done' + intent + finalReport all present),
+	// short-circuit and return the cached result. The within-stage caches
+	// (shaper bundle cache, planner cache, executor per-task cache)
+	// already make individual re-runs cheap, but this whole-pipeline
+	// short-circuit makes idempotent re-invocations near-instant.
+	//
+	// Stale records (status='failed' OR status='in-progress' from a
+	// crashed run) intentionally do NOT short-circuit -- callers
+	// re-invoking with the same runId after a failure want a retry,
+	// and an interrupted run needs to redo whichever stage was running
+	// when the daemon died. The initial-write below overwrites the
+	// stale record.
+	const cached = readRunRecord(runId);
+	if (
+		cached !== null
+		&& cached.status === 'ok'
+		&& cached.stage === 'done'
+		&& cached.intent !== undefined
+		&& cached.finalReport !== undefined
+	) {
+		log.info({ runId }, 'runAnalyze: resume cache hit; returning persisted RunAnalyzeOk');
+		return {
+			ok:             true,
+			runId:          cached.runId,
+			intent:         cached.intent,
+			finalReport:    cached.finalReport,
+			tasksCompleted: cached.tasksCompleted ?? 0,
+			tasksFailed:    cached.tasksFailed    ?? [],
+			durationMs:     0,
+		};
+	}
 
 	// (0) Stamp the initial RunRecord so observers (IDE, resume) see
 	//     the run exists even if stage 1 hangs.
