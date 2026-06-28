@@ -44,6 +44,7 @@
 
 import {
 	classify as runClassifier,
+	purgeRun,
 	readRunRecord,
 	runAnalyze,
 	shaperFor,
@@ -147,6 +148,7 @@ export type AnalyzeRpcErrorCode =
 	| 'executor-aggregator-failed'
 	| 'classifier-validation-exhausted'
 	| 'invalid-input'
+	| 'run-in-progress'
 	| 'internal-error';
 
 // ---------------------------------------------------------------------------
@@ -219,6 +221,21 @@ export interface RunStatusRpcOk {
 }
 
 export type RunStatusRpcResponse = RunStatusRpcOk | AnalyzeRpcErr;
+
+/**
+ * analyze.run.purge: remove ~/.insrc/analyze/<runId>/. Default
+ * refuses on status='in-progress'; pass `force: true` to override
+ * (e.g. clearing a stale crashed-daemon record).
+ *
+ * `purged: false` means the run dir didn't exist (idempotent
+ * cleanup, not an error).
+ */
+export interface RunPurgeRpcOk {
+	readonly ok:     true;
+	readonly purged: boolean;
+}
+
+export type RunPurgeRpcResponse = RunPurgeRpcOk | AnalyzeRpcErr;
 
 // ---------------------------------------------------------------------------
 // Public handlers
@@ -573,6 +590,50 @@ export async function runStatus(params: unknown): Promise<RunStatusRpcResponse> 
 	return { ok: true, record };
 }
 
+// ---------------------------------------------------------------------------
+// analyze.run.purge -- remove ~/.insrc/analyze/<runId>/
+// ---------------------------------------------------------------------------
+
+/**
+ * Purge a run's on-disk artifacts. Refuses on status='in-progress'
+ * unless force=true; idempotent on missing run dirs (returns
+ * purged=false rather than erroring).
+ *
+ * Filesystem errors propagate to the wire as 'internal-error'.
+ */
+export async function runPurge(params: unknown): Promise<RunPurgeRpcResponse> {
+	let parsed: RunPurgeParams;
+	try {
+		parsed = parseRunPurgeParams(params);
+	} catch (err) {
+		return invalidParams(err);
+	}
+
+	let result;
+	try {
+		result = purgeRun(parsed.runId, parsed.force !== undefined ? { force: parsed.force } : {});
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		log.warn({ runId: parsed.runId, message }, 'analyze.run.purge: filesystem error');
+		return { ok: false, error: { code: 'internal-error', message } };
+	}
+
+	if (result.ok) {
+		log.info({ runId: parsed.runId, purged: result.purged }, 'analyze.run.purge ok');
+		return { ok: true, purged: result.purged };
+	}
+
+	// result.ok === false -> refused on in-progress
+	return {
+		ok: false,
+		error: {
+			code:    'run-in-progress',
+			message: `analyze.run.purge: refused -- run '${parsed.runId}' is in-progress at stage='${result.stage}' (pass force=true to override)`,
+			data:    { stage: result.stage },
+		},
+	};
+}
+
 /**
  * Map a typed Plan-Builder error onto an AnalyzeRpcErrorPayload.
  * PlanBuilderExhausted's `lastFailure` carries the invariant id +
@@ -721,6 +782,11 @@ interface RunStatusParams {
 	readonly runId: string;
 }
 
+interface RunPurgeParams {
+	readonly runId: string;
+	readonly force?: boolean;
+}
+
 interface TaskParams {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
@@ -769,6 +835,20 @@ function parseRunStatusParams(params: unknown): RunStatusParams {
 	return {
 		runId: requireString(obj, 'runId'),
 	};
+}
+
+function parseRunPurgeParams(params: unknown): RunPurgeParams {
+	const obj = requireObject(params, 'params');
+	const result: Record<string, unknown> = {
+		runId: requireString(obj, 'runId'),
+	};
+	if (obj['force'] !== undefined) {
+		if (typeof obj['force'] !== 'boolean') {
+			throw new TypeError(`force: must be boolean; got ${JSON.stringify(obj['force'])}`);
+		}
+		result['force'] = obj['force'];
+	}
+	return result as unknown as RunPurgeParams;
 }
 
 function parsePlanParams(params: unknown): PlanParams {

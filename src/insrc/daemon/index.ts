@@ -1351,6 +1351,14 @@ async function main(): Promise<void> {
 			const mod = await import('./analyze-rpc.js');
 			return mod.runStatus(params);
 		},
+		// Remove a run's on-disk artifacts (plan.json + plan.attempts/
+		// + tasks/ + run.json + context cache). Default refuses on
+		// status='in-progress'; pass `force: true` to override.
+		// Idempotent: purged=false when the run dir didn't exist.
+		'analyze.run.purge': async (params) => {
+			const mod = await import('./analyze-rpc.js');
+			return mod.runPurge(params);
+		},
 
 		// Phase 1 cleanup: access RPCs + skill RPCs are gone with their
 		// backing files (substrate-coupled access store, skill registry).

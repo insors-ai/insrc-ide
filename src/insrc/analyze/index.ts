@@ -113,6 +113,7 @@ export {
 	runAnalyze,
 	readRunRecord,
 	runRecordPathFor,
+	purgeRun,
 } from './orchestrator/index.js';
 export type {
 	RunAnalyzeArgs,

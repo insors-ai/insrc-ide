@@ -33,6 +33,7 @@ import {
 	plan,
 	runStart,
 	runStatus,
+	runPurge,
 } from '../analyze-rpc.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -569,6 +570,90 @@ test('runStatus returns the persisted RunRecord round-trip', async () => {
 		purgeRunForTests(runId);
 		// Touch unused imports to keep TS happy on the test build path.
 		void mkdtempSync; void rmSync; void tmpdir; void join;
+	}
+});
+
+// ---------------------------------------------------------------------------
+// analyze.run.purge
+// ---------------------------------------------------------------------------
+
+test('runPurge rejects non-object params with invalid-params', async () => {
+	const r = await runPurge(null);
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+});
+
+test('runPurge rejects missing runId', async () => {
+	const r = await runPurge({});
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+});
+
+test('runPurge rejects non-boolean force', async () => {
+	const r = await runPurge({ runId: 'r1', force: 'yes' });
+	assert.equal(r.ok, false);
+	if (r.ok) return;
+	assert.equal(r.error.code, 'invalid-params');
+	assert.match(r.error.message, /force/);
+});
+
+test('runPurge on missing runId record returns purged=false (idempotent)', async () => {
+	const r = await runPurge({ runId: 'no-such-' + Math.random().toString(36).slice(2) });
+	assert.equal(r.ok, true);
+	if (!r.ok) return;
+	assert.equal(r.purged, false);
+});
+
+test('runPurge removes a persisted finished run; subsequent purge returns purged=false', async () => {
+	const runId = `rpc-purge-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	writeRunRecord({
+		runId,
+		createdAt:       '2026-06-27T00:00:00.000Z',
+		updatedAt:       '2026-06-27T00:00:01.000Z',
+		userPrompt:      'fixture',
+		initialScopeRef: { kind: 'workspace', value: '/r' },
+		stage:           'done',
+		status:          'ok',
+	});
+	const first = await runPurge({ runId });
+	assert.equal(first.ok, true);
+	if (!first.ok) return;
+	assert.equal(first.purged, true);
+
+	const second = await runPurge({ runId });
+	assert.equal(second.ok, true);
+	if (!second.ok) return;
+	assert.equal(second.purged, false);
+});
+
+test('runPurge refuses on status=in-progress without force; force=true overrides', async () => {
+	const runId = `rpc-purge-inprog-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-27T00:00:00.000Z',
+			updatedAt:       '2026-06-27T00:00:01.000Z',
+			userPrompt:      'fixture',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'plan',
+			status:          'in-progress',
+		});
+
+		const refused = await runPurge({ runId });
+		assert.equal(refused.ok, false);
+		if (refused.ok) return;
+		assert.equal(refused.error.code, 'run-in-progress');
+		const data = refused.error.data as { stage?: string } | undefined;
+		assert.equal(data?.stage, 'plan');
+
+		const forced = await runPurge({ runId, force: true });
+		assert.equal(forced.ok, true);
+		if (!forced.ok) return;
+		assert.equal(forced.purged, true);
+	} finally {
+		purgeRunForTests(runId);
 	}
 });
 

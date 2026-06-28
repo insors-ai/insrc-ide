@@ -53,16 +53,70 @@ export function writeRunRecord(record: RunRecord): string {
 	return path;
 }
 
-/** Test-only -- remove the entire run dir. Production cleanup is the
- *  analyze.run.purge IPC (separate phase). */
-export function purgeRunForTests(runId: string): void {
+/**
+ * Remove the entire run directory (~/.insrc/analyze/<runId>/) including
+ * plan.json, plan.attempts/, tasks/, run.json, and the context cache.
+ *
+ * Safety: by default refuses to purge a run whose record shows
+ * status='in-progress' -- nuking a running run's directory mid-pipeline
+ * would cause the orchestrator to crash on its next disk write +
+ * leak partial state. Pass `force: true` to override (e.g. to clear
+ * a stale in-progress record from a crashed daemon).
+ *
+ * Returns:
+ *   { ok: true, purged: true }                -- run dir existed + removed
+ *   { ok: true, purged: false }               -- nothing on disk to purge
+ *                                                (run.json + dir both missing)
+ *   { ok: false, code: 'run-in-progress' }    -- record shows status='in-progress'
+ *                                                and force was not set
+ *
+ * Filesystem errors propagate -- the orchestrator RPC turns them into
+ * 'internal-error' at the wire.
+ */
+export interface PurgeRunResult {
+	readonly ok:      true;
+	readonly purged:  boolean;
+}
+
+export interface PurgeRunRefused {
+	readonly ok:    false;
+	readonly code:  'run-in-progress';
+	readonly stage: import('./types.js').RunStage;
+}
+
+export function purgeRun(
+	runId: string,
+	opts:  { readonly force?: boolean } = {},
+): PurgeRunResult | PurgeRunRefused {
 	const dir = dirname(runRecordPathFor(runId));
-	try { rmSync(dir, { recursive: true }); }
-	catch (err) {
-		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-			log.debug({ dir, err: (err as Error).message }, 'purgeRunForTests: non-ENOENT');
+
+	if (opts.force !== true) {
+		const record = readRunRecord(runId);
+		if (record !== null && record.status === 'in-progress') {
+			log.info(
+				{ runId, stage: record.stage },
+				'purgeRun refused: run is in-progress (use force=true to override)',
+			);
+			return { ok: false, code: 'run-in-progress', stage: record.stage };
 		}
 	}
+
+	try {
+		rmSync(dir, { recursive: true });
+		log.info({ runId, dir }, 'purgeRun: run directory removed');
+		return { ok: true, purged: true };
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+			return { ok: true, purged: false };
+		}
+		throw err;
+	}
+}
+
+/** Test-only -- unconditionally remove the run dir; never refuses. */
+export function purgeRunForTests(runId: string): void {
+	const result = purgeRun(runId, { force: true });
+	void result;
 }
 
 function atomicWriteJson(path: string, value: unknown): void {

@@ -31,6 +31,7 @@ import {
 	_classifyShaperErrorForTest,
 } from '../driver.js';
 import {
+	purgeRun,
 	purgeRunForTests,
 	readRunRecord,
 	runRecordPathFor,
@@ -208,6 +209,94 @@ test('runRecordPathFor: lands under ~/.insrc/analyze/<runId>/run.json', () => {
 
 test('purgeRunForTests on a missing slot is a silent no-op', () => {
 	assert.doesNotThrow(() => purgeRunForTests('nope-' + Math.random().toString(36).slice(2)));
+});
+
+// ---------------------------------------------------------------------------
+// purgeRun -- production cleanup with in-progress safety check
+// ---------------------------------------------------------------------------
+
+test('purgeRun: missing run dir -> { ok:true, purged:false }', () => {
+	const result = purgeRun('nope-' + Math.random().toString(36).slice(2));
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.equal(result.purged, false);
+});
+
+test('purgeRun: status=ok run -> removes dir', () => {
+	const runId = `purge-ok-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	writeRunRecord({
+		runId,
+		createdAt:       '2026-06-27T00:00:00.000Z',
+		updatedAt:       '2026-06-27T00:00:01.000Z',
+		userPrompt:      'fixture',
+		initialScopeRef: { kind: 'workspace', value: '/r' },
+		stage:           'done',
+		status:          'ok',
+	});
+	const result = purgeRun(runId);
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.equal(result.purged, true);
+	assert.equal(readRunRecord(runId), null, 'record must be gone after purge');
+});
+
+test('purgeRun: status=failed run -> removes dir (no protection on failed)', () => {
+	const runId = `purge-failed-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	writeRunRecord({
+		runId,
+		createdAt:       '2026-06-27T00:00:00.000Z',
+		updatedAt:       '2026-06-27T00:00:01.000Z',
+		userPrompt:      'fixture',
+		initialScopeRef: { kind: 'workspace', value: '/r' },
+		stage:           'plan',
+		status:          'failed',
+		error:           { code: 'plan-invariant-failed', message: 'fixture' },
+	});
+	const result = purgeRun(runId);
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.equal(result.purged, true);
+});
+
+test('purgeRun: status=in-progress without force -> refused', () => {
+	const runId = `purge-inprog-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-27T00:00:00.000Z',
+			updatedAt:       '2026-06-27T00:00:01.000Z',
+			userPrompt:      'fixture',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'execute',
+			status:          'in-progress',
+		});
+		const result = purgeRun(runId);
+		assert.equal(result.ok, false);
+		if (result.ok) return;
+		assert.equal(result.code, 'run-in-progress');
+		assert.equal(result.stage, 'execute');
+		// Record MUST still exist after refused purge.
+		assert.notEqual(readRunRecord(runId), null);
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
+test('purgeRun: status=in-progress with force=true -> removes dir', () => {
+	const runId = `purge-inprog-force-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	writeRunRecord({
+		runId,
+		createdAt:       '2026-06-27T00:00:00.000Z',
+		updatedAt:       '2026-06-27T00:00:01.000Z',
+		userPrompt:      'fixture',
+		initialScopeRef: { kind: 'workspace', value: '/r' },
+		stage:           'execute',
+		status:          'in-progress',
+	});
+	const result = purgeRun(runId, { force: true });
+	assert.equal(result.ok, true);
+	if (!result.ok) return;
+	assert.equal(result.purged, true);
 });
 
 // ---------------------------------------------------------------------------

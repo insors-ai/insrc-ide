@@ -22,7 +22,10 @@ export {
 	readRunRecord,
 	runRecordPathFor,
 	writeRunRecord,
+	purgeRun,
 	purgeRunForTests,
+	type PurgeRunResult,
+	type PurgeRunRefused,
 } from './persistence.js';
 export type {
 	RunAnalyzeArgs,
