@@ -106,6 +106,24 @@ export {
 	registerBuiltinRuntimes,
 	_resetRuntimeBootstrapLatchForTests,
 } from './runtimes/bootstrap.js';
+
+// Orchestrator -- end-to-end driver. Stitches classify -> plan ->
+// execute together; persists run lifecycle to <runRoot>/run.json.
+export {
+	runAnalyze,
+	readRunRecord,
+	runRecordPathFor,
+} from './orchestrator/index.js';
+export type {
+	RunAnalyzeArgs,
+	RunAnalyzeResult,
+	RunAnalyzeOk,
+	RunAnalyzeFail,
+	RunErrorCode,
+	RunFailure,
+	RunRecord,
+	RunStage,
+} from './orchestrator/index.js';
 export type {
 	PlanBuilderInput,
 	PlanBuilderOpts,

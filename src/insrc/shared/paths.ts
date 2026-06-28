@@ -86,6 +86,11 @@ export const PATHS = {
   // root; resumable runs read the cached state back.
   analyze:     join(INSRC_DIR, 'analyze'),
   analyzeRun:  (runId: string): string => join(INSRC_DIR, 'analyze', runId),
+  // Top-level run lifecycle record. Captures intent, stage, status,
+  // finalReport, error. Read by resume + the IDE; written atomically
+  // at every stage transition by the orchestrator.
+  analyzeRunRecord: (runId: string): string =>
+    join(INSRC_DIR, 'analyze', runId, 'run.json'),
   // Per-task output: ~/.insrc/analyze/<runId>/tasks/<taskId>.json
   // Leaf tasks land here; planner-template tasks ALSO land here
   // (carrying the child plan's aggregator output) and additionally
