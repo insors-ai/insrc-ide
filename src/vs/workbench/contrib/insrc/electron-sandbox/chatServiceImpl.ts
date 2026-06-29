@@ -121,11 +121,14 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		const runId = this._mintRunId();
 
 		// Echo the user's prompt back as a message event so the chat
-		// pane can render it immediately.
+		// pane can render it immediately. The `repo` field gives
+		// agentRunService something to scope by when registering the
+		// analyze run in the Runs sidebar.
 		this._onDidReceiveEvent.fire({
 			type: 'userMessage',
 			runId,
 			content: trimmed,
+			repo: scopePath,
 		});
 
 		// Kick off the streaming RPC. Persistence (run.json + per-task
