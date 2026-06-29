@@ -438,17 +438,39 @@ test('buildRun: malformed intent -> invalid-params error code', { skip: !GATE },
  *   --test-timeout=1500000
  * when running this directly.
  */
-test('runStart (infra workspace): end-to-end via RPC; response mirrors run.json', { skip: !GATE }, async () => {
+// S3: runStart is a streaming RPC now. Collect emitted frames via
+// a stub `send` callback; assert on the terminal `analyze.result`
+// frame + sequence-level invariants (progress frames precede
+// analyze.result; done is the last frame).
+
+interface LiveFrame { stream: string; data: unknown; }
+
+test('runStart (streaming): infra workspace end-to-end via streaming RPC; result mirrors run.json', { skip: !GATE }, async () => {
 	const runId = uniqueRunId('runstart');
 	const repoPath = realpathSync(fixtures.seededManifests);
 	try {
-		const r = await runStart({
+		const frames: LiveFrame[] = [];
+		await runStart({
 			runId,
 			userPrompt: 'Give me a brief inventory of the infrastructure in this repo.',
 			scopeRef:   { kind: 'workspace', value: repoPath },
-		}) as RunStartRpcResponse;
+		}, (m) => frames.push({ stream: m.stream, data: m.data }), new AbortController().signal);
 
-		// runId echoed regardless of outcome.
+		// Terminal frames: analyze.result + done as the last 2.
+		const resultIdx = frames.findIndex(f => f.stream === 'analyze.result');
+		const doneIdx   = frames.findIndex(f => f.stream === 'done');
+		assert.ok(resultIdx >= 0, 'analyze.result frame must be emitted');
+		assert.equal(doneIdx, frames.length - 1, 'done must be the last frame');
+		assert.ok(resultIdx < doneIdx, 'analyze.result must come BEFORE done');
+
+		// At least 1 progress frame -- the pipeline must emit *some*
+		// observable activity. Cache miss + classify+plan+execute
+		// produces many; even a fast-fail produces stage-started.
+		const progressFrames = frames.filter(f => f.stream === 'progress');
+		assert.ok(progressFrames.length >= 1,
+			`expected >=1 progress frame; got ${progressFrames.length} (total frames: ${frames.length})`);
+
+		const r = frames[resultIdx]!.data as RunStartRpcResponse;
 		assert.equal(r.runId, runId);
 
 		// status RPC reflects the same outcome.
@@ -458,7 +480,6 @@ test('runStart (infra workspace): end-to-end via RPC; response mirrors run.json'
 		assert.equal(status.record.runId, runId);
 
 		if (r.ok) {
-			// Happy path: AggregateReport shape.
 			const report = r.finalReport as {
 				summary: string;
 				findings: Array<{ title: string; detail: string; sources: string[] }>;
@@ -473,9 +494,7 @@ test('runStart (infra workspace): end-to-end via RPC; response mirrors run.json'
 			assert.equal(status.record.stage,  'done');
 			assert.equal(status.record.intent?.target, 'infra');
 		} else {
-			// Failure path -- must be a recognised orchestrator code,
-			// NEVER internal-error (that would mean a typed error escaped
-			// the orchestrator's classifier).
+			// Failure path -- must be a recognised code (not internal-error).
 			assert.notEqual(r.error.code, 'internal-error',
 				`runStart produced an unmapped error: ${r.error.message}`);
 			assert.equal(status.record.status, 'failed');
@@ -489,14 +508,20 @@ test('runStart (infra workspace): end-to-end via RPC; response mirrors run.json'
 	}
 });
 
-test('runStart: invalid scopeRef.kind -> invalid-params (fast, no LLM)', { skip: !GATE }, async () => {
+test('runStart (streaming): invalid scopeRef.kind -> invalid-params in analyze.result, fast (no LLM)', { skip: !GATE }, async () => {
+	const frames: LiveFrame[] = [];
 	const t0 = Date.now();
-	const r = await runStart({
+	await runStart({
 		runId:      'runstart-invalid',
 		userPrompt: 'analyze this',
 		scopeRef:   { kind: 'frobnicate', value: '/x' },
-	}) as RunStartRpcResponse;
+	}, (m) => frames.push({ stream: m.stream, data: m.data }), new AbortController().signal);
 	const ms = Date.now() - t0;
+
+	assert.equal(frames.length, 2, `param-validation fast path should emit exactly 2 frames (analyze.result + done); got ${frames.length}`);
+	assert.equal(frames[0]!.stream, 'analyze.result');
+	assert.equal(frames[1]!.stream, 'done');
+	const r = frames[0]!.data as RunStartRpcResponse;
 	assert.equal(r.ok, false);
 	if (r.ok) return;
 	assert.equal(r.error.code, 'invalid-params');

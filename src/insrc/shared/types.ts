@@ -695,7 +695,7 @@ export interface IpcResponse {
   error?:  string;
 }
 
-export type IpcStreamKind = 'delta' | 'progress' | 'gate' | 'checkpoint' | 'done' | 'error' | 'qna.update' | 'liveStep' | 'todos' | 'handoff' | 'meta-task' | 'assertion-confirm';
+export type IpcStreamKind = 'delta' | 'progress' | 'gate' | 'checkpoint' | 'done' | 'error' | 'qna.update' | 'liveStep' | 'todos' | 'handoff' | 'meta-task' | 'assertion-confirm' | 'analyze.result';
 
 export interface IpcStreamMessage {
   id:     number;

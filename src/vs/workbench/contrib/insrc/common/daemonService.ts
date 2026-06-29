@@ -106,6 +106,22 @@ export type DaemonStreamMessage =
 		readonly confidence: number;
 		readonly polarity: string;
 		readonly scope: string;
+	}
+	| {
+		/**
+		 * Terminal frame from analyze.run.start carrying the
+		 * RunAnalyzeResult (success OR failure). Always preceded by
+		 * the progress frames for each stage / task transition and
+		 * followed by the standard 'done' lifecycle terminator the
+		 * stream handle dispatches via onDidEnd.
+		 *
+		 * `result` is the daemon's RunStartRpcResponse -- tagged
+		 * union with ok:true (intent + finalReport + tasksCompleted
+		 * + tasksFailed + durationMs) or ok:false (runId + stage +
+		 * intent? + durationMs + error{code,message,data?}).
+		 */
+		readonly type: 'analyze-result';
+		readonly result: unknown;
 	};
 
 /** Kinds emitted on the todos stream. Mirrors daemon-side TodoStreamEventKind. */

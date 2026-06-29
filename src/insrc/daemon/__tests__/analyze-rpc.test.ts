@@ -459,57 +459,138 @@ test('plan rejects negative currentDepth', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// analyze.run.start -- params validation
+// analyze.run.start -- streaming params validation
+//
+// runStart is a streaming handler now: (params, send, signal) -> Promise<void>.
+// Param-validation failures travel as the terminal `analyze.result`
+// frame carrying RunStartRpcResponse{ok:false, error:{code:'invalid-params'}}
+// followed by a `done` frame. Tests collect emitted frames + assert
+// on the terminal one.
 // ---------------------------------------------------------------------------
 
-test('runStart rejects non-object params with invalid-params + empty runId', async () => {
-	const r = await runStart(null);
-	assert.equal(r.ok, false);
-	if (r.ok) return;  // type narrowing
-	assert.equal(r.error.code, 'invalid-params');
-	assert.equal(r.runId, '');
-	assert.equal(r.stage, 'classify');
+interface CollectedFrame { stream: string; data: unknown; }
+
+function collectFrames(): { frames: CollectedFrame[]; send: (m: { id: number; stream: string; data: unknown }) => void } {
+	const frames: CollectedFrame[] = [];
+	return {
+		frames,
+		send: (m) => frames.push({ stream: m.stream, data: m.data }),
+	};
+}
+
+function terminalFrameOf(frames: readonly CollectedFrame[]): { result: { ok: boolean; runId: string; stage?: string; error?: { code: string; message: string } } | undefined } {
+	const analyzeResult = frames.find(f => f.stream === 'analyze.result');
+	if (analyzeResult === undefined) return { result: undefined };
+	return { result: analyzeResult.data as { ok: boolean; runId: string; stage?: string; error?: { code: string; message: string } } };
+}
+
+test('runStart (streaming): non-object params -> analyze.result frame with invalid-params + done', async () => {
+	const { frames, send } = collectFrames();
+	await runStart(null, send, new AbortController().signal);
+
+	// Should emit exactly 2 frames: analyze.result + done.
+	assert.equal(frames.length, 2, `expected 2 frames; got ${frames.length}: ${frames.map(f => f.stream).join(', ')}`);
+	assert.equal(frames[0]!.stream, 'analyze.result');
+	assert.equal(frames[1]!.stream, 'done');
+
+	const { result } = terminalFrameOf(frames);
+	assert.ok(result);
+	assert.equal(result!.ok, false);
+	assert.equal(result!.error?.code, 'invalid-params');
+	assert.equal(result!.runId, '');
+	assert.equal(result!.stage, 'classify');
 });
 
-test('runStart rejects missing runId', async () => {
-	const r = await runStart({
+test('runStart (streaming): missing runId -> invalid-params in terminal frame', async () => {
+	const { frames, send } = collectFrames();
+	await runStart({
 		userPrompt: 'hi',
 		scopeRef:   { kind: 'workspace', value: '/x' },
-	});
-	assert.equal(r.ok, false);
-	if (r.ok) return;
-	assert.equal(r.error.code, 'invalid-params');
-	assert.match(r.error.message, /runId/);
+	}, send, new AbortController().signal);
+
+	const { result } = terminalFrameOf(frames);
+	assert.ok(result);
+	assert.equal(result!.ok, false);
+	assert.equal(result!.error?.code, 'invalid-params');
+	assert.match(result!.error!.message, /runId/);
 });
 
-test('runStart rejects missing userPrompt', async () => {
-	const r = await runStart({
+test('runStart (streaming): missing userPrompt -> invalid-params', async () => {
+	const { frames, send } = collectFrames();
+	await runStart({
 		runId:    'r1',
 		scopeRef: { kind: 'workspace', value: '/x' },
-	});
-	assert.equal(r.ok, false);
-	if (r.ok) return;
-	assert.equal(r.error.code, 'invalid-params');
-	assert.match(r.error.message, /userPrompt/);
+	}, send, new AbortController().signal);
+	const { result } = terminalFrameOf(frames);
+	assert.ok(result);
+	assert.equal(result!.error?.code, 'invalid-params');
+	assert.match(result!.error!.message, /userPrompt/);
 });
 
-test('runStart rejects missing scopeRef', async () => {
-	const r = await runStart({ runId: 'r1', userPrompt: 'hi' });
-	assert.equal(r.ok, false);
-	if (r.ok) return;
-	assert.equal(r.error.code, 'invalid-params');
-	assert.match(r.error.message, /scopeRef/);
+test('runStart (streaming): missing scopeRef -> invalid-params', async () => {
+	const { frames, send } = collectFrames();
+	await runStart({ runId: 'r1', userPrompt: 'hi' }, send, new AbortController().signal);
+	const { result } = terminalFrameOf(frames);
+	assert.ok(result);
+	assert.equal(result!.error?.code, 'invalid-params');
+	assert.match(result!.error!.message, /scopeRef/);
 });
 
-test('runStart rejects bad scopeRef.kind', async () => {
-	const r = await runStart({
+test('runStart (streaming): bad scopeRef.kind -> invalid-params with field name in message', async () => {
+	const { frames, send } = collectFrames();
+	await runStart({
 		runId: 'r1', userPrompt: 'hi',
 		scopeRef: { kind: 'frobnicate', value: '/x' },
-	});
-	assert.equal(r.ok, false);
-	if (r.ok) return;
-	assert.equal(r.error.code, 'invalid-params');
-	assert.match(r.error.message, /scopeRef\.kind/);
+	}, send, new AbortController().signal);
+	const { result } = terminalFrameOf(frames);
+	assert.ok(result);
+	assert.equal(result!.error?.code, 'invalid-params');
+	assert.match(result!.error!.message, /scopeRef\.kind/);
+});
+
+test('runStart (streaming): resume cache hit -> analyze.result with ok:true; no intermediate progress frames', async () => {
+	const runId = `rpc-stream-cache-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-29T00:00:00.000Z',
+			updatedAt:       '2026-06-29T00:00:01.000Z',
+			userPrompt:      'fixture',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'done',
+			status:          'ok',
+			intent: {
+				target:    'infra',
+				scope:     'XS',
+				focused:   false,
+				scopeRef:  { kind: 'workspace', value: '/r' },
+				reasoning: 'cache-hit streaming RPC fixture',
+			},
+			finalReport:    { summary: 'cached', findings: [], metadata: {} as never },
+			tasksCompleted: 1,
+			tasksFailed:    [],
+		});
+
+		const { frames, send } = collectFrames();
+		await runStart({
+			runId,
+			userPrompt: 'whatever',
+			scopeRef:   { kind: 'workspace', value: '/r' },
+		}, send, new AbortController().signal);
+
+		// Cache hit short-circuits all stage events; only analyze.result + done emit.
+		assert.equal(frames.length, 2,
+			`cache hit should emit exactly 2 frames; got ${frames.length}: ${frames.map(f => f.stream).join(', ')}`);
+		assert.equal(frames[0]!.stream, 'analyze.result');
+		assert.equal(frames[1]!.stream, 'done');
+
+		const { result } = terminalFrameOf(frames);
+		assert.ok(result);
+		assert.equal(result!.ok, true);
+		assert.equal(result!.runId, runId);
+	} finally {
+		purgeRunForTests(runId);
+	}
 });
 
 // ---------------------------------------------------------------------------

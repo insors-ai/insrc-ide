@@ -50,10 +50,12 @@ import {
 	shaperFor,
 } from '../analyze/index.js';
 import type {
+	AnalyzeRunEvent,
 	RunAnalyzeArgs,
 	RunAnalyzeResult,
 	RunRecord,
 } from '../analyze/index.js';
+import type { IpcStreamMessage } from '../shared/types.js';
 import {
 	ClassifierLlmUnavailableError,
 	ClassifierPromptMissingError,
@@ -450,36 +452,56 @@ export async function plan(params: unknown): Promise<PlanRpcResponse> {
 // ---------------------------------------------------------------------------
 
 /**
- * Drive the full analyze pipeline (classify -> plan -> execute)
- * and return the terminal RunAnalyzeResult on the wire. Internally
- * delegates to runAnalyze (analyze/orchestrator/driver.ts); this
- * handler just shapes the response + maps the orchestrator's
- * RunErrorCode onto the wire-stable AnalyzeRpcErrorCode (which is
- * a superset).
+ * Streaming RPC: drives the full analyze pipeline (classify -> plan
+ * -> execute) and emits frames at every transition. Delegates to
+ * runAnalyze; maps each AnalyzeRunEvent to an IpcStreamMessage so
+ * the IDE-side daemonService.stream() consumer surfaces them as
+ * DaemonStreamMessage events.
+ *
+ * Frame protocol:
+ *   - { stream: 'progress', data: { step, status, ...event-specific } }
+ *     fires for every intermediate stage / task event
+ *   - { stream: 'analyze.result', data: RunStartRpcResponse }
+ *     fires ONCE at the end carrying the terminal RunAnalyzeResult
+ *     (success or failure, in the SAME shape the prior r/r RPC used)
+ *   - { stream: 'done', data: {} }
+ *     fires at the very end to close the stream lifecycle
  *
  * Persistence (run.json) happens inside runAnalyze regardless of
- * how the RPC ends -- so even if the IPC connection drops, the
- * run's terminal state is on disk for resume / status reads.
+ * how the stream ends -- IDE disconnect, signal abort, etc. all
+ * leave the terminal state recoverable via analyze.run.status.
  *
- * Tagged-union response with the orchestrator's runId / stage /
- * intent / durationMs preserved on both halves.
+ * Param-validation errors surface as the analyze.result frame
+ * carrying { ok:false, error.code: 'invalid-params', ... } so the
+ * IDE has a single dispatch path regardless of where the failure
+ * happened.
  */
-export async function runStart(params: unknown): Promise<RunStartRpcResponse> {
+export async function runStart(
+	params: unknown,
+	send:   (msg: IpcStreamMessage) => void,
+	signal: AbortSignal,
+): Promise<void> {
+	const start = Date.now();
+
 	let parsed: RunStartParams;
 	try {
 		parsed = parseRunStartParams(params);
 	} catch (err) {
-		// Pre-validation failure -- no runId in the record sense; we
-		// surface invalid-params with the parser's message.
 		const message = err instanceof Error ? err.message : String(err);
 		log.info({ message }, 'analyze.run.start invalid params');
-		return {
-			ok:         false,
-			runId:      '',
-			stage:      'classify',
-			durationMs: 0,
-			error:      { code: 'invalid-params', message },
-		};
+		send({
+			id:     0,
+			stream: 'analyze.result',
+			data:   {
+				ok:         false,
+				runId:      '',
+				stage:      'classify',
+				durationMs: Date.now() - start,
+				error:      { code: 'invalid-params', message },
+			} satisfies RunStartRpcResponse,
+		});
+		send({ id: 0, stream: 'done', data: {} });
+		return;
 	}
 
 	const args: RunAnalyzeArgs = {
@@ -488,31 +510,126 @@ export async function runStart(params: unknown): Promise<RunStartRpcResponse> {
 		scopeRef:   parsed.scopeRef,
 	};
 
+	const onEvent = (event: AnalyzeRunEvent): void => {
+		// `done` is captured by runAnalyze's return value; the handler
+		// emits a single terminal `analyze.result` frame from that
+		// return value below. Intermediate events go straight to
+		// `progress` frames.
+		if (event.type === 'done') return;
+		send({ id: 0, stream: 'progress', data: eventToProgressData(event) });
+	};
+
 	let result: RunAnalyzeResult;
 	try {
-		result = await runAnalyze(args);
+		result = await runAnalyze(args, { onEvent, signal });
 	} catch (err) {
-		// runAnalyze is expected to capture every typed error as a
-		// failure result. An uncaught throw here means a bug in the
-		// orchestrator OR an OS-level failure (out of memory, etc.).
-		// Surface as internal-error so the IDE has something
-		// structured.
+		// runAnalyze captures every typed error as a failure result.
+		// An uncaught throw here means a bug or an OS-level failure;
+		// surface as a structured analyze.result frame so the IDE
+		// dispatch path stays uniform.
 		const message = err instanceof Error ? err.message : String(err);
 		log.error({ runId: parsed.runId, message }, 'analyze.run.start: uncaught orchestrator error');
-		return {
-			ok:         false,
-			runId:      parsed.runId,
-			stage:      'classify',
-			durationMs: 0,
-			error:      { code: 'internal-error', message },
-		};
+		send({
+			id:     0,
+			stream: 'analyze.result',
+			data:   {
+				ok:         false,
+				runId:      parsed.runId,
+				stage:      'classify',
+				durationMs: Date.now() - start,
+				error:      { code: 'internal-error', message },
+			} satisfies RunStartRpcResponse,
+		});
+		send({ id: 0, stream: 'done', data: {} });
+		return;
 	}
 
+	const terminal = shapeTerminalFrame(result);
 	if (result.ok) {
 		log.info(
 			{ runId: result.runId, tasksCompleted: result.tasksCompleted, durationMs: result.durationMs },
 			'analyze.run.start ok',
 		);
+	} else {
+		log.info(
+			{
+				runId:      result.runId,
+				stage:      result.stage,
+				code:       result.error.code,
+				durationMs: result.durationMs,
+			},
+			'analyze.run.start failed',
+		);
+	}
+	send({ id: 0, stream: 'analyze.result', data: terminal });
+	send({ id: 0, stream: 'done', data: {} });
+}
+
+// ---------------------------------------------------------------------------
+// AnalyzeRunEvent -> wire-frame data shaping
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape an AnalyzeRunEvent into a JSON-friendly object the IDE side
+ * surfaces as `DaemonStreamMessage.progress { step, status, ... }`.
+ *
+ * The `step` + `status` pair is what the existing widgets
+ * (status bar, runs sidebar) read. The remaining fields are spread
+ * verbatim so future widgets can pick them up without backend
+ * changes.
+ */
+function eventToProgressData(event: AnalyzeRunEvent): Record<string, unknown> {
+	switch (event.type) {
+		case 'stage-started':
+			return { step: event.stage, status: 'started' };
+		case 'classified':
+			return { step: 'classify', status: 'completed', intent: event.intent };
+		case 'plan-attempt':
+			return {
+				step:     'plan',
+				status:   `attempt-${event.attempt}-${event.accepted ? 'accepted' : 'rejected'}`,
+				attempt:  event.attempt,
+				accepted: event.accepted,
+				...(event.invariantId !== undefined ? { invariantId: event.invariantId } : {}),
+			};
+		case 'plan-accepted':
+			return {
+				step:      'plan',
+				status:    'accepted',
+				taskCount: event.taskCount,
+				planId:    event.planId,
+			};
+		case 'task-started':
+			return {
+				step:     `task-${event.index}/${event.total}`,
+				status:   `started: ${event.template}`,
+				taskId:   event.taskId,
+				template: event.template,
+				index:    event.index,
+				total:    event.total,
+				...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
+			};
+		case 'task-completed':
+			return {
+				step:   `task-${event.taskId}`,
+				status: event.status,
+				taskId: event.taskId,
+				...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
+			};
+		case 'done':
+			// Not emitted as a progress frame -- handler emits analyze.result
+			// from the run result directly.
+			return { step: 'done', status: 'unused' };
+	}
+}
+
+/**
+ * Build the terminal RunStartRpcResponse from a RunAnalyzeResult.
+ * Same shape the request/response RPC used to return, now travelling
+ * as the `analyze.result` stream frame's payload.
+ */
+function shapeTerminalFrame(result: RunAnalyzeResult): RunStartRpcResponse {
+	if (result.ok) {
 		return {
 			ok:             true,
 			runId:          result.runId,
@@ -523,21 +640,11 @@ export async function runStart(params: unknown): Promise<RunStartRpcResponse> {
 			durationMs:     result.durationMs,
 		};
 	}
-
 	const payload: AnalyzeRpcErrorPayload = {
 		code:    result.error.code as AnalyzeRpcErrorCode,
 		message: result.error.message,
 		...(result.error.data !== undefined ? { data: result.error.data } : {}),
 	};
-	log.info(
-		{
-			runId:      result.runId,
-			stage:      result.stage,
-			code:       payload.code,
-			durationMs: result.durationMs,
-		},
-		'analyze.run.start failed',
-	);
 	return {
 		ok:         false,
 		runId:      result.runId,

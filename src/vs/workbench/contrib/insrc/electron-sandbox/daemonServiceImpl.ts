@@ -235,6 +235,14 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 					scope: typeof payload['scope'] === 'string' ? payload['scope'] as string : 'workspace',
 				};
 			}
+			case 'analyze.result':
+				// Terminal frame from analyze.run.start. `data` carries
+				// the daemon's RunStartRpcResponse verbatim; the IDE side
+				// passes it through as opaque `unknown` so the chat panel
+				// (next phase) can do its own dispatch on
+				// result.ok / result.error.code without needing the
+				// daemon-side type definitions visible here.
+				return { type: 'analyze-result', result: msg.data };
 			default:
 				return undefined;
 		}
