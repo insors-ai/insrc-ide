@@ -45,6 +45,7 @@ export {
 	type ExecutorResult,
 	type PlanExecutionResult,
 	type RunExecutorArgs,
+	type TaskExecutionEvent,
 	type TaskExecutionRecord,
 	type TemplateExecuteArgs,
 	type TemplateExecuteResult,

@@ -78,7 +78,50 @@ export interface RunExecutorArgs {
 	readonly tree:   PlanTreeNode;
 	readonly intent: ClassifiedIntent;
 	readonly runId:  string;
+	/**
+	 * Optional per-task progress callback. Fires synchronously at the
+	 * start + completion of every task across the whole recursive plan
+	 * tree, including tasks inside child plans dispatched by
+	 * planner-template tasks (parentTaskPath set in that case).
+	 *
+	 * Subscriber exceptions are caught + logged at the walker layer;
+	 * a broken subscriber cannot crash the executor.
+	 */
+	readonly onTaskEvent?: (event: TaskExecutionEvent) => void;
 }
+
+/**
+ * Per-task event the executor walker emits. The orchestrator wraps
+ * these as AnalyzeRunEvent { task-started | task-completed } so the
+ * daemon's streaming RPC layer can forward them to IDE widgets.
+ *
+ * Ordering invariants:
+ *   - For each task, `task-started` fires BEFORE `task-completed`.
+ *   - Events within a single plan come in plan.tasks[] order.
+ *   - When a planner-template task at the parent level recurses into
+ *     its child plan, the child plan's events fire BETWEEN the
+ *     parent task's `task-started` and `task-completed`.
+ *   - `parentTaskPath` is undefined for the root plan's tasks;
+ *     set to the dotted path (e.g. "t02" or "t02.t05") for tasks
+ *     inside child plans -- so consumers can render nested
+ *     progress.
+ *   - `index` is 1-based; `total` is the local plan's task count.
+ */
+export type TaskExecutionEvent =
+	| {
+		readonly type:            'task-started';
+		readonly taskId:          string;
+		readonly template:        string;
+		readonly index:           number;
+		readonly total:           number;
+		readonly parentTaskPath?: string;
+	}
+	| {
+		readonly type:            'task-completed';
+		readonly taskId:          string;
+		readonly status:          'ok' | 'failed' | 'skipped-dependency-unavailable';
+		readonly parentTaskPath?: string;
+	};
 
 /** Result of walking a single Plan (the root or any child). */
 export interface PlanExecutionResult {

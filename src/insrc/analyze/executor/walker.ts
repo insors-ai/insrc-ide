@@ -50,61 +50,80 @@ import {
 	type PlannedTask,
 	type PlanTreeNode,
 	type RunExecutorArgs,
+	type TaskExecutionEvent,
 	type TaskExecutionRecord,
 	type TemplateExecuteResult,
 } from './types.js';
 
 const log = getLogger('analyze:executor:walker');
 
+interface WalkOpts {
+	readonly onTaskEvent?:    ((event: TaskExecutionEvent) => void) | undefined;
+	readonly parentTaskPath?: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // runExecutor -- public entry point
 // ---------------------------------------------------------------------------
 
 export async function runExecutor(args: RunExecutorArgs): Promise<ExecutorResult> {
-	return executePlanNode(args.tree, args.intent, args.runId);
-}
-
-async function executePlanNode(
-	node:   PlanTreeNode,
-	intent: ClassifiedIntent,
-	runId:  string,
-): Promise<ExecutorResult> {
-	const root = await executePlan(node, intent, runId);
-
-	// Recursively gather child executor results. We DON'T re-execute
-	// the children inline above (they're driven INSIDE executePlan
-	// when it hits a planner task); this loop just collects the
-	// recursive ExecutorResult shape for the caller.
-	const children = new Map<string, ExecutorResult>();
-	for (const [taskId, childNode] of node.children.entries()) {
-		const childResult = await executePlanNode(childNode, intent, runId);
-		children.set(taskId, childResult);
-	}
-
-	return { root, children };
+	return executePlan(args.tree, args.intent, args.runId, {
+		onTaskEvent: args.onTaskEvent,
+	});
 }
 
 /**
  * Execute a single plan (one PlanTreeNode's tasks[]). Returns the
- * per-task records + the aggregator's final report.
+ * full ExecutorResult including any child plans dispatched by
+ * planner-template tasks.
+ *
+ * SINGLE-PASS: child plans execute exactly once, via the
+ * planner-template task's dispatch -> recursive executePlan call.
+ * The prior implementation walked node.children a second time at
+ * the top level (executePlanNode loop), which double-executed
+ * every child plan. That second pass is removed; child results
+ * bubble up through executePlannerTask's return value instead.
+ *
+ * Per-task events (S2): for every task in plan.tasks[], emits a
+ * task-started before dispatch + a task-completed after the
+ * record is finalised. For planner-template tasks, the child
+ * plan's events fire BETWEEN the parent's started + completed
+ * events. `parentTaskPath` accumulates as we recurse.
  */
 async function executePlan(
 	node:   PlanTreeNode,
 	intent: ClassifiedIntent,
 	runId:  string,
-): Promise<PlanExecutionResult> {
+	opts:   WalkOpts,
+): Promise<ExecutorResult> {
 	const outputs     = new Map<string, unknown>();
 	const failed      = new Set<string>();
 	const perTask     = new Map<string, TaskExecutionRecord>();
 	const tasksFailed: { taskId: string; reason: string }[] = [];
+	const children    = new Map<string, ExecutorResult>();
 	let   tasksCompleted = 0;
 	let   finalReport: unknown = undefined;
 
 	const aggregatorIndex = node.plan.tasks.length - 1;
+	const total = node.plan.tasks.length;
+	const parentTaskPath = opts.parentTaskPath;
 
-	for (let i = 0; i < node.plan.tasks.length; i++) {
+	for (let i = 0; i < total; i++) {
 		const task = node.plan.tasks[i]!;
 		const isAggregator = i === aggregatorIndex;
+		const index = i + 1;
+
+		// Emit task-started BEFORE the dependency check / dispatch.
+		// Even skipped tasks emit a started/completed pair so the IDE
+		// can render every plan slot uniformly.
+		emit(opts, {
+			type:     'task-started',
+			taskId:   task.taskId,
+			template: task.template,
+			index,
+			total,
+			...(parentTaskPath !== undefined ? { parentTaskPath } : {}),
+		});
 
 		// Step 1: dependency check
 		const unmet = unmetDependencies(task, outputs, failed);
@@ -123,13 +142,28 @@ async function executePlan(
 			failed.add(task.taskId);
 			tasksFailed.push({ taskId: task.taskId, reason: record.error! });
 			log.info({ runId, taskId: task.taskId, reason: unmet }, 'task skipped (dependency-unavailable)');
+
+			emit(opts, {
+				type:   'task-completed',
+				taskId: task.taskId,
+				status: 'skipped-dependency-unavailable',
+				...(parentTaskPath !== undefined ? { parentTaskPath } : {}),
+			});
 			continue;
 		}
 
 		// Step 2 + 3: dispatch
 		let result: TaskExecutionRecord;
 		if (task.kind === 'planner') {
-			result = await executePlannerTask(task, node, intent, runId);
+			const childOpts: WalkOpts = {
+				onTaskEvent:    opts.onTaskEvent,
+				parentTaskPath: appendTaskPath(parentTaskPath, task.taskId),
+			};
+			const planRes = await executePlannerTask(task, node, intent, runId, childOpts);
+			result = planRes.record;
+			if (planRes.childResult !== undefined) {
+				children.set(task.taskId, planRes.childResult);
+			}
 		} else {
 			result = await executeLeafTask(task, intent, runId, outputs);
 		}
@@ -152,14 +186,22 @@ async function executePlan(
 			failed.add(task.taskId);
 			tasksFailed.push({ taskId: task.taskId, reason: result.error ?? 'unknown' });
 		}
+
+		emit(opts, {
+			type:   'task-completed',
+			taskId: task.taskId,
+			status: result.status,
+			...(parentTaskPath !== undefined ? { parentTaskPath } : {}),
+		});
 	}
 
-	return {
+	const root: PlanExecutionResult = {
 		perTask,
 		...(finalReport !== undefined ? { finalReport } : {}),
 		tasksCompleted,
 		tasksFailed,
 	};
+	return { root, children };
 }
 
 // ---------------------------------------------------------------------------
@@ -213,12 +255,18 @@ async function executeLeafTask(
 	};
 }
 
+interface PlannerTaskResult {
+	readonly record:       TaskExecutionRecord;
+	readonly childResult?: ExecutorResult;
+}
+
 async function executePlannerTask(
 	task:   PlannedTask,
 	parent: PlanTreeNode,
 	intent: ClassifiedIntent,
 	runId:  string,
-): Promise<TaskExecutionRecord> {
+	opts:   WalkOpts,
+): Promise<PlannerTaskResult> {
 	// Look up the child plan in the tree.
 	const childNode = parent.children.get(task.taskId);
 	if (childNode === undefined) {
@@ -227,30 +275,32 @@ async function executePlannerTask(
 			? `child-plan-unavailable: ${childErr.message}`
 			: 'child-plan-unavailable: tree has no child for this planner task';
 		log.warn({ runId, taskId: task.taskId }, reason);
-		return failedRecord(task, reason);
+		return { record: failedRecord(task, reason) };
 	}
 
-	// Recursively execute the child plan.
-	const childResult = await executePlan(childNode, intent, runId);
+	// Recursively execute the child plan. Threads opts through so the
+	// child's per-task events fire with parentTaskPath populated.
+	const childResult = await executePlan(childNode, intent, runId, opts);
 
-	if (childResult.finalReport === undefined) {
+	if (childResult.root.finalReport === undefined) {
 		const reason = 'child-plan-unavailable: child aggregator produced no report';
 		log.warn({ runId, taskId: task.taskId }, reason);
-		return failedRecord(task, reason);
+		return { record: failedRecord(task, reason), childResult };
 	}
 
 	// Planner-template tasks always produce ['report'] (INV-6 +
 	// template registration check). Materialize the child's report
 	// under the parent's produces name.
-	return {
+	const record: TaskExecutionRecord = {
 		taskId:      task.taskId,
 		template:    task.template,
 		kind:        task.kind,
 		produces:    [...task.produces],
 		status:      'ok',
-		outputs:     { [task.produces[0]!]: childResult.finalReport },
+		outputs:     { [task.produces[0]!]: childResult.root.finalReport },
 		completedAt: nowIso(),
 	};
+	return { record, childResult };
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +389,34 @@ function failedRecord(task: PlannedTask, error: string): TaskExecutionRecord {
  */
 function nowIso(): string {
 	return new Date().toISOString();
+}
+
+/**
+ * Invoke the optional task-event subscriber, catching exceptions so
+ * a broken subscriber can't crash the walker. Mirrors the
+ * orchestrator's emit() helper.
+ */
+function emit(opts: WalkOpts, event: TaskExecutionEvent): void {
+	if (opts.onTaskEvent === undefined) return;
+	try { opts.onTaskEvent(event); }
+	catch (err) {
+		log.warn(
+			{ eventType: event.type, err: (err as Error).message },
+			'executor: onTaskEvent subscriber threw; ignoring',
+		);
+	}
+}
+
+/**
+ * Compose nested taskPaths for recursive plan execution.
+ * Root plan tasks get parentTaskPath=undefined; the first
+ * planner-template task at level 1 sets it to its own taskId;
+ * further nested levels join with '.'.
+ */
+function appendTaskPath(parent: string | undefined, taskId: string): string {
+	return parent === undefined || parent.length === 0
+		? taskId
+		: `${parent}.${taskId}`;
 }
 
 // ---------------------------------------------------------------------------

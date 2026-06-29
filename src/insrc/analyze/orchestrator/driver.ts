@@ -233,11 +233,35 @@ export async function runAnalyze(
 	}
 	emit({ type: 'stage-started', stage: 'execute' });
 
-	// S2 (next commit) wires per-task events from the executor through
-	// `opts.onEvent`. For S1, the executor is still un-instrumented;
-	// callers see stage-started for 'execute' and then `done` when the
-	// whole plan finishes.
-	const execResult = await runExecutor({ tree, intent, runId });
+	// S2: wire per-task events from the executor through opts.onEvent.
+	// The executor's TaskExecutionEvent shape matches our AnalyzeRunEvent
+	// task-started / task-completed variants 1:1; we just pass them
+	// through. parentTaskPath threads naturally for tasks inside child
+	// plans dispatched by planner-template tasks.
+	const execResult = await runExecutor({
+		tree,
+		intent,
+		runId,
+		onTaskEvent: (event) => {
+			if (event.type === 'task-started') {
+				emit({
+					type:     'task-started',
+					taskId:   event.taskId,
+					template: event.template,
+					index:    event.index,
+					total:    event.total,
+					...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
+				});
+			} else {
+				emit({
+					type:   'task-completed',
+					taskId: event.taskId,
+					status: event.status,
+					...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
+				});
+			}
+		},
+	});
 	const rootPlan = execResult.root;
 
 	if (rootPlan.finalReport === undefined) {

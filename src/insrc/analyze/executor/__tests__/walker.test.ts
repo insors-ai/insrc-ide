@@ -445,3 +445,247 @@ test('readTaskOutput: miss returns null', () => {
 test('purgeTaskOutput on a missing slot is a silent no-op', () => {
 	assert.doesNotThrow(() => purgeTaskOutput('nope', 'also-nope'));
 });
+
+// ---------------------------------------------------------------------------
+// S2: per-task event emission via RunExecutorArgs.onTaskEvent
+// ---------------------------------------------------------------------------
+
+import type { TaskExecutionEvent } from '../types.js';
+
+test('onTaskEvent: 2-task happy path emits started+completed per task in plan order', async () => {
+	_resetRuntimeRegistryForTests();
+	registerTemplateRuntime(stubRuntime('demo.discovery', { items: ['a'] }));
+	registerTemplateRuntime(stubRuntime('demo.aggregator', { report: { x: 1 } }));
+
+	const runId = uniqueRunId('evt-happy');
+	const plan = mkPlan([
+		mkTask({ taskId: 't01', template: 'demo.discovery',  produces: ['items'] }),
+		mkTask({ taskId: 't02', template: 'demo.aggregator', produces: ['report'], consumes: ['items'] }),
+	]);
+
+	const events: TaskExecutionEvent[] = [];
+	try {
+		await runExecutor({
+			tree: mkNode(plan),
+			intent: SAMPLE_INTENT,
+			runId,
+			onTaskEvent: (e) => events.push(e),
+		});
+
+		assert.equal(events.length, 4, `expected 4 events (2 started + 2 completed); got ${events.length}`);
+		const e0 = events[0]!;
+		const e1 = events[1]!;
+		const e2 = events[2]!;
+		const e3 = events[3]!;
+		assert.equal(e0.type, 'task-started');    assert.equal(e0.taskId, 't01');
+		assert.equal(e1.type, 'task-completed');  assert.equal(e1.taskId, 't01');
+		assert.equal(e2.type, 'task-started');    assert.equal(e2.taskId, 't02');
+		assert.equal(e3.type, 'task-completed');  assert.equal(e3.taskId, 't02');
+		if (e0.type === 'task-started') {
+			assert.equal(e0.index, 1);
+			assert.equal(e0.total, 2);
+			assert.equal(e0.parentTaskPath, undefined);
+		}
+		if (e1.type === 'task-completed') {
+			assert.equal(e1.status, 'ok');
+			assert.equal(e1.parentTaskPath, undefined);
+		}
+	} finally {
+		purgeAllTaskOutputs(runId);
+	}
+});
+
+test('onTaskEvent: failed task emits started + completed with status="failed"', async () => {
+	_resetRuntimeRegistryForTests();
+	registerTemplateRuntime(throwingRuntime('demo.broken', 'BOOM'));
+	registerTemplateRuntime(stubRuntime('demo.aggregator', { report: 'r' }));
+
+	const runId = uniqueRunId('evt-fail');
+	const plan = mkPlan([
+		mkTask({ taskId: 't01', template: 'demo.broken',     produces: ['items'] }),
+		mkTask({ taskId: 't02', template: 'demo.aggregator', produces: ['report'], consumes: ['items'] }),
+	]);
+	const events: TaskExecutionEvent[] = [];
+	try {
+		await runExecutor({
+			tree: mkNode(plan),
+			intent: SAMPLE_INTENT,
+			runId,
+			onTaskEvent: (e) => events.push(e),
+		});
+
+		// t01: started + completed (failed). t02: started + completed (skipped).
+		assert.equal(events.length, 4);
+		const t01Completed = events[1]! as { type: string; status: string };
+		assert.equal(t01Completed.type, 'task-completed');
+		assert.equal(t01Completed.status, 'failed');
+		const t02Completed = events[3]! as { type: string; status: string };
+		assert.equal(t02Completed.type, 'task-completed');
+		assert.equal(t02Completed.status, 'skipped-dependency-unavailable');
+	} finally {
+		purgeAllTaskOutputs(runId);
+	}
+});
+
+test('onTaskEvent: planner-template task -- child plan events fire BETWEEN parent started + completed, with parentTaskPath set', async () => {
+	_resetRuntimeRegistryForTests();
+	registerTemplateRuntime(stubRuntime('root.discovery',  { items: ['x'] }));
+	registerTemplateRuntime(stubRuntime('root.aggregator', { report: { r: 'root' } }));
+	registerTemplateRuntime(stubRuntime('child.discovery',  { items: ['c'] }));
+	registerTemplateRuntime(stubRuntime('child.aggregator', { report: { r: 'child' } }));
+
+	const runId = uniqueRunId('evt-planner');
+	const childPlan = mkPlan([
+		mkTask({ taskId: 'c01', template: 'child.discovery',  produces: ['items'] }),
+		mkTask({ taskId: 'c02', template: 'child.aggregator', produces: ['report'], consumes: ['items'] }),
+	]);
+	const rootPlan = mkPlan([
+		mkTask({ taskId: 't01', template: 'root.discovery', produces: ['items'] }),
+		mkTask({
+			taskId:    't02',
+			template:  'code.subrun.deep-dive',
+			kind:      'planner',
+			params:    {},
+			produces:  ['report'],
+			rationale: 'planner-template test',
+		}),
+		mkTask({ taskId: 't03', template: 'root.aggregator', produces: ['report'], consumes: ['items', 'report'] }),
+	]);
+	const rootNode = {
+		plan:        rootPlan,
+		children:    new Map([['t02', mkNode(childPlan)]]),
+		childErrors: new Map(),
+	};
+
+	const events: TaskExecutionEvent[] = [];
+	try {
+		await runExecutor({
+			tree: rootNode,
+			intent: SAMPLE_INTENT,
+			runId,
+			onTaskEvent: (e) => events.push(e),
+		});
+
+		// Sequence: t01 started/completed, t02 started, c01 started/completed,
+		// c02 started/completed, t02 completed, t03 started/completed.
+		// 10 events total.
+		assert.equal(events.length, 10, `expected 10 events; got ${events.length}: ` +
+			events.map(e => `${e.type}:${e.taskId}`).join(','));
+
+		const typesAndIds = events.map(e => `${e.type}:${e.taskId}`);
+		assert.deepEqual(typesAndIds, [
+			'task-started:t01',  'task-completed:t01',
+			'task-started:t02',
+				'task-started:c01',  'task-completed:c01',
+				'task-started:c02',  'task-completed:c02',
+			'task-completed:t02',
+			'task-started:t03',  'task-completed:t03',
+		]);
+
+		// Child events MUST carry parentTaskPath='t02'.
+		const c01Started = events[3]! as Extract<TaskExecutionEvent, { type: 'task-started' }>;
+		assert.equal(c01Started.parentTaskPath, 't02');
+		assert.equal(c01Started.index, 1);
+		assert.equal(c01Started.total, 2);
+
+		const c02Completed = events[6]! as Extract<TaskExecutionEvent, { type: 'task-completed' }>;
+		assert.equal(c02Completed.parentTaskPath, 't02');
+
+		// Root events MUST NOT carry parentTaskPath.
+		const t02Started = events[2]! as Extract<TaskExecutionEvent, { type: 'task-started' }>;
+		assert.equal(t02Started.parentTaskPath, undefined);
+	} finally {
+		purgeAllTaskOutputs(runId);
+	}
+});
+
+test('onTaskEvent: throwing subscriber does not crash the executor', async () => {
+	_resetRuntimeRegistryForTests();
+	registerTemplateRuntime(stubRuntime('demo.discovery',  { items: ['a'] }));
+	registerTemplateRuntime(stubRuntime('demo.aggregator', { report: 'r' }));
+
+	const runId = uniqueRunId('evt-throw');
+	const plan = mkPlan([
+		mkTask({ taskId: 't01', template: 'demo.discovery',  produces: ['items'] }),
+		mkTask({ taskId: 't02', template: 'demo.aggregator', produces: ['report'], consumes: ['items'] }),
+	]);
+
+	try {
+		const result = await runExecutor({
+			tree: mkNode(plan),
+			intent: SAMPLE_INTENT,
+			runId,
+			onTaskEvent: () => { throw new Error('subscriber broke'); },
+		});
+		// Run must still complete successfully.
+		assert.equal(result.root.tasksCompleted, 2);
+	} finally {
+		purgeAllTaskOutputs(runId);
+	}
+});
+
+test('SINGLE-PASS: child plan tasks execute exactly once (regression for the executePlanNode double-walk)', async () => {
+	let discoveryCallCount = 0;
+	let aggregatorCallCount = 0;
+	_resetRuntimeRegistryForTests();
+	registerTemplateRuntime({
+		templateId: 'child.discovery',
+		execute: async () => {
+			discoveryCallCount++;
+			return { outputs: new Map([['items', ['x']]]) };
+		},
+	});
+	registerTemplateRuntime({
+		templateId: 'child.aggregator',
+		execute: async () => {
+			aggregatorCallCount++;
+			return { outputs: new Map([['report', { r: 'child' }]]) };
+		},
+	});
+	registerTemplateRuntime(stubRuntime('root.aggregator', { report: 'root' }));
+
+	const runId = uniqueRunId('single-pass');
+	const childPlan = mkPlan([
+		mkTask({ taskId: 'c01', template: 'child.discovery',  produces: ['items'] }),
+		mkTask({ taskId: 'c02', template: 'child.aggregator', produces: ['report'], consumes: ['items'] }),
+	]);
+	const rootPlan = mkPlan([
+		mkTask({
+			taskId:    't02',
+			template:  'code.subrun.deep-dive',
+			kind:      'planner',
+			params:    {},
+			produces:  ['report'],
+			rationale: 'planner-template test',
+		}),
+		mkTask({ taskId: 't03', template: 'root.aggregator', produces: ['report'], consumes: ['report'] }),
+	]);
+	const rootNode = {
+		plan:        rootPlan,
+		children:    new Map([['t02', mkNode(childPlan)]]),
+		childErrors: new Map(),
+	};
+
+	try {
+		const result = await runExecutor({
+			tree: rootNode,
+			intent: SAMPLE_INTENT,
+			runId,
+		});
+		// Before S2's refactor, executePlanNode would walk node.children
+		// AFTER executePlannerTask had already walked them once, leading
+		// to TWO calls into each child task's runtime. Pin the fix:
+		assert.equal(discoveryCallCount, 1,
+			`child.discovery runtime called ${discoveryCallCount} times; expected 1`);
+		assert.equal(aggregatorCallCount, 1,
+			`child.aggregator runtime called ${aggregatorCallCount} times; expected 1`);
+
+		// Child result still surfaces in result.children for callers that
+		// want it.
+		const childResult = result.children.get('t02');
+		assert.ok(childResult);
+		assert.equal(childResult!.root.tasksCompleted, 2);
+	} finally {
+		purgeAllTaskOutputs(runId);
+	}
+});

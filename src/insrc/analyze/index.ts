@@ -93,6 +93,7 @@ export type {
 	ExecutorResult,
 	PlanExecutionResult,
 	RunExecutorArgs,
+	TaskExecutionEvent,
 	TaskExecutionRecord,
 	TemplateExecuteArgs,
 	TemplateExecuteResult,

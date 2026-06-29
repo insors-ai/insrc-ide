@@ -123,16 +123,20 @@ export type AnalyzeRunEvent =
 		readonly planId:    string;
 	}
 	| {
-		readonly type:     'task-started';
-		readonly taskId:   string;
-		readonly template: string;
-		readonly index:    number;
-		readonly total:    number;
+		readonly type:            'task-started';
+		readonly taskId:          string;
+		readonly template:        string;
+		readonly index:           number;
+		readonly total:           number;
+		/** Dotted path of ancestor planner-template tasks (e.g. "t02"
+		 *  or "t02.t05"); undefined for tasks in the root plan. */
+		readonly parentTaskPath?: string;
 	}
 	| {
-		readonly type:   'task-completed';
-		readonly taskId: string;
-		readonly status: 'ok' | 'failed' | 'skipped-dependency-unavailable';
+		readonly type:            'task-completed';
+		readonly taskId:          string;
+		readonly status:          'ok' | 'failed' | 'skipped-dependency-unavailable';
+		readonly parentTaskPath?: string;
 	}
 	| {
 		readonly type:   'done';
