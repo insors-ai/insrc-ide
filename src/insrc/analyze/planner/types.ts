@@ -14,7 +14,6 @@ import type {
 	AnalyzeTaskTemplate,
 	ClassifiedIntent,
 	PlanTask,
-	PlannedTask,
 } from '../../shared/analyze-types.js';
 import type { AnalyzeContextBundle } from '../context/types.js';
 
