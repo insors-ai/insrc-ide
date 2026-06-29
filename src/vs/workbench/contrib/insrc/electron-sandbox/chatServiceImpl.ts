@@ -49,8 +49,22 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInsrcDaemonService, type DaemonStreamMessage, type IInsrcStreamHandle } from '../common/daemonService.js';
-import type { IInsrcChatService } from '../common/chatService.js';
+import type { IChatMessage, IInsrcChatService } from '../common/chatService.js';
+
+/** Storage key used to persist per-workspace chat history. */
+const CHAT_HISTORY_STORAGE_KEY = 'insrc.chat.history';
+/** Cap the on-disk history at this many entries per workspace to keep
+ *  reads bounded. Older entries roll off; the user's "current
+ *  conversation" feels lossy if we cap too low, so a few hundred is
+ *  the right ballpark. */
+const CHAT_HISTORY_MAX_ENTRIES = 500;
+
+interface PersistedChatHistory {
+	readonly version: 1;
+	readonly messages: readonly IChatMessage[];
+}
 
 export class InsrcChatServiceImpl extends Disposable implements IInsrcChatService {
 	readonly _serviceBrand: undefined;
@@ -61,15 +75,104 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	private readonly _onDidReceiveEvent = this._register(new Emitter<{ type: string;[key: string]: unknown }>());
 	readonly onDidReceiveEvent: Event<{ type: string;[key: string]: unknown }> = this._onDidReceiveEvent.event;
 
+	private readonly _onDidChangeMessages = this._register(new Emitter<void>());
+	readonly onDidChangeMessages: Event<void> = this._onDidChangeMessages.event;
+
 	private _activeSessionId: string | undefined = undefined;
 	private _activeHandle: IInsrcStreamHandle | undefined = undefined;
+
+	/** In-memory mirror of the persisted history for the active
+	 *  workspace folder. Reloaded on construction + when the workspace
+	 *  changes. */
+	private _messages: IChatMessage[] = [];
+	/** Workspace path the in-memory _messages were loaded for; used
+	 *  to invalidate when the workspace changes. */
+	private _messagesScopePath: string | undefined = undefined;
 
 	constructor(
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@ILogService private readonly logService: ILogService,
+		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
+		this._loadMessagesForActiveWorkspace();
+		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => {
+			this._loadMessagesForActiveWorkspace();
+			this._onDidChangeMessages.fire();
+		}));
+	}
+
+	// -------------------------------------------------------------------------
+	// Persisted message history
+	// -------------------------------------------------------------------------
+
+	getMessages(): readonly IChatMessage[] {
+		return this._messages;
+	}
+
+	clearMessages(): void {
+		this._messages = [];
+		this._saveMessages();
+		this._onDidChangeMessages.fire();
+	}
+
+	private _appendMessage(msg: IChatMessage): void {
+		this._messages = [...this._messages, msg];
+		// Cap the in-memory + persisted history.
+		if (this._messages.length > CHAT_HISTORY_MAX_ENTRIES) {
+			this._messages = this._messages.slice(this._messages.length - CHAT_HISTORY_MAX_ENTRIES);
+		}
+		this._saveMessages();
+		this._onDidChangeMessages.fire();
+	}
+
+	private _saveMessages(): void {
+		const scope = this._messagesScopePath;
+		if (scope === undefined) {
+			// No workspace folder open -- can't scope persistence. Drop
+			// the save silently; the in-memory list still serves the
+			// current session.
+			return;
+		}
+		const payload: PersistedChatHistory = { version: 1, messages: this._messages };
+		try {
+			this.storageService.store(
+				`${CHAT_HISTORY_STORAGE_KEY}.${scope}`,
+				JSON.stringify(payload),
+				StorageScope.PROFILE,
+				StorageTarget.USER,
+			);
+		} catch (err) {
+			this.logService.warn('[insrc-chat] failed to persist chat history', (err as Error).message);
+		}
+	}
+
+	private _loadMessagesForActiveWorkspace(): void {
+		const scope = this._activeScopePath();
+		this._messagesScopePath = scope;
+		if (scope === undefined) {
+			this._messages = [];
+			return;
+		}
+		const raw = this.storageService.get(`${CHAT_HISTORY_STORAGE_KEY}.${scope}`, StorageScope.PROFILE);
+		if (raw === undefined || raw === '') {
+			this._messages = [];
+			return;
+		}
+		try {
+			const parsed = JSON.parse(raw) as PersistedChatHistory;
+			if (parsed.version !== 1 || !Array.isArray(parsed.messages)) {
+				this.logService.warn(`[insrc-chat] discarding chat history at ${scope}: unrecognised payload`);
+				this._messages = [];
+				return;
+			}
+			this._messages = parsed.messages.slice();
+		} catch (err) {
+			this.logService.warn(`[insrc-chat] failed to parse chat history at ${scope}; resetting`,
+				(err as Error).message);
+			this._messages = [];
+		}
 	}
 
 	get activeSessionId(): string | undefined { return this._activeSessionId; }
@@ -120,6 +223,16 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 		const runId = this._mintRunId();
 
+		// Persist the user prompt so it restores across IDE restarts
+		// alongside whatever assistant message follows.
+		this._appendMessage({
+			id: this._mintMessageId(),
+			runId,
+			role: 'user',
+			content: trimmed,
+			timestamp: new Date().toISOString(),
+		});
+
 		// Echo the user's prompt back as a message event so the chat
 		// pane can render it immediately. The `repo` field gives
 		// agentRunService something to scope by when registering the
@@ -153,6 +266,14 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		}));
 		this._register(handle.onDidError(err => {
 			this.logService.error('[insrc-chat] stream error', err.message);
+			this._appendMessage({
+				id: this._mintMessageId(),
+				runId,
+				role: 'error',
+				content: err.message,
+				status: 'failed',
+				timestamp: new Date().toISOString(),
+			});
 			this._onDidReceiveEvent.fire({
 				type: 'streamError',
 				runId,
@@ -183,6 +304,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				});
 				return;
 			case 'analyze-result':
+				this._persistAnalyzeResult(runId, msg.result);
 				this._onDidReceiveEvent.fire({
 					type: 'analyze-result',
 					runId,
@@ -206,6 +328,46 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		const workspace = this.workspaceService.getWorkspace();
 		const folder = workspace.folders[0];
 		return folder?.uri.fsPath;
+	}
+
+	/**
+	 * Persist the terminal analyze-result frame as an assistant or
+	 * error message in the chat history. Called by the frame handler
+	 * BEFORE re-firing the event so the chat pane sees a consistent
+	 * state when it re-renders.
+	 */
+	private _persistAnalyzeResult(runId: string, resultRaw: unknown): void {
+		const result = resultRaw as {
+			ok?: boolean;
+			error?: { code?: string; message?: string };
+			stage?: string;
+		};
+		if (result.ok === true) {
+			this._appendMessage({
+				id: this._mintMessageId(),
+				runId,
+				role: 'assistant',
+				content: 'Analysis complete. See the report editor tab.',
+				status: 'completed',
+				reportRunId: runId,
+				timestamp: new Date().toISOString(),
+			});
+		} else {
+			const code = result.error?.code ?? 'unknown';
+			const message = result.error?.message ?? 'Run failed without a structured error.';
+			this._appendMessage({
+				id: this._mintMessageId(),
+				runId,
+				role: 'error',
+				content: `Failed at stage='${result.stage ?? '?'}' (${code}): ${message}`,
+				status: 'failed',
+				timestamp: new Date().toISOString(),
+			});
+		}
+	}
+
+	private _mintMessageId(): string {
+		return `msg-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0')}`;
 	}
 
 	private _mintRunId(): string {

@@ -46,7 +46,7 @@ import { IWorkspaceContextService } from '../../../../../platform/workspace/comm
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { IInsrcChatService } from '../../common/chatService.js';
+import { IInsrcChatService, type IChatMessage } from '../../common/chatService.js';
 
 import { AnalyzeReportInput } from './analyzeReportInput.js';
 import { formatAggregateReport, type AggregateReportLike } from './aggregateReportMarkdown.js';
@@ -95,9 +95,26 @@ export class InsrcChatViewPane extends ViewPane {
 			viewDescriptorService, instantiationService, openerService, themeService, telemetryService,
 			hoverService);
 
-		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => this._renderScopeBadge()));
+		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => {
+			this._renderScopeBadge();
+			this._rehydrateFromHistory();
+		}));
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleServiceEvent(e)));
+
+		// Rerender history when chat service signals it (e.g. clear, or
+		// workspace switch). The pane stays in sync without explicit
+		// callers re-reading the storage.
+		this._register(this.chatService.onDidChangeMessages(() => {
+			// Don't rehydrate when the pane's already showing a live
+			// stream -- in that case onDidChangeMessages fires because
+			// we just appended an event, and the live frame handler is
+			// already updating the DOM. Only re-render from history
+			// when no run is in progress.
+			if (!this.chatService.isStreaming) {
+				this._rehydrateFromHistory();
+			}
+		}));
 	}
 
 	// -------------------------------------------------------------------------
@@ -183,6 +200,10 @@ export class InsrcChatViewPane extends ViewPane {
 				this._onSendClicked();
 			}
 		}));
+
+		// U4: restore persisted history on first render (and on every
+		// workspace switch via onDidChangeMessages).
+		this._rehydrateFromHistory();
 	}
 
 	protected override layoutBody(height: number, width: number): void {
@@ -387,5 +408,93 @@ export class InsrcChatViewPane extends ViewPane {
 		if (this._emptyHint?.style.display !== 'none') {
 			this._emptyHint.style.display = 'none';
 		}
+	}
+
+	// -------------------------------------------------------------------------
+	// U4: history rehydration
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Wipe the messages list + repopulate from chatService.getMessages().
+	 * Called on first render, on workspace switch, and whenever the
+	 * service signals onDidChangeMessages while no run is in flight.
+	 *
+	 * Live progress (LiveStepsWidget) is intentionally NOT restored --
+	 * those events are ephemeral per run; the persisted history only
+	 * carries the user prompt + the terminal assistant / error
+	 * message. Past runs that completed show a clickable "Open report"
+	 * affordance so the user can re-open the markdown editor tab
+	 * without re-running.
+	 */
+	private _rehydrateFromHistory(): void {
+		if (!this._messagesEl) {
+			// Not rendered yet; renderBody calls us again on mount.
+			return;
+		}
+		// Tear down existing bubbles + reset the empty hint visibility.
+		while (this._messagesEl.firstChild !== null && this._messagesEl.firstChild !== this._emptyHint) {
+			this._messagesEl.removeChild(this._messagesEl.firstChild);
+		}
+		// Same for elements after the hint (the hint sits at the top).
+		while (this._messagesEl.lastChild !== null && this._messagesEl.lastChild !== this._emptyHint) {
+			this._messagesEl.removeChild(this._messagesEl.lastChild);
+		}
+		this._liveStepsByRun.clear();
+
+		const messages = this.chatService.getMessages();
+		if (messages.length === 0) {
+			this._emptyHint.style.display = '';
+			return;
+		}
+		this._hideEmptyHint();
+		for (const m of messages) {
+			this._appendMessage({
+				runId: m.runId ?? 'history',
+				role: m.role,
+				element: this._buildHistoryBubble(m),
+			});
+		}
+	}
+
+	/**
+	 * Build a persisted-message bubble. Differs from _buildBubble in
+	 * that completed assistant messages get a clickable "Open report"
+	 * link (re-opens the AnalyzeReportInput editor tab for that run).
+	 */
+	private _buildHistoryBubble(m: IChatMessage): HTMLElement {
+		const role = m.role === 'error' ? 'error' : (m.role === 'user' ? 'user' : 'assistant');
+		const bubble = this._buildBubble(role, m.content);
+
+		if (m.status === 'completed' && m.reportRunId !== undefined) {
+			const openLink = dom.append(bubble, dom.$('a.insrc-chat-report-link'));
+			openLink.textContent = localize('chatOpenReport', 'Open report');
+			openLink.style.display = 'block';
+			openLink.style.marginTop = '6px';
+			openLink.style.fontSize = '12px';
+			openLink.style.color = 'var(--vscode-textLink-foreground)';
+			openLink.style.cursor = 'pointer';
+			openLink.style.textDecoration = 'underline';
+			const runId = m.reportRunId;
+			this._register(dom.addDisposableListener(openLink, 'click', e => {
+				e.preventDefault();
+				this._reopenReportEditor(runId).catch(err => {
+					this.logService.error('[insrc-chat] failed to re-open report editor', err);
+					this.notificationService.warn(localize('chatReportReopenFailed',
+						'Could not re-open the report editor: {0}', (err as Error).message));
+				});
+			}));
+		}
+		return bubble;
+	}
+
+	private async _reopenReportEditor(runId: string): Promise<void> {
+		const input = new AnalyzeReportInput(runId);
+		// If the user purged the run from disk after closing the
+		// editor, ensureBackingFile recreates the placeholder template
+		// (not the original report). We don't have a way to detect
+		// that case here -- the report's content is lost. Best-effort
+		// open + surface a notice if the file is the placeholder.
+		await input.ensureBackingFile(this.fileService);
+		await this.editorService.openEditor(input);
 	}
 }

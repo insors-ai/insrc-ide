@@ -21,6 +21,31 @@ import type { Event } from '../../../../base/common/event.js';
 
 export const IInsrcChatService = createDecorator<IInsrcChatService>('insrcChatService');
 
+/**
+ * Persisted chat message. The chat pane renders these as bubbles on
+ * restart; the chatService loads + saves them via IStorageService
+ * keyed by workspace folder path so each repo has its own history.
+ */
+export interface IChatMessage {
+	readonly id: string;
+	/** Run this message belongs to (analyze run id, or undefined for
+	 *  free-floating system / error messages). */
+	readonly runId?: string;
+	readonly role: 'user' | 'assistant' | 'error';
+	readonly content: string;
+	/** Set on terminal assistant messages: 'completed' for a successful
+	 *  analyze run, 'failed' for an error code. Drives the chat pane's
+	 *  visual treatment of the bubble. */
+	readonly status?: 'completed' | 'failed';
+	/** For completed analyze runs: the resource URI of the markdown
+	 *  report editor input. Lets the chat pane render a clickable
+	 *  "Open report" affordance that re-opens the editor tab on
+	 *  history restore. */
+	readonly reportRunId?: string;
+	/** ISO timestamp. */
+	readonly timestamp: string;
+}
+
 export interface IInsrcChatService {
 	readonly _serviceBrand: undefined;
 
@@ -35,6 +60,15 @@ export interface IInsrcChatService {
 
 	/** Fires for generic IPC stream events (delta / progress / done). Stub emits nothing. */
 	readonly onDidReceiveEvent: Event<{ type: string;[key: string]: unknown }>;
+
+	/** Fires when the persisted message history changes (append / clear). */
+	readonly onDidChangeMessages: Event<void>;
+
+	/** Persisted message history for the active workspace folder. */
+	getMessages(): readonly IChatMessage[];
+
+	/** Clear the persisted message history for the active workspace folder. */
+	clearMessages(): void;
 
 	/** Session lifecycle (no-op stubs until the new backend lands). */
 	startSession(repo: string): Promise<string | undefined>;
