@@ -169,9 +169,30 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 					...(structured ? { structured } : {}),
 				};
 			}
-			case 'progress':
-				// Daemon sends { message }, not { step, status }
-				return { type: 'progress', step: String(data?.['step'] ?? data?.['message'] ?? ''), status: String(data?.['status'] ?? '') };
+			case 'progress': {
+				// Daemon sends either { message } (legacy) or
+				// { step, status, ...taskFields } (analyze.run.start).
+				const out: {
+					type: 'progress';
+					step: string;
+					status: string;
+					taskId?: string;
+					template?: string;
+					index?: number;
+					total?: number;
+					parentTaskPath?: string;
+				} = {
+					type: 'progress',
+					step: String(data?.['step'] ?? data?.['message'] ?? ''),
+					status: String(data?.['status'] ?? ''),
+				};
+				if (typeof data?.['taskId'] === 'string') { out.taskId = data['taskId'] as string; }
+				if (typeof data?.['template'] === 'string') { out.template = data['template'] as string; }
+				if (typeof data?.['index'] === 'number') { out.index = data['index'] as number; }
+				if (typeof data?.['total'] === 'number') { out.total = data['total'] as number; }
+				if (typeof data?.['parentTaskPath'] === 'string') { out.parentTaskPath = data['parentTaskPath'] as string; }
+				return out;
+			}
 			case 'liveStep':
 				// Item 32b: forward agent/step metadata so the chat panel can
 				// key transient bubbles by (agent, step) and collapse them

@@ -172,6 +172,11 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 					runId,
 					step: msg.step,
 					status: msg.status,
+					...(msg.taskId !== undefined ? { taskId: msg.taskId } : {}),
+					...(msg.template !== undefined ? { template: msg.template } : {}),
+					...(msg.index !== undefined ? { index: msg.index } : {}),
+					...(msg.total !== undefined ? { total: msg.total } : {}),
+					...(msg.parentTaskPath !== undefined ? { parentTaskPath: msg.parentTaskPath } : {}),
 				});
 				return;
 			case 'analyze-result':

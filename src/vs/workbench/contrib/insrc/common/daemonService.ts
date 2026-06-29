@@ -41,7 +41,24 @@ export type DaemonStreamMessage =
 		readonly content: string;
 		readonly structured?: Record<string, unknown>;
 	}
-	| { readonly type: 'progress'; readonly step: string; readonly status: string }
+	| {
+		/**
+		 * Generic stage/step transition. The analyze.run.start streaming
+		 * RPC enriches these with per-task fields (taskId/template/index/
+		 * total/parentTaskPath) for events from the executor walker --
+		 * downstream widgets render them as nested step rows. Other
+		 * daemon streams that only emit { step, status } leave the
+		 * task fields undefined.
+		 */
+		readonly type: 'progress';
+		readonly step: string;
+		readonly status: string;
+		readonly taskId?: string;
+		readonly template?: string;
+		readonly index?: number;
+		readonly total?: number;
+		readonly parentTaskPath?: string;
+	}
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }
 	| { readonly type: 'context.clear'; readonly key: string }

@@ -50,12 +50,13 @@ import { IInsrcChatService } from '../../common/chatService.js';
 
 import { AnalyzeReportInput } from './analyzeReportInput.js';
 import { formatAggregateReport, type AggregateReportLike } from './aggregateReportMarkdown.js';
+import { LiveStepsWidget, type LiveStepsEvent } from './liveStepsWidget.js';
 
 export const INSRC_CHAT_VIEW_ID = 'insrc.chatView';
 
 interface MessageNode {
 	readonly runId: string;
-	readonly role: 'user' | 'assistant' | 'system' | 'progress' | 'error';
+	readonly role: 'user' | 'assistant' | 'system' | 'error';
 	readonly element: HTMLElement;
 }
 
@@ -67,9 +68,9 @@ export class InsrcChatViewPane extends ViewPane {
 	private _sendBtn!: HTMLButtonElement;
 	private _emptyHint!: HTMLElement;
 
-	/** Active progress bubble per runId so we update the same DOM
-	 *  element on every progress frame rather than appending. */
-	private readonly _progressBubbles = new Map<string, MessageNode>();
+	/** Per-runId live-steps widget (U2). Each run gets its own
+	 *  structured progress display embedded in the message list. */
+	private readonly _liveStepsByRun = new Map<string, LiveStepsWidget>();
 
 	constructor(
 		options: IViewPaneOptions,
@@ -231,15 +232,16 @@ export class InsrcChatViewPane extends ViewPane {
 				});
 				return;
 			case 'progress':
-				this._appendProgress(runId, String(e['step'] ?? ''), String(e['status'] ?? ''));
+				this._updateLiveSteps(runId, this._eventToStepsEvent(e));
 				return;
 			case 'analyze-result':
 				this._handleAnalyzeResult(runId, e['result']);
 				return;
 			case 'streamEnd':
-				// Mark the active progress bubble as final state if it
-				// hasn't been replaced by the analyze-result handler yet.
-				this._finalizeProgressBubble(runId);
+				// Flip any leftover in-progress rows to a terminal state
+				// so the user doesn't see an indefinite spinner if the
+				// stream dropped mid-run.
+				this._liveStepsByRun.get(runId)?.finalize();
 				return;
 			case 'streamError':
 				this._appendMessage({
@@ -253,25 +255,29 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 	}
 
-	private _appendProgress(runId: string, step: string, status: string): void {
-		const text = `${step}: ${status}`;
-		const existing = this._progressBubbles.get(runId);
-		if (existing !== undefined) {
-			existing.element.textContent = text;
-			return;
+	private _updateLiveSteps(runId: string, event: LiveStepsEvent): void {
+		let widget = this._liveStepsByRun.get(runId);
+		if (widget === undefined) {
+			this._hideEmptyHint();
+			widget = new LiveStepsWidget(this._messagesEl);
+			this._liveStepsByRun.set(runId, widget);
+			// Scroll into view when the widget first appears.
+			this._messagesEl.scrollTop = this._messagesEl.scrollHeight;
 		}
-		const element = this._buildBubble('progress', text);
-		const node: MessageNode = { runId, role: 'progress', element };
-		this._appendMessage(node);
-		this._progressBubbles.set(runId, node);
+		widget.update(event);
 	}
 
-	private _finalizeProgressBubble(runId: string): void {
-		const existing = this._progressBubbles.get(runId);
-		if (existing === undefined) { return; }
-		// Leave the bubble in place but drop the rolling-status semantics
-		// so the next run gets a fresh one.
-		this._progressBubbles.delete(runId);
+	private _eventToStepsEvent(e: { type: string;[key: string]: unknown }): LiveStepsEvent {
+		const out: LiveStepsEvent = {
+			step: String(e['step'] ?? ''),
+			status: String(e['status'] ?? ''),
+		};
+		if (typeof e['taskId'] === 'string') { (out as { taskId?: string }).taskId = e['taskId'] as string; }
+		if (typeof e['template'] === 'string') { (out as { template?: string }).template = e['template'] as string; }
+		if (typeof e['index'] === 'number') { (out as { index?: number }).index = e['index'] as number; }
+		if (typeof e['total'] === 'number') { (out as { total?: number }).total = e['total'] as number; }
+		if (typeof e['parentTaskPath'] === 'string') { (out as { parentTaskPath?: string }).parentTaskPath = e['parentTaskPath'] as string; }
+		return out;
 	}
 
 	private async _handleAnalyzeResult(runId: string, resultRaw: unknown): Promise<void> {
@@ -334,7 +340,7 @@ export class InsrcChatViewPane extends ViewPane {
 		this._messagesEl.scrollTop = this._messagesEl.scrollHeight;
 	}
 
-	private _buildBubble(role: 'user' | 'assistant' | 'progress' | 'error', text: string): HTMLElement {
+	private _buildBubble(role: 'user' | 'assistant' | 'error', text: string): HTMLElement {
 		const bubble = dom.$(`div.insrc-chat-bubble.insrc-chat-bubble-${role}`);
 		bubble.style.padding = '6px 10px';
 		bubble.style.borderRadius = '4px';
@@ -353,14 +359,6 @@ export class InsrcChatViewPane extends ViewPane {
 				bubble.style.border = '1px solid var(--vscode-panel-border)';
 				bubble.style.alignSelf = 'flex-start';
 				bubble.style.maxWidth = '80%';
-				break;
-			case 'progress':
-				bubble.style.background = 'var(--vscode-editorWidget-background)';
-				bubble.style.fontStyle = 'italic';
-				bubble.style.opacity = '0.85';
-				bubble.style.alignSelf = 'flex-start';
-				bubble.style.maxWidth = '90%';
-				bubble.style.fontFamily = 'var(--vscode-editor-font-family)';
 				break;
 			case 'error':
 				bubble.style.background = 'var(--vscode-inputValidation-errorBackground)';
