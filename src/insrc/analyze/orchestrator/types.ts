@@ -45,6 +45,100 @@ export interface RunAnalyzeArgs {
 	readonly scopeRef:   AnalyzeScopeRef;
 }
 
+/**
+ * Optional per-invocation options. None of these change the
+ * happy-path semantics; both fields are observer / control hooks
+ * the daemon's streaming RPC + the orchestrator's cancellation
+ * surface plug into.
+ */
+export interface RunAnalyzeOpts {
+	/**
+	 * Streaming progress callback. Fires synchronously at every
+	 * pipeline transition (stage boundaries, planner attempts,
+	 * per-task start + complete, terminal done). Callers that don't
+	 * care about progress omit this and get the same request/response
+	 * behaviour the orchestrator had before S1.
+	 *
+	 * Always fires `{ type: 'done', result }` exactly once at the
+	 * end -- on success, on failure, AND on resume cache hit. Callers
+	 * can build off the `done` event alone as a single-shot terminal
+	 * signal.
+	 */
+	readonly onEvent?: (event: AnalyzeRunEvent) => void;
+	/**
+	 * Cancellation signal. The orchestrator checks `signal.aborted`
+	 * at every stage boundary + between executor tasks. On abort,
+	 * runAnalyze writes a final run.json with status='failed' +
+	 * error.code='aborted' and returns a RunAnalyzeFail with the
+	 * same code. In-flight LLM calls cannot currently be
+	 * interrupted mid-token; the abort takes effect at the next
+	 * inter-stage / inter-task boundary.
+	 */
+	readonly signal?: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming event union
+// ---------------------------------------------------------------------------
+
+/**
+ * Discriminated union the orchestrator emits via RunAnalyzeOpts.onEvent.
+ *
+ * The daemon's streaming RPC layer (S3) maps each variant to an
+ * IpcStreamMessage frame the IDE consumes via daemonService.stream().
+ * Callers in-process (tests, CLI) can subscribe directly without going
+ * through the wire.
+ *
+ * Event ordering invariants:
+ *   - `stage-started` fires before any work in that stage
+ *   - `classified` fires after the classify stage's stage-started,
+ *     before stage-started for 'plan'
+ *   - `plan-attempt` fires once per planner LLM round-trip (only on
+ *     validation failure or eventual accept); `plan-accepted` fires
+ *     once at the end of a successful plan stage
+ *   - `task-started` + `task-completed` come in pairs, in plan order;
+ *     `index` is 1-based, `total` is the plan's task count
+ *   - `done` fires EXACTLY ONCE per runAnalyze invocation -- on ok,
+ *     on failure, on resume cache hit. It's the only event that
+ *     carries the terminal RunAnalyzeResult.
+ */
+export type AnalyzeRunEvent =
+	| {
+		readonly type:  'stage-started';
+		readonly stage: 'classify' | 'plan' | 'execute';
+	}
+	| {
+		readonly type:   'classified';
+		readonly intent: ClassifiedIntent;
+	}
+	| {
+		readonly type:        'plan-attempt';
+		readonly attempt:     number;
+		readonly accepted:    boolean;
+		readonly invariantId?: string;
+	}
+	| {
+		readonly type:      'plan-accepted';
+		readonly taskCount: number;
+		readonly planId:    string;
+	}
+	| {
+		readonly type:     'task-started';
+		readonly taskId:   string;
+		readonly template: string;
+		readonly index:    number;
+		readonly total:    number;
+	}
+	| {
+		readonly type:   'task-completed';
+		readonly taskId: string;
+		readonly status: 'ok' | 'failed' | 'skipped-dependency-unavailable';
+	}
+	| {
+		readonly type:   'done';
+		readonly result: RunAnalyzeResult;
+	};
+
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
@@ -114,6 +208,8 @@ export type RunErrorCode =
 	| 'max-plan-depth-exceeded'
 	// executor
 	| 'executor-aggregator-failed'
+	// cancellation
+	| 'aborted'
 	// catch-all
 	| 'internal-error';
 

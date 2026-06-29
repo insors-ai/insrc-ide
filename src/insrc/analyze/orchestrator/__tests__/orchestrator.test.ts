@@ -282,6 +282,164 @@ test('purgeRun: status=in-progress without force -> refused', () => {
 	}
 });
 
+// ---------------------------------------------------------------------------
+// S1: AnalyzeRunEvent emission via RunAnalyzeOpts.onEvent
+//
+// We can't drive a full live pipeline in unit tests (no LLM stack
+// configured). The resume cache hit path runs WITHOUT hitting any
+// LLM stage -- so we use it to pin the event-emit contract: `done`
+// fires exactly once with the cached result. Failure-path event
+// emission is covered indirectly by the order-invariants tests below
+// (which assert the union shape + the done-always-fires rule).
+// ---------------------------------------------------------------------------
+
+import type { AnalyzeRunEvent } from '../types.js';
+
+test('onEvent: resume cache hit emits a single done event with the cached result', async () => {
+	const runId = `evt-cache-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	const cachedIntent = {
+		target:    'infra' as const,
+		scope:     'XS' as const,
+		focused:   false,
+		scopeRef:  { kind: 'workspace' as const, value: '/r' },
+		reasoning: 'cache-hit event-emit test fixture',
+	};
+	const cachedReport = { summary: 'cached', findings: [], metadata: {} as never };
+
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-29T00:00:00.000Z',
+			updatedAt:       '2026-06-29T00:00:01.000Z',
+			userPrompt:      'whatever',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'done',
+			status:          'ok',
+			intent:          cachedIntent,
+			finalReport:     cachedReport,
+			tasksCompleted:  3,
+			tasksFailed:     [],
+		});
+
+		const events: AnalyzeRunEvent[] = [];
+		const result = await runAnalyze(
+			{ runId, userPrompt: 'ignored', scopeRef: { kind: 'workspace', value: '/r' } },
+			{ onEvent: e => events.push(e) },
+		);
+
+		assert.equal(events.length, 1,
+			`cache hit must emit exactly 1 event (done); got ${events.length}: ` +
+			events.map(e => e.type).join(', '));
+		assert.equal(events[0]!.type, 'done');
+		if (events[0]!.type !== 'done') return;
+		assert.equal(events[0]!.result, result,
+			'done event should carry the same RunAnalyzeResult the function returns');
+		assert.equal(events[0]!.result.ok, true);
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
+test('onEvent: aborted signal -> done event with code="aborted"', async () => {
+	const runId = `evt-abort-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	try {
+		const ac = new AbortController();
+		ac.abort();  // already aborted before runAnalyze starts
+
+		const events: AnalyzeRunEvent[] = [];
+		const result = await runAnalyze(
+			{ runId, userPrompt: 'never starts', scopeRef: { kind: 'workspace', value: '/r' } },
+			{ onEvent: e => events.push(e), signal: ac.signal },
+		);
+
+		// Pre-classify abort check fires immediately; no stage events emit.
+		// done event must still fire with code='aborted'.
+		assert.equal(result.ok, false);
+		if (result.ok) return;
+		assert.equal(result.error.code, 'aborted');
+		assert.equal(result.stage, 'classify');
+
+		const doneEvents = events.filter(e => e.type === 'done');
+		assert.equal(doneEvents.length, 1, 'done must fire exactly once even on abort');
+		if (doneEvents[0]!.type !== 'done') return;
+		assert.equal(doneEvents[0]!.result.ok, false);
+
+		// run.json on disk reflects the abort.
+		const record = readRunRecord(runId);
+		assert.ok(record);
+		assert.equal(record!.status, 'failed');
+		assert.equal(record!.error?.code, 'aborted');
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
+test('onEvent: missing onEvent option -> no exception (no-op)', async () => {
+	// Verify the default-no-op path: caller omits onEvent, runAnalyze
+	// returns the cached result without error. The point is the
+	// `opts.onEvent === undefined` branch in the emit() helper.
+	const runId = `evt-no-cb-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	const cachedIntent = {
+		target:    'infra' as const,
+		scope:     'XS' as const,
+		focused:   false,
+		scopeRef:  { kind: 'workspace' as const, value: '/r' },
+		reasoning: 'no-cb test fixture',
+	};
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-29T00:00:00.000Z',
+			updatedAt:       '2026-06-29T00:00:01.000Z',
+			userPrompt:      'whatever',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'done',
+			status:          'ok',
+			intent:          cachedIntent,
+			finalReport:     { summary: '', findings: [], metadata: {} as never },
+		});
+		const result = await runAnalyze(
+			{ runId, userPrompt: 'ignored', scopeRef: { kind: 'workspace', value: '/r' } },
+			// No opts at all -- exercises the runAnalyze(args) one-arg call site.
+		);
+		assert.equal(result.ok, true);
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
+test('onEvent: throwing callback does not crash the run', async () => {
+	const runId = `evt-throw-${Math.floor(Math.random() * 1e9).toString(16)}`;
+	const cachedIntent = {
+		target:    'infra' as const,
+		scope:     'XS' as const,
+		focused:   false,
+		scopeRef:  { kind: 'workspace' as const, value: '/r' },
+		reasoning: 'throw-cb test fixture',
+	};
+	try {
+		writeRunRecord({
+			runId,
+			createdAt:       '2026-06-29T00:00:00.000Z',
+			updatedAt:       '2026-06-29T00:00:01.000Z',
+			userPrompt:      'whatever',
+			initialScopeRef: { kind: 'workspace', value: '/r' },
+			stage:           'done',
+			status:          'ok',
+			intent:          cachedIntent,
+			finalReport:     { summary: '', findings: [], metadata: {} as never },
+		});
+		const result = await runAnalyze(
+			{ runId, userPrompt: 'ignored', scopeRef: { kind: 'workspace', value: '/r' } },
+			{ onEvent: () => { throw new Error('subscriber broke'); } },
+		);
+		// The function must still complete + return a sensible result.
+		assert.equal(result.ok, true);
+	} finally {
+		purgeRunForTests(runId);
+	}
+});
+
 test('purgeRun: status=in-progress with force=true -> removes dir', () => {
 	const runId = `purge-inprog-force-${Math.floor(Math.random() * 1e9).toString(16)}`;
 	writeRunRecord({

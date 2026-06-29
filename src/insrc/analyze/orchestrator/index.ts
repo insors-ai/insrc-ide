@@ -29,6 +29,7 @@ export {
 } from './persistence.js';
 export type {
 	RunAnalyzeArgs,
+	RunAnalyzeOpts,
 	RunAnalyzeResult,
 	RunAnalyzeOk,
 	RunAnalyzeFail,
@@ -36,4 +37,5 @@ export type {
 	RunFailure,
 	RunRecord,
 	RunStage,
+	AnalyzeRunEvent,
 } from './types.js';

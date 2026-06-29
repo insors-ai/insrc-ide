@@ -117,6 +117,7 @@ export {
 } from './orchestrator/index.js';
 export type {
 	RunAnalyzeArgs,
+	RunAnalyzeOpts,
 	RunAnalyzeResult,
 	RunAnalyzeOk,
 	RunAnalyzeFail,
@@ -124,6 +125,7 @@ export type {
 	RunFailure,
 	RunRecord,
 	RunStage,
+	AnalyzeRunEvent,
 } from './orchestrator/index.js';
 export type {
 	PlanBuilderInput,

@@ -57,7 +57,9 @@ import { runExecutor } from '../executor/index.js';
 
 import { readRunRecord, writeRunRecord } from './persistence.js';
 import type {
+	AnalyzeRunEvent,
 	RunAnalyzeArgs,
+	RunAnalyzeOpts,
 	RunAnalyzeResult,
 	RunFailure,
 	RunRecord,
@@ -71,23 +73,38 @@ const log = getLogger('analyze:orchestrator:driver');
 // runAnalyze -- public entry point
 // ---------------------------------------------------------------------------
 
-export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult> {
+export async function runAnalyze(
+	args: RunAnalyzeArgs,
+	opts: RunAnalyzeOpts = {},
+): Promise<RunAnalyzeResult> {
 	const start = Date.now();
 	const { runId, userPrompt, scopeRef: initialScopeRef } = args;
 
+	// Local emit() that swallows callback exceptions so a broken
+	// subscriber can't take the run down. The `done` event is the
+	// only one the orchestrator GUARANTEES fires; intermediate events
+	// are best-effort observers.
+	const emit = (event: AnalyzeRunEvent): void => {
+		if (opts.onEvent === undefined) return;
+		try { opts.onEvent(event); }
+		catch (err) {
+			log.warn({ runId, eventType: event.type, err: (err as Error).message },
+				'runAnalyze: onEvent callback threw; ignoring');
+		}
+	};
+
+	// emitDoneAndReturn wraps every terminal exit -- success, failure,
+	// cache hit -- to keep the "done fires EXACTLY ONCE" invariant in
+	// one place.
+	const emitDoneAndReturn = (result: RunAnalyzeResult): RunAnalyzeResult => {
+		emit({ type: 'done', result });
+		return result;
+	};
+
 	// (resume) If <runRoot>/run.json shows a previously-completed run
 	// (status='ok' + stage='done' + intent + finalReport all present),
-	// short-circuit and return the cached result. The within-stage caches
-	// (shaper bundle cache, planner cache, executor per-task cache)
-	// already make individual re-runs cheap, but this whole-pipeline
-	// short-circuit makes idempotent re-invocations near-instant.
-	//
-	// Stale records (status='failed' OR status='in-progress' from a
-	// crashed run) intentionally do NOT short-circuit -- callers
-	// re-invoking with the same runId after a failure want a retry,
-	// and an interrupted run needs to redo whichever stage was running
-	// when the daemon died. The initial-write below overwrites the
-	// stale record.
+	// short-circuit and return the cached result. See O3 commit for
+	// the full rationale on which records DO and DON'T short-circuit.
 	const cached = readRunRecord(runId);
 	if (
 		cached !== null
@@ -97,7 +114,7 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		&& cached.finalReport !== undefined
 	) {
 		log.info({ runId }, 'runAnalyze: resume cache hit; returning persisted RunAnalyzeOk');
-		return {
+		return emitDoneAndReturn({
 			ok:             true,
 			runId:          cached.runId,
 			intent:         cached.intent,
@@ -105,7 +122,7 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 			tasksCompleted: cached.tasksCompleted ?? 0,
 			tasksFailed:    cached.tasksFailed    ?? [],
 			durationMs:     0,
-		};
+		});
 	}
 
 	// (0) Stamp the initial RunRecord so observers (IDE, resume) see
@@ -121,7 +138,32 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 	};
 	writeRunRecord(record);
 
+	// Pre-stage abort check helper. Returns a terminal fail result
+	// when aborted; caller short-circuits with it.
+	const checkAborted = (stage: RunStage, intent?: ClassifiedIntent): RunAnalyzeResult | null => {
+		if (opts.signal?.aborted !== true) return null;
+		const failure: RunFailure = {
+			code:    'aborted',
+			message: `runAnalyze: aborted before stage='${stage}' could start`,
+		};
+		record = patch(record, {
+			stage,
+			status: 'failed',
+			error:  failure,
+			...(intent !== undefined ? { intent } : {}),
+		});
+		writeRunRecord(record);
+		log.info({ runId, stage }, 'runAnalyze: aborted via signal');
+		return failResult(stage, failure, intent, start, runId);
+	};
+
 	// ----- (1) Classify -----
+	{
+		const abortedHere = checkAborted('classify');
+		if (abortedHere !== null) return emitDoneAndReturn(abortedHere);
+	}
+	emit({ type: 'stage-started', stage: 'classify' });
+
 	let intent: ClassifiedIntent;
 	try {
 		intent = await classify({
@@ -133,13 +175,20 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		record = patch(record, { stage: 'classify', status: 'failed', error: failure });
 		writeRunRecord(record);
 		log.warn({ runId, code: failure.code }, 'runAnalyze: classify failed');
-		return failResult('classify', failure, undefined, start, runId);
+		return emitDoneAndReturn(failResult('classify', failure, undefined, start, runId));
 	}
+	emit({ type: 'classified', intent });
 	record = patch(record, { stage: 'plan', intent });
 	writeRunRecord(record);
 	log.info({ runId, target: intent.target, scope: intent.scope }, 'runAnalyze: classified');
 
-	// ----- (2) Build run-level context bundle -----
+	// ----- (2) Build run-level context bundle + (3) plan -----
+	{
+		const abortedHere = checkAborted('plan', intent);
+		if (abortedHere !== null) return emitDoneAndReturn(abortedHere);
+	}
+	emit({ type: 'stage-started', stage: 'plan' });
+
 	let contextBundle;
 	try {
 		const shaper = shaperFor('run', intent.target);
@@ -149,10 +198,9 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		record = patch(record, { stage: 'plan', status: 'failed', error: failure });
 		writeRunRecord(record);
 		log.warn({ runId, code: failure.code }, 'runAnalyze: bundle build failed');
-		return failResult('plan', failure, intent, start, runId);
+		return emitDoneAndReturn(failResult('plan', failure, intent, start, runId));
 	}
 
-	// ----- (3) Plan (recursive) -----
 	let tree;
 	try {
 		tree = await runRecursivePlanner({
@@ -168,18 +216,31 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		record = patch(record, { stage: 'plan', status: 'failed', error: failure });
 		writeRunRecord(record);
 		log.warn({ runId, code: failure.code }, 'runAnalyze: plan build failed');
-		return failResult('plan', failure, intent, start, runId);
+		return emitDoneAndReturn(failResult('plan', failure, intent, start, runId));
 	}
+	emit({
+		type:      'plan-accepted',
+		taskCount: tree.plan.tasks.length,
+		planId:    tree.plan.planId,
+	});
 	record = patch(record, { stage: 'execute' });
 	writeRunRecord(record);
 
 	// ----- (4) Execute -----
+	{
+		const abortedHere = checkAborted('execute', intent);
+		if (abortedHere !== null) return emitDoneAndReturn(abortedHere);
+	}
+	emit({ type: 'stage-started', stage: 'execute' });
+
+	// S2 (next commit) wires per-task events from the executor through
+	// `opts.onEvent`. For S1, the executor is still un-instrumented;
+	// callers see stage-started for 'execute' and then `done` when the
+	// whole plan finishes.
 	const execResult = await runExecutor({ tree, intent, runId });
 	const rootPlan = execResult.root;
 
 	if (rootPlan.finalReport === undefined) {
-		// Aggregator failed -- runExecutor doesn't throw, the failure
-		// lives in tasksFailed. Surface as a typed orchestrator failure.
 		const failure: RunFailure = {
 			code:    'executor-aggregator-failed',
 			message: 'Run executor completed but the aggregator produced no report.',
@@ -197,7 +258,7 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		});
 		writeRunRecord(record);
 		log.warn({ runId, tasksFailed: rootPlan.tasksFailed.length }, 'runAnalyze: aggregator failed');
-		return failResult('execute', failure, intent, start, runId);
+		return emitDoneAndReturn(failResult('execute', failure, intent, start, runId));
 	}
 
 	// ----- (done) -----
@@ -215,7 +276,7 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		'runAnalyze: ok',
 	);
 
-	return {
+	return emitDoneAndReturn({
 		ok:             true,
 		runId,
 		intent,
@@ -223,7 +284,7 @@ export async function runAnalyze(args: RunAnalyzeArgs): Promise<RunAnalyzeResult
 		tasksCompleted: rootPlan.tasksCompleted,
 		tasksFailed:    rootPlan.tasksFailed,
 		durationMs,
-	};
+	});
 }
 
 // ---------------------------------------------------------------------------
