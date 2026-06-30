@@ -70,7 +70,7 @@
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node copy-assets.mjs",
     "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts",
     "test:duckdb": "tsx --test daemon/db/__tests__/duckdb-pool.test.ts",
     "test:lmdb-smoke": "tsx --test db/__tests__/lmdb-smoke.test.ts",
