@@ -50,6 +50,7 @@ import { Emitter, type Event } from '../../../../base/common/event.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInsrcDaemonService, type DaemonStreamMessage, type IInsrcStreamHandle } from '../common/daemonService.js';
 import type { IChatMessage, IInsrcChatService } from '../common/chatService.js';
 
@@ -78,6 +79,9 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	private readonly _onDidChangeMessages = this._register(new Emitter<void>());
 	readonly onDidChangeMessages: Event<void> = this._onDidChangeMessages.event;
 
+	private readonly _onDidChangeActiveScope = this._register(new Emitter<void>());
+	readonly onDidChangeActiveScope: Event<void> = this._onDidChangeActiveScope.event;
+
 	private _activeSessionId: string | undefined = undefined;
 	private _activeHandle: IInsrcStreamHandle | undefined = undefined;
 
@@ -94,13 +98,43 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@ILogService private readonly logService: ILogService,
 		@IStorageService private readonly storageService: IStorageService,
+		@IEditorService private readonly editorService: IEditorService,
 	) {
 		super();
 		this._loadMessagesForActiveWorkspace();
+		// Workspace folders changed (folder added/removed, multi-root edits).
 		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => {
-			this._loadMessagesForActiveWorkspace();
-			this._onDidChangeMessages.fire();
+			this._reloadIfScopeChanged();
 		}));
+		// Active editor changed -- the scope may have moved to a different
+		// workspace folder if the user opened a file in another root.
+		this._register(this.editorService.onDidActiveEditorChange(() => {
+			this._reloadIfScopeChanged();
+		}));
+	}
+
+	get activeScopePath(): string | undefined {
+		return this._activeScopePath();
+	}
+
+	/**
+	 * Re-derive the active scope from the active editor + workspace
+	 * folders. If the result differs from what's currently loaded, swap
+	 * the in-memory message list + fire onDidChangeMessages so the chat
+	 * pane re-renders for the new folder. Also fires onDidChangeActiveScope
+	 * so the scope badge updates regardless of whether messages changed.
+	 */
+	private _reloadIfScopeChanged(): void {
+		const next = this._activeScopePath();
+		if (next === this._messagesScopePath) {
+			// Same folder -- just notify the badge (it may need a refresh
+			// for other reasons, e.g. workspace folder renamed).
+			this._onDidChangeActiveScope.fire();
+			return;
+		}
+		this._loadMessagesForActiveWorkspace();
+		this._onDidChangeActiveScope.fire();
+		this._onDidChangeMessages.fire();
 	}
 
 	// -------------------------------------------------------------------------
@@ -324,7 +358,25 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	// Helpers
 	// -------------------------------------------------------------------------
 
+	/**
+	 * Resolve the workspace folder the chat is scoped to.
+	 *
+	 * Preference order:
+	 *   1. The folder containing the active editor's file (multi-root
+	 *      workspaces -- pick the root matching what the user is currently
+	 *      looking at)
+	 *   2. The first workspace folder (single-root, or no editor open)
+	 *   3. undefined (no folder open at all)
+	 */
 	private _activeScopePath(): string | undefined {
+		const activeEditor = this.editorService.activeEditor;
+		const resource = activeEditor?.resource;
+		if (resource !== undefined) {
+			const folder = this.workspaceService.getWorkspaceFolder(resource);
+			if (folder !== undefined && folder !== null) {
+				return folder.uri.fsPath;
+			}
+		}
 		const workspace = this.workspaceService.getWorkspace();
 		const folder = workspace.folders[0];
 		return folder?.uri.fsPath;

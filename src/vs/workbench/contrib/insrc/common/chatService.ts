@@ -64,6 +64,18 @@ export interface IInsrcChatService {
 	/** Fires when the persisted message history changes (append / clear). */
 	readonly onDidChangeMessages: Event<void>;
 
+	/** Fires when the active workspace folder (active scope) changes -- e.g.
+	 *  the user switched to an editor whose file lives in a different
+	 *  workspace folder. The chat pane refreshes its scope badge + reloads
+	 *  the message history for the new folder when this fires. */
+	readonly onDidChangeActiveScope: Event<void>;
+
+	/** Absolute path of the workspace folder the chat is currently scoped
+	 *  to. Computed from the active editor's containing folder when one is
+	 *  open; falls back to the first workspace folder. Undefined when no
+	 *  folder is open. */
+	readonly activeScopePath: string | undefined;
+
 	/** Persisted message history for the active workspace folder. */
 	getMessages(): readonly IChatMessage[];
 

@@ -100,9 +100,17 @@ export class InsrcChatViewPane extends ViewPane {
 			viewDescriptorService, instantiationService, openerService, themeService, telemetryService,
 			hoverService);
 
+		// Workspace folder set changed (rare): just refresh the badge --
+		// the chatService's own listener handles message reload.
 		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => {
 			this._renderScopeBadge();
-			this._rehydrateFromHistory();
+		}));
+
+		// Active scope changed (workspace folder OR active editor moved
+		// to a different root). Refresh the badge; the chatService fires
+		// onDidChangeMessages separately if the message list changed.
+		this._register(this.chatService.onDidChangeActiveScope(() => {
+			this._renderScopeBadge();
 		}));
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleServiceEvent(e)));
@@ -470,14 +478,24 @@ export class InsrcChatViewPane extends ViewPane {
 	// -------------------------------------------------------------------------
 
 	private _renderScopeBadge(): void {
+		const path = this.chatService.activeScopePath;
+		if (path === undefined) {
+			this._scopeBadge.textContent = localize('chatNoFolder', '(no workspace folder)');
+			this._scopeBadge.title = '';
+			return;
+		}
+		// Look the folder up to get its display name.
 		const workspace = this.workspaceService.getWorkspace();
-		const folder = workspace.folders[0];
+		const folder = workspace.folders.find(f => f.uri.fsPath === path);
 		if (folder !== undefined) {
 			this._scopeBadge.textContent = folder.name;
 			this._scopeBadge.title = folder.uri.fsPath;
 		} else {
-			this._scopeBadge.textContent = localize('chatNoFolder', '(no workspace folder)');
-			this._scopeBadge.title = '';
+			// Folder not in the multi-root set; show the basename of the
+			// path as a best-effort label.
+			const slash = path.lastIndexOf('/');
+			this._scopeBadge.textContent = slash >= 0 ? path.slice(slash + 1) : path;
+			this._scopeBadge.title = path;
 		}
 	}
 
