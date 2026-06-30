@@ -71,10 +71,20 @@ export interface IInsrcChatService {
 	readonly onDidChangeActiveScope: Event<void>;
 
 	/** Absolute path of the workspace folder the chat is currently scoped
-	 *  to. Computed from the active editor's containing folder when one is
-	 *  open; falls back to the first workspace folder. Undefined when no
-	 *  folder is open. */
+	 *  to. Precedence: user-pinned override > active editor's folder >
+	 *  first workspace folder > undefined. */
 	readonly activeScopePath: string | undefined;
+
+	/** User-pinned scope override; undefined when the chat is auto-tracking
+	 *  the active editor / first folder. Pinning persists per-workbench
+	 *  via IStorageService so the chat resumes in the same folder on the
+	 *  next IDE launch. */
+	readonly pinnedScopePath: string | undefined;
+
+	/** Pin the chat to a specific workspace folder. Pass undefined to clear
+	 *  the pin (chat falls back to auto-tracking). Fires onDidChangeActiveScope
+	 *  + onDidChangeMessages if the effective scope changes. */
+	setPinnedScope(path: string | undefined): void;
 
 	/** Persisted message history for the active workspace folder. */
 	getMessages(): readonly IChatMessage[];

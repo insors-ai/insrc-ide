@@ -46,6 +46,7 @@ import { IWorkspaceContextService } from '../../../../../platform/workspace/comm
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IQuickInputService, type IQuickPickItem } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IInsrcChatService, type IChatMessage } from '../../common/chatService.js';
 
 import { AnalyzeReportInput } from './analyzeReportInput.js';
@@ -95,6 +96,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@IEditorService private readonly editorService: IEditorService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@ILogService private readonly logService: ILogService,
+		@IQuickInputService private readonly quickInputService: IQuickInputService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService,
 			viewDescriptorService, instantiationService, openerService, themeService, telemetryService,
@@ -136,10 +138,16 @@ export class InsrcChatViewPane extends ViewPane {
 
 		container.classList.add('insrc-chat-pane');
 
-		// Header: folder icon + scope badge + clear-history affordance.
+		// Header: folder icon + clickable scope badge (pick from multi-root)
+		// + clear-history affordance.
 		const header = dom.append(container, dom.$('.insrc-chat-header'));
-		dom.append(header, dom.$('span.codicon.codicon-folder'));
-		this._scopeBadge = dom.append(header, dom.$('span.insrc-chat-scope'));
+		const scopeBtn = dom.append(header, dom.$('button.insrc-chat-scope-btn')) as HTMLButtonElement;
+		dom.append(scopeBtn, dom.$('span.codicon.codicon-folder'));
+		this._scopeBadge = dom.append(scopeBtn, dom.$('span.insrc-chat-scope'));
+		dom.append(scopeBtn, dom.$('span.codicon.codicon-chevron-down.insrc-chat-scope-chevron'));
+		scopeBtn.title = localize('chatPickScope', 'Pick the workspace folder this chat is scoped to');
+		this._register(dom.addDisposableListener(scopeBtn, 'click', () => this._onScopePick()));
+
 		const clearBtn = dom.append(header, dom.$('span.insrc-chat-clear.codicon.codicon-clear-all'));
 		clearBtn.title = localize('chatClearHistory', 'Clear chat history for this workspace');
 		this._register(dom.addDisposableListener(clearBtn, 'click', () => this._onClearHistory()));
@@ -217,6 +225,44 @@ export class InsrcChatViewPane extends ViewPane {
 				element: this._buildErrorBubble(String(err)),
 			});
 		});
+	}
+
+	private async _onScopePick(): Promise<void> {
+		const workspace = this.workspaceService.getWorkspace();
+		const folders = workspace.folders;
+		if (folders.length === 0) {
+			this.notificationService.info(localize('chatNoFoldersToPick',
+				'No workspace folder open. Open a folder + try again.'));
+			return;
+		}
+
+		const currentPath = this.chatService.activeScopePath;
+		const items: (IQuickPickItem & { path?: string | undefined })[] = folders.map(f => ({
+			label: f.name,
+			description: f.uri.fsPath,
+			path: f.uri.fsPath,
+			picked: f.uri.fsPath === currentPath,
+		}));
+
+		// "Auto" lets the user clear an existing pin + go back to
+		// active-editor-driven scope.
+		const hasPin = this.chatService.pinnedScopePath !== undefined;
+		if (hasPin) {
+			items.unshift({
+				label: localize('chatScopeAuto', '$(sync) Auto (follow active editor)'),
+				description: localize('chatScopeAutoDescription', 'Track whichever folder the focused editor belongs to'),
+				path: undefined,
+			});
+		}
+
+		const pick = await this.quickInputService.pick(items, {
+			placeHolder: localize('chatPickScopePlaceholder',
+				'Pick the workspace folder this chat is scoped to'),
+		});
+		if (!pick) {
+			return;
+		}
+		this.chatService.setPinnedScope((pick as { path?: string }).path);
 	}
 
 	private _onClearHistory(): void {

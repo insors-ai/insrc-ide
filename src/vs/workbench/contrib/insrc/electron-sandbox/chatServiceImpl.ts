@@ -56,6 +56,8 @@ import type { IChatMessage, IInsrcChatService } from '../common/chatService.js';
 
 /** Storage key used to persist per-workspace chat history. */
 const CHAT_HISTORY_STORAGE_KEY = 'insrc.chat.history';
+/** Storage key for the user-pinned scope path (per workbench). */
+const CHAT_PINNED_SCOPE_KEY = 'insrc.chat.pinnedScope';
 /** Cap the on-disk history at this many entries per workspace to keep
  *  reads bounded. Older entries roll off; the user's "current
  *  conversation" feels lossy if we cap too low, so a few hundred is
@@ -115,6 +117,28 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 	get activeScopePath(): string | undefined {
 		return this._activeScopePath();
+	}
+
+	get pinnedScopePath(): string | undefined {
+		const raw = this.storageService.get(CHAT_PINNED_SCOPE_KEY, StorageScope.WORKSPACE);
+		return raw !== undefined && raw.length > 0 ? raw : undefined;
+	}
+
+	setPinnedScope(path: string | undefined): void {
+		const prev = this._activeScopePath();
+		if (path === undefined || path.length === 0) {
+			this.storageService.remove(CHAT_PINNED_SCOPE_KEY, StorageScope.WORKSPACE);
+		} else {
+			this.storageService.store(CHAT_PINNED_SCOPE_KEY, path, StorageScope.WORKSPACE, StorageTarget.USER);
+		}
+		const next = this._activeScopePath();
+		if (next !== prev) {
+			this._loadMessagesForActiveWorkspace();
+			this._onDidChangeActiveScope.fire();
+			this._onDidChangeMessages.fire();
+		} else {
+			this._onDidChangeActiveScope.fire();
+		}
 	}
 
 	/**
@@ -362,13 +386,28 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	 * Resolve the workspace folder the chat is scoped to.
 	 *
 	 * Preference order:
-	 *   1. The folder containing the active editor's file (multi-root
+	 *   1. User-pinned scope override (persisted per-workspace via the
+	 *      header dropdown)
+	 *   2. The folder containing the active editor's file (multi-root
 	 *      workspaces -- pick the root matching what the user is currently
 	 *      looking at)
-	 *   2. The first workspace folder (single-root, or no editor open)
-	 *   3. undefined (no folder open at all)
+	 *   3. The first workspace folder (single-root, or no editor open)
+	 *   4. undefined (no folder open at all)
 	 */
 	private _activeScopePath(): string | undefined {
+		// (1) pinned override -- if the user explicitly picked a folder,
+		// honour it regardless of editor / workspace state. Validate that
+		// it's still in the current workspace; the user may have removed
+		// the folder since the pin was last saved.
+		const pinned = this.pinnedScopePath;
+		if (pinned !== undefined) {
+			const workspace = this.workspaceService.getWorkspace();
+			const stillPresent = workspace.folders.some(f => f.uri.fsPath === pinned);
+			if (stillPresent) {
+				return pinned;
+			}
+		}
+		// (2) active editor's containing folder
 		const activeEditor = this.editorService.activeEditor;
 		const resource = activeEditor?.resource;
 		if (resource !== undefined) {
@@ -377,6 +416,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				return folder.uri.fsPath;
 			}
 		}
+		// (3) first workspace folder
 		const workspace = this.workspaceService.getWorkspace();
 		const folder = workspace.folders[0];
 		return folder?.uri.fsPath;

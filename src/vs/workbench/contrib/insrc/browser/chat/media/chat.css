@@ -39,12 +39,44 @@
 	opacity: 0.7;
 }
 
+.insrc-chat-scope-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	flex: 1 1 auto;
+	min-width: 0;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	color: inherit;
+	font: inherit;
+	padding: 2px 6px;
+	cursor: pointer;
+}
+
+.insrc-chat-scope-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	border-color: var(--vscode-input-border, transparent);
+}
+
+.insrc-chat-scope-btn .codicon {
+	font-size: 12px;
+	opacity: 0.7;
+	flex: 0 0 auto;
+}
+
+.insrc-chat-scope-chevron {
+	font-size: 10px !important;
+	opacity: 0.55;
+}
+
 .insrc-chat-scope {
 	font-weight: 500;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	flex: 1 1 auto;
+	min-width: 0;
 }
 
 .insrc-chat-clear {
