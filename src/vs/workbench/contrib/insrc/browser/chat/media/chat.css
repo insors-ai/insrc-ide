@@ -1,0 +1,395 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Insrc chat view pane (sidebar). Visual language preserved from the
+ * pre-cleanup chat panel (rebuilt in commit 8a5ad7823d9): asymmetric
+ * speech bubbles, sticky progress row above the input, live-console
+ * widget for streaming agent steps. Sidebar form-factor so we drop
+ * the multi-select bar, session dropdown, and toolbar attachments
+ * that the editor-pane original carried; the rest of the look + feel
+ * matches.
+ */
+
+/* ---------- Pane shell -------------------------------------------------- */
+
+.insrc-chat-pane {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	min-height: 0;
+}
+
+.insrc-chat-header {
+	flex: 0 0 28px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 10px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	border-bottom: 1px solid var(--vscode-panel-border);
+	background: var(--vscode-sideBarSectionHeader-background, transparent);
+}
+
+.insrc-chat-header > .codicon {
+	font-size: 12px;
+	opacity: 0.7;
+}
+
+.insrc-chat-scope {
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1 1 auto;
+}
+
+.insrc-chat-clear {
+	flex: 0 0 auto;
+	cursor: pointer;
+	padding: 2px 4px;
+	border-radius: 3px;
+	opacity: 0.7;
+}
+
+.insrc-chat-clear:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+	opacity: 1;
+}
+
+/* ---------- Message list ------------------------------------------------ */
+
+.insrc-chat-messages {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 10px;
+}
+
+.insrc-chat-empty {
+	margin: auto;
+	max-width: 240px;
+	text-align: center;
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.75;
+	padding: 24px 8px;
+}
+
+/* ---------- Message bubbles --------------------------------------------- */
+
+.insrc-chat-message {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-width: 92%;
+	padding: 8px 12px;
+	font-size: 13px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.insrc-chat-message.msg-user {
+	align-self: flex-end;
+	background: var(--vscode-textBlockQuote-background, rgba(255, 255, 255, 0.06));
+	border-radius: 8px 8px 2px 8px;
+}
+
+.insrc-chat-message.msg-assistant {
+	align-self: flex-start;
+	background: var(--vscode-editorWidget-background, rgba(255, 255, 255, 0.03));
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 8px 8px 8px 2px;
+}
+
+.insrc-chat-message.msg-error {
+	align-self: flex-start;
+	background: var(--vscode-inputValidation-errorBackground);
+	color: var(--vscode-inputValidation-errorForeground);
+	border: 1px solid var(--vscode-inputValidation-errorBorder);
+	border-radius: 8px 8px 8px 2px;
+}
+
+.insrc-chat-message-header {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	font-size: 11px;
+	line-height: 1.2;
+}
+
+.insrc-chat-message-author {
+	font-weight: 600;
+	letter-spacing: 0.01em;
+}
+
+.insrc-chat-message.msg-user .insrc-chat-message-author {
+	color: var(--vscode-textLink-foreground);
+}
+
+.insrc-chat-message.msg-assistant .insrc-chat-message-author {
+	color: var(--vscode-testing-iconPassed, var(--vscode-charts-green, #6cb33f));
+}
+
+.insrc-chat-message.msg-error .insrc-chat-message-author {
+	color: var(--vscode-errorForeground);
+}
+
+.insrc-chat-message-time {
+	font-size: 10px;
+	opacity: 0.55;
+	font-weight: 400;
+}
+
+.insrc-chat-message-body {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.insrc-chat-report-link {
+	display: inline-block;
+	margin-top: 8px;
+	font-size: 12px;
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.insrc-chat-report-link::before {
+	content: "\eb0c"; /* codicon-report */
+	font-family: codicon;
+	margin-right: 4px;
+	vertical-align: middle;
+}
+
+.insrc-chat-report-link:hover {
+	color: var(--vscode-textLink-activeForeground);
+	text-decoration: underline;
+}
+
+/* ---------- Live console (per-task progress, mid-run) ------------------- */
+
+.insrc-chat-live-console {
+	align-self: stretch;
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	background: var(--vscode-editorWidget-background);
+	overflow: hidden;
+}
+
+.insrc-chat-live-console-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 10px;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	color: var(--vscode-descriptionForeground);
+	background: var(--vscode-panelSectionHeader-background, transparent);
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.insrc-chat-live-console-header .codicon {
+	font-size: 12px;
+}
+
+.insrc-chat-live-console-body {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 280px;
+	overflow-y: auto;
+	padding: 8px 10px;
+	scroll-behavior: smooth;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 12px;
+	color: var(--vscode-editor-foreground);
+}
+
+/* ---------- Live step rows ---------------------------------------------- */
+
+.insrc-chat-live-step {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	line-height: 1.6;
+}
+
+.insrc-chat-live-step .codicon {
+	font-size: 13px;
+	flex: 0 0 14px;
+	text-align: center;
+}
+
+.insrc-chat-live-step-title {
+	flex: 0 0 auto;
+}
+
+.insrc-chat-live-step-status {
+	flex: 1 1 auto;
+	min-width: 0;
+	opacity: 0.7;
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Status icon colours */
+
+.insrc-chat-live-step .codicon-pass-filled {
+	color: var(--vscode-charts-green, var(--vscode-testing-iconPassed));
+}
+
+.insrc-chat-live-step .codicon-error {
+	color: var(--vscode-errorForeground);
+}
+
+.insrc-chat-live-step .codicon-circle-slash {
+	color: var(--vscode-disabledForeground);
+}
+
+.insrc-chat-live-step .codicon-circle-large-outline {
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.6;
+}
+
+/* ---------- Progress strip (above input) -------------------------------- */
+
+.insrc-chat-progress {
+	flex: 0 0 32px;
+	display: none;
+	align-items: center;
+	gap: 8px;
+	padding: 0 12px;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	background: var(--vscode-editorWidget-background);
+	border-top: 1px solid var(--vscode-panel-border);
+}
+
+.insrc-chat-progress.show {
+	display: flex;
+}
+
+.insrc-chat-progress .codicon {
+	font-size: 13px;
+}
+
+.insrc-chat-progress-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-chat-progress-badge {
+	flex: 0 0 auto;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.insrc-chat-progress-badge.scope {
+	background: var(--vscode-activityBarBadge-background, var(--vscode-badge-background));
+	color: var(--vscode-activityBarBadge-foreground, var(--vscode-badge-foreground));
+	opacity: 0.85;
+}
+
+/* ---------- Input area -------------------------------------------------- */
+
+.insrc-chat-input-area {
+	flex: 0 0 auto;
+	margin: 0 10px 10px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 10px;
+	background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+	display: flex;
+	flex-direction: column;
+}
+
+.insrc-chat-input-area:focus-within {
+	border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+	box-shadow: 0 0 0 1px var(--vscode-focusBorder, var(--vscode-button-background));
+}
+
+.insrc-chat-input-row {
+	display: flex;
+	align-items: flex-end;
+	gap: 6px;
+	padding: 4px 4px 4px 8px;
+}
+
+.insrc-chat-input {
+	flex: 1 1 auto;
+	min-height: 32px;
+	max-height: 160px;
+	resize: none;
+	overflow-y: auto;
+	background: transparent;
+	color: var(--vscode-input-foreground, var(--vscode-foreground));
+	border: none;
+	outline: none;
+	padding: 6px 4px;
+	font-family: inherit;
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+.insrc-chat-input::placeholder {
+	color: var(--vscode-input-placeholderForeground);
+	opacity: 0.7;
+}
+
+.insrc-chat-icon-btn {
+	flex: 0 0 30px;
+	height: 30px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	border-radius: 6px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.insrc-chat-icon-btn:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.insrc-chat-icon-btn:disabled,
+.insrc-chat-icon-btn.disabled {
+	cursor: default;
+	opacity: 0.45;
+}
+
+.insrc-chat-icon-btn .codicon {
+	font-size: 14px;
+}
+
+.insrc-chat-input-hint {
+	padding: 0 8px 6px;
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.6;
+}
