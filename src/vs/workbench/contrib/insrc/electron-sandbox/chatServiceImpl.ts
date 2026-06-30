@@ -241,8 +241,40 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	// Session lifecycle (no-op shells for U1 -- U4 wires chat sessions in)
 	// -------------------------------------------------------------------------
 
-	async startSession(_repo: string): Promise<string | undefined> { return undefined; }
-	async resumeSession(_sessionId: string): Promise<void> { /* no-op */ }
+	async startSession(repo: string): Promise<string | undefined> {
+		// Sessions sidebar -> repo chat-icon -> _openChatForRepo(repoPath)
+		// routes here. We don't have a daemon-backed session lifecycle
+		// wired in this rebuild, but the caller's intent is clear: "open
+		// the chat scoped to this repo." Pin the scope so the badge +
+		// history + outgoing analyze.run.start all target the picked
+		// repo regardless of what the active editor is doing.
+		if (repo.length > 0) {
+			this.setPinnedScope(repo);
+		}
+		return undefined;
+	}
+	async resumeSession(sessionId: string): Promise<void> {
+		// Sessions sidebar -> session row click -> _openSessionInChat
+		// routes here. Look up the session's repo via the daemon's
+		// chat.restore RPC + pin the chat scope so the click lands
+		// where the user expected.
+		if (!this.daemonService.isConnected) {
+			this.logService.debug('[insrc-chat] resumeSession: daemon not connected; ignoring');
+			return;
+		}
+		try {
+			const result = await this.daemonService.rpc<{ ok: boolean; repoPath?: string }>(
+				'chat.restore', { id: sessionId },
+			);
+			if (result?.ok === true && typeof result.repoPath === 'string' && result.repoPath.length > 0) {
+				this.setPinnedScope(result.repoPath);
+				this._activeSessionId = sessionId;
+				this._onDidChangeSession.fire(sessionId);
+			}
+		} catch (err) {
+			this.logService.warn('[insrc-chat] resumeSession failed', (err as Error).message);
+		}
+	}
 	async deleteSession(_sessionId: string): Promise<{ deleted: boolean; reason?: string }> { return { deleted: false, reason: 'sessions not yet wired' }; }
 	async deleteSessionsBulk(_sessionIds: readonly string[]): Promise<{ deleted: number; failed: number }> { return { deleted: 0, failed: 0 }; }
 	async cancelBrainstormSession(_reason: string, _opts?: { discardCheckpoint?: boolean }): Promise<void> { /* no-op */ }
