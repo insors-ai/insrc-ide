@@ -156,8 +156,11 @@ export class InsrcChatViewPane extends ViewPane {
 		// Scrollable message list.
 		this._messagesEl = dom.append(container, dom.$('.insrc-chat-messages'));
 		this._emptyHint = dom.append(this._messagesEl, dom.$('div.insrc-chat-empty'));
-		this._emptyHint.textContent = localize('chatEmpty',
+		const hintTitle = dom.append(this._emptyHint, dom.$('div.insrc-chat-empty-title'));
+		hintTitle.textContent = localize('chatEmpty',
 			'Type a prompt below and press Send (⌘/Ctrl+↩︎) to start an analyze run.');
+		const hintSlash = dom.append(this._emptyHint, dom.$('div.insrc-chat-empty-slash'));
+		hintSlash.textContent = localize('chatEmptySlash', 'Force a target with a slash command at the start: /code, /data, /infra, /generic. Add :xs|s|m|l|xl to pin scope (e.g. /code:l map the architecture).');
 
 		// Sticky progress strip above the input. Hidden by default; the
 		// streaming handler toggles `show` when a run is live.

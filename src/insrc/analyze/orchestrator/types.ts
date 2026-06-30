@@ -38,11 +38,27 @@ export type RunStage =
 // ---------------------------------------------------------------------------
 
 export interface RunAnalyzeArgs {
-	readonly runId:      string;
+	readonly runId: string;
 	readonly userPrompt: string;
 	/** Starting scope ref -- usually workspace; the classifier may
 	 *  refine to a more specific repo / module / connection ref. */
-	readonly scopeRef:   AnalyzeScopeRef;
+	readonly scopeRef: AnalyzeScopeRef;
+	/**
+	 * Optional target override. When set, the orchestrator skips the
+	 * classifier stage entirely + synthesises the ClassifiedIntent
+	 * directly with the given target. Saves the ~3 min classifier
+	 * round-trip + gives deterministic control over which template
+	 * family runs (code / data / infra / generic). Used by the chat
+	 * panel's slash commands (`/code`, `/data`, etc.).
+	 */
+	readonly targetHint?: import('../../shared/analyze-types.js').AnalyzeTarget;
+	/**
+	 * Optional scope override. Only honoured when targetHint is also
+	 * set (otherwise the classifier picks the scope band from the
+	 * prompt + bundle). Defaults to 'M' when omitted with a target
+	 * hint.
+	 */
+	readonly scopeHint?: import('../../shared/analyze-types.js').AnalyzeScope;
 }
 
 /**
@@ -104,42 +120,42 @@ export interface RunAnalyzeOpts {
  */
 export type AnalyzeRunEvent =
 	| {
-		readonly type:  'stage-started';
+		readonly type: 'stage-started';
 		readonly stage: 'classify' | 'plan' | 'execute';
 	}
 	| {
-		readonly type:   'classified';
+		readonly type: 'classified';
 		readonly intent: ClassifiedIntent;
 	}
 	| {
-		readonly type:        'plan-attempt';
-		readonly attempt:     number;
-		readonly accepted:    boolean;
+		readonly type: 'plan-attempt';
+		readonly attempt: number;
+		readonly accepted: boolean;
 		readonly invariantId?: string;
 	}
 	| {
-		readonly type:      'plan-accepted';
+		readonly type: 'plan-accepted';
 		readonly taskCount: number;
-		readonly planId:    string;
+		readonly planId: string;
 	}
 	| {
-		readonly type:            'task-started';
-		readonly taskId:          string;
-		readonly template:        string;
-		readonly index:           number;
-		readonly total:           number;
+		readonly type: 'task-started';
+		readonly taskId: string;
+		readonly template: string;
+		readonly index: number;
+		readonly total: number;
 		/** Dotted path of ancestor planner-template tasks (e.g. "t02"
 		 *  or "t02.t05"); undefined for tasks in the root plan. */
 		readonly parentTaskPath?: string;
 	}
 	| {
-		readonly type:            'task-completed';
-		readonly taskId:          string;
-		readonly status:          'ok' | 'failed' | 'skipped-dependency-unavailable';
+		readonly type: 'task-completed';
+		readonly taskId: string;
+		readonly status: 'ok' | 'failed' | 'skipped-dependency-unavailable';
 		readonly parentTaskPath?: string;
 	}
 	| {
-		readonly type:   'done';
+		readonly type: 'done';
 		readonly result: RunAnalyzeResult;
 	};
 
@@ -153,22 +169,22 @@ export type RunAnalyzeResult =
 	| RunAnalyzeFail;
 
 export interface RunAnalyzeOk {
-	readonly ok:             true;
-	readonly runId:          string;
-	readonly intent:         ClassifiedIntent;
-	readonly finalReport:    unknown;
+	readonly ok: true;
+	readonly runId: string;
+	readonly intent: ClassifiedIntent;
+	readonly finalReport: unknown;
 	readonly tasksCompleted: number;
-	readonly tasksFailed:    ReadonlyArray<{ taskId: string; reason: string }>;
-	readonly durationMs:     number;
+	readonly tasksFailed: ReadonlyArray<{ taskId: string; reason: string }>;
+	readonly durationMs: number;
 }
 
 export interface RunAnalyzeFail {
-	readonly ok:        false;
-	readonly runId:     string;
-	readonly stage:     RunStage;
-	readonly error:     RunFailure;
+	readonly ok: false;
+	readonly runId: string;
+	readonly stage: RunStage;
+	readonly error: RunFailure;
 	/** Intent is present iff the classify stage completed; otherwise undefined. */
-	readonly intent?:   ClassifiedIntent | undefined;
+	readonly intent?: ClassifiedIntent | undefined;
 	readonly durationMs: number;
 }
 
@@ -177,9 +193,9 @@ export interface RunAnalyzeFail {
 // ---------------------------------------------------------------------------
 
 export interface RunFailure {
-	readonly code:    RunErrorCode;
+	readonly code: RunErrorCode;
 	readonly message: string;
-	readonly data?:   Readonly<Record<string, unknown>>;
+	readonly data?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -226,19 +242,19 @@ export type RunErrorCode =
  * + at the terminal end (ok / failed). Atomic write via tmp+rename.
  */
 export interface RunRecord {
-	readonly runId:        string;
-	readonly createdAt:    string;
-	readonly updatedAt:    string;
-	readonly userPrompt:   string;
+	readonly runId: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly userPrompt: string;
 	readonly initialScopeRef: AnalyzeScopeRef;
-	readonly stage:        RunStage;
-	readonly status:       'in-progress' | 'ok' | 'failed';
+	readonly stage: RunStage;
+	readonly status: 'in-progress' | 'ok' | 'failed';
 	/** Filled in after the classifier stage completes. */
-	readonly intent?:      ClassifiedIntent | undefined;
+	readonly intent?: ClassifiedIntent | undefined;
 	/** Filled in after the executor stage completes. */
 	readonly finalReport?: unknown;
 	/** Filled in when status='failed'. */
-	readonly error?:       RunFailure | undefined;
+	readonly error?: RunFailure | undefined;
 	readonly tasksCompleted?: number | undefined;
-	readonly tasksFailed?:    ReadonlyArray<{ taskId: string; reason: string }> | undefined;
+	readonly tasksFailed?: ReadonlyArray<{ taskId: string; reason: string }> | undefined;
 }

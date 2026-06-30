@@ -115,13 +115,13 @@ export async function runAnalyze(
 	) {
 		log.info({ runId }, 'runAnalyze: resume cache hit; returning persisted RunAnalyzeOk');
 		return emitDoneAndReturn({
-			ok:             true,
-			runId:          cached.runId,
-			intent:         cached.intent,
-			finalReport:    cached.finalReport,
+			ok: true,
+			runId: cached.runId,
+			intent: cached.intent,
+			finalReport: cached.finalReport,
 			tasksCompleted: cached.tasksCompleted ?? 0,
-			tasksFailed:    cached.tasksFailed    ?? [],
-			durationMs:     0,
+			tasksFailed: cached.tasksFailed ?? [],
+			durationMs: 0,
 		});
 	}
 
@@ -129,12 +129,12 @@ export async function runAnalyze(
 	//     the run exists even if stage 1 hangs.
 	let record: RunRecord = {
 		runId,
-		createdAt:       nowIso(),
-		updatedAt:       nowIso(),
+		createdAt: nowIso(),
+		updatedAt: nowIso(),
 		userPrompt,
 		initialScopeRef,
-		stage:           'classify',
-		status:          'in-progress',
+		stage: 'classify',
+		status: 'in-progress',
 	};
 	writeRunRecord(record);
 
@@ -143,13 +143,13 @@ export async function runAnalyze(
 	const checkAborted = (stage: RunStage, intent?: ClassifiedIntent): RunAnalyzeResult | null => {
 		if (opts.signal?.aborted !== true) return null;
 		const failure: RunFailure = {
-			code:    'aborted',
+			code: 'aborted',
 			message: `runAnalyze: aborted before stage='${stage}' could start`,
 		};
 		record = patch(record, {
 			stage,
 			status: 'failed',
-			error:  failure,
+			error: failure,
 			...(intent !== undefined ? { intent } : {}),
 		});
 		writeRunRecord(record);
@@ -165,17 +165,38 @@ export async function runAnalyze(
 	emit({ type: 'stage-started', stage: 'classify' });
 
 	let intent: ClassifiedIntent;
-	try {
-		intent = await classify({
-			input: { userPrompt, scopeRef: initialScopeRef },
-			opts:  { runId },
-		});
-	} catch (err) {
-		const failure = classifyClassifierError(err);
-		record = patch(record, { stage: 'classify', status: 'failed', error: failure });
-		writeRunRecord(record);
-		log.warn({ runId, code: failure.code }, 'runAnalyze: classify failed');
-		return emitDoneAndReturn(failResult('classify', failure, undefined, start, runId));
+	if (args.targetHint !== undefined) {
+		// Skip the classifier entirely -- caller (chat panel slash
+		// command) has explicitly picked the target. Synthesise a
+		// ClassifiedIntent with the same shape the classifier would
+		// have produced. Saves ~3 min of LLM time + dodges
+		// classifier-flakiness on edge-case prompts.
+		const scope = args.scopeHint ?? 'M';
+		intent = {
+			target: args.targetHint,
+			scope,
+			focused: false,
+			scopeRef: initialScopeRef,
+			reasoning: `target hinted via slash command (classifier skipped); ` +
+				`scope=${scope}${args.scopeHint === undefined ? ' (default)' : ' (hinted)'}`,
+		};
+		log.info(
+			{ runId, target: intent.target, scope: intent.scope, source: 'targetHint' },
+			'runAnalyze: classifier skipped via targetHint',
+		);
+	} else {
+		try {
+			intent = await classify({
+				input: { userPrompt, scopeRef: initialScopeRef },
+				opts: { runId },
+			});
+		} catch (err) {
+			const failure = classifyClassifierError(err);
+			record = patch(record, { stage: 'classify', status: 'failed', error: failure });
+			writeRunRecord(record);
+			log.warn({ runId, code: failure.code }, 'runAnalyze: classify failed');
+			return emitDoneAndReturn(failResult('classify', failure, undefined, start, runId));
+		}
 	}
 	emit({ type: 'classified', intent });
 	record = patch(record, { stage: 'plan', intent });
@@ -219,9 +240,9 @@ export async function runAnalyze(
 		return emitDoneAndReturn(failResult('plan', failure, intent, start, runId));
 	}
 	emit({
-		type:      'plan-accepted',
+		type: 'plan-accepted',
 		taskCount: tree.plan.tasks.length,
-		planId:    tree.plan.planId,
+		planId: tree.plan.planId,
 	});
 	record = patch(record, { stage: 'execute' });
 	writeRunRecord(record);
@@ -245,16 +266,16 @@ export async function runAnalyze(
 		onTaskEvent: (event) => {
 			if (event.type === 'task-started') {
 				emit({
-					type:     'task-started',
-					taskId:   event.taskId,
+					type: 'task-started',
+					taskId: event.taskId,
 					template: event.template,
-					index:    event.index,
-					total:    event.total,
+					index: event.index,
+					total: event.total,
 					...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
 				});
 			} else {
 				emit({
-					type:   'task-completed',
+					type: 'task-completed',
 					taskId: event.taskId,
 					status: event.status,
 					...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
@@ -266,19 +287,19 @@ export async function runAnalyze(
 
 	if (rootPlan.finalReport === undefined) {
 		const failure: RunFailure = {
-			code:    'executor-aggregator-failed',
+			code: 'executor-aggregator-failed',
 			message: 'Run executor completed but the aggregator produced no report.',
-			data:    {
+			data: {
 				tasksCompleted: rootPlan.tasksCompleted,
-				tasksFailed:    rootPlan.tasksFailed,
+				tasksFailed: rootPlan.tasksFailed,
 			},
 		};
 		record = patch(record, {
-			stage:          'execute',
-			status:         'failed',
-			error:          failure,
+			stage: 'execute',
+			status: 'failed',
+			error: failure,
 			tasksCompleted: rootPlan.tasksCompleted,
-			tasksFailed:    rootPlan.tasksFailed,
+			tasksFailed: rootPlan.tasksFailed,
 		});
 		writeRunRecord(record);
 		log.warn({ runId, tasksFailed: rootPlan.tasksFailed.length }, 'runAnalyze: aggregator failed');
@@ -287,11 +308,11 @@ export async function runAnalyze(
 
 	// ----- (done) -----
 	record = patch(record, {
-		stage:          'done',
-		status:         'ok',
-		finalReport:    rootPlan.finalReport,
+		stage: 'done',
+		status: 'ok',
+		finalReport: rootPlan.finalReport,
 		tasksCompleted: rootPlan.tasksCompleted,
-		tasksFailed:    rootPlan.tasksFailed,
+		tasksFailed: rootPlan.tasksFailed,
 	});
 	writeRunRecord(record);
 	const durationMs = Date.now() - start;
@@ -301,12 +322,12 @@ export async function runAnalyze(
 	);
 
 	return emitDoneAndReturn({
-		ok:             true,
+		ok: true,
 		runId,
 		intent,
-		finalReport:    rootPlan.finalReport,
+		finalReport: rootPlan.finalReport,
 		tasksCompleted: rootPlan.tasksCompleted,
-		tasksFailed:    rootPlan.tasksFailed,
+		tasksFailed: rootPlan.tasksFailed,
 		durationMs,
 	});
 }
@@ -316,15 +337,15 @@ export async function runAnalyze(
 // ---------------------------------------------------------------------------
 
 function classifyClassifierError(err: unknown): RunFailure {
-	if (err instanceof ClassifierLlmUnavailableError)   return wrap('classifier-llm-unavailable',     err);
-	if (err instanceof ClassifierSchemaUnrecoverable)   return wrap('classifier-schema-unrecoverable', err);
-	if (err instanceof ClassifierValidationExhausted)   return wrap('classifier-validation-exhausted', err);
-	if (err instanceof ClassifierPromptMissingError)    return wrap('classifier-prompt-missing',       err);
+	if (err instanceof ClassifierLlmUnavailableError) return wrap('classifier-llm-unavailable', err);
+	if (err instanceof ClassifierSchemaUnrecoverable) return wrap('classifier-schema-unrecoverable', err);
+	if (err instanceof ClassifierValidationExhausted) return wrap('classifier-validation-exhausted', err);
+	if (err instanceof ClassifierPromptMissingError) return wrap('classifier-prompt-missing', err);
 	// Scope-ref errors come from the classifier's intent-validator as
 	// plain Error with stable messages; pattern-match.
 	if (err instanceof Error) {
-		if (/scope-ref-unresolved/.test(err.message))            return wrap('scope-ref-unresolved',            err);
-		if (/scope-ref-kind-target-mismatch/.test(err.message))  return wrap('scope-ref-kind-target-mismatch',  err);
+		if (/scope-ref-unresolved/.test(err.message)) return wrap('scope-ref-unresolved', err);
+		if (/scope-ref-kind-target-mismatch/.test(err.message)) return wrap('scope-ref-kind-target-mismatch', err);
 	}
 	return wrap('internal-error', err);
 }
@@ -332,42 +353,42 @@ function classifyClassifierError(err: unknown): RunFailure {
 function classifyShaperError(err: unknown): RunFailure {
 	if (err instanceof ScopeNotIndexedError) {
 		return {
-			code:    'scope-not-indexed',
+			code: 'scope-not-indexed',
 			message: err.message,
-			data:    { scopePath: err.scopePath, registeredAs: err.registeredAs },
+			data: { scopePath: err.scopePath, registeredAs: err.registeredAs },
 		};
 	}
-	if (err instanceof ShaperLlmUnavailableError) return wrap('shaper-llm-unavailable',     err);
-	if (err instanceof ShaperToolLoopExhausted)   return wrap('shaper-tool-loop-exhausted', err);
+	if (err instanceof ShaperLlmUnavailableError) return wrap('shaper-llm-unavailable', err);
+	if (err instanceof ShaperToolLoopExhausted) return wrap('shaper-tool-loop-exhausted', err);
 	if (err instanceof ShaperSchemaUnrecoverable) return wrap('shaper-schema-unrecoverable', err);
-	if (err instanceof ShaperPromptMissingError)  return wrap('shaper-prompt-missing',       err);
+	if (err instanceof ShaperPromptMissingError) return wrap('shaper-prompt-missing', err);
 	return wrap('internal-error', err);
 }
 
 function classifyPlannerError(err: unknown): RunFailure {
 	if (err instanceof MaxPlanDepthExceededError) {
 		return {
-			code:    'max-plan-depth-exceeded',
+			code: 'max-plan-depth-exceeded',
 			message: err.message,
-			data:    { currentDepth: err.currentDepth, rootScope: err.rootScope, cap: err.cap },
+			data: { currentDepth: err.currentDepth, rootScope: err.rootScope, cap: err.cap },
 		};
 	}
 	if (err instanceof PlanBuilderExhausted) {
 		return {
-			code:    'plan-invariant-failed',
+			code: 'plan-invariant-failed',
 			message: err.message,
-			data:    {
+			data: {
 				lastFailure: {
 					invariantId: err.lastFailure.invariantId,
-					message:     err.lastFailure.message,
+					message: err.lastFailure.message,
 				},
 				totalAttempts: err.attempts.length,
 			},
 		};
 	}
-	if (err instanceof PlanBuilderLlmUnavailableError) return wrap('plan-builder-llm-unavailable',     err);
+	if (err instanceof PlanBuilderLlmUnavailableError) return wrap('plan-builder-llm-unavailable', err);
 	if (err instanceof PlanBuilderSchemaUnrecoverable) return wrap('plan-builder-schema-unrecoverable', err);
-	if (err instanceof PlanBuilderPromptMissingError)  return wrap('plan-builder-prompt-missing',       err);
+	if (err instanceof PlanBuilderPromptMissingError) return wrap('plan-builder-prompt-missing', err);
 	return wrap('internal-error', err);
 }
 
@@ -385,15 +406,15 @@ function patch(prev: RunRecord, change: Partial<RunRecord>): RunRecord {
 }
 
 function failResult(
-	stage:    RunStage,
-	failure:  RunFailure,
-	intent:   ClassifiedIntent | undefined,
-	start:    number,
-	runId:    string,
+	stage: RunStage,
+	failure: RunFailure,
+	intent: ClassifiedIntent | undefined,
+	start: number,
+	runId: string,
 ): RunAnalyzeResult {
 	const durationMs = Date.now() - start;
 	return {
-		ok:    false,
+		ok: false,
 		runId,
 		stage,
 		error: failure,
@@ -411,5 +432,5 @@ function nowIso(): string {
 // ---------------------------------------------------------------------------
 
 export const _classifyClassifierErrorForTest = classifyClassifierError;
-export const _classifyShaperErrorForTest     = classifyShaperError;
-export const _classifyPlannerErrorForTest    = classifyPlannerError;
+export const _classifyShaperErrorForTest = classifyShaperError;
+export const _classifyPlannerErrorForTest = classifyPlannerError;

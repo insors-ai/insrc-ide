@@ -107,19 +107,19 @@ const log = getLogger('analyze-rpc');
 // ---------------------------------------------------------------------------
 
 export interface AnalyzeRpcOk {
-	readonly ok:     true;
+	readonly ok: true;
 	readonly bundle: AnalyzeContextBundle;
 }
 
 export interface AnalyzeRpcErr {
-	readonly ok:    false;
+	readonly ok: false;
 	readonly error: AnalyzeRpcErrorPayload;
 }
 
 export interface AnalyzeRpcErrorPayload {
-	readonly code:    AnalyzeRpcErrorCode;
+	readonly code: AnalyzeRpcErrorCode;
 	readonly message: string;
-	readonly data?:   Readonly<Record<string, unknown>>;
+	readonly data?: Readonly<Record<string, unknown>>;
 }
 
 export type AnalyzeRpcResponse = AnalyzeRpcOk | AnalyzeRpcErr;
@@ -160,7 +160,7 @@ export type AnalyzeRpcErrorCode =
 // ---------------------------------------------------------------------------
 
 export interface ClassifyRpcOk {
-	readonly ok:     true;
+	readonly ok: true;
 	readonly intent: ClassifiedIntent;
 }
 
@@ -172,7 +172,7 @@ export type ClassifyRpcResponse = ClassifyRpcOk | AnalyzeRpcErr;
 // ---------------------------------------------------------------------------
 
 export interface PlanRpcOk {
-	readonly ok:   true;
+	readonly ok: true;
 	readonly plan: PlanTask;
 }
 
@@ -191,22 +191,22 @@ export type PlanRpcResponse = PlanRpcOk | AnalyzeRpcErr;
  * a single dispatch path.
  */
 export interface RunStartRpcOk {
-	readonly ok:             true;
-	readonly runId:          string;
-	readonly intent:         ClassifiedIntent;
-	readonly finalReport:    unknown;
+	readonly ok: true;
+	readonly runId: string;
+	readonly intent: ClassifiedIntent;
+	readonly finalReport: unknown;
 	readonly tasksCompleted: number;
-	readonly tasksFailed:    ReadonlyArray<{ taskId: string; reason: string }>;
-	readonly durationMs:     number;
+	readonly tasksFailed: ReadonlyArray<{ taskId: string; reason: string }>;
+	readonly durationMs: number;
 }
 
 export interface RunStartRpcErr {
-	readonly ok:         false;
-	readonly runId:      string;
-	readonly stage:      'classify' | 'plan' | 'execute' | 'done';
-	readonly intent?:    ClassifiedIntent | undefined;
+	readonly ok: false;
+	readonly runId: string;
+	readonly stage: 'classify' | 'plan' | 'execute' | 'done';
+	readonly intent?: ClassifiedIntent | undefined;
 	readonly durationMs: number;
-	readonly error:      AnalyzeRpcErrorPayload;
+	readonly error: AnalyzeRpcErrorPayload;
 }
 
 export type RunStartRpcResponse = RunStartRpcOk | RunStartRpcErr;
@@ -218,7 +218,7 @@ export type RunStartRpcResponse = RunStartRpcOk | RunStartRpcErr;
  * doesn't exist.
  */
 export interface RunStatusRpcOk {
-	readonly ok:     true;
+	readonly ok: true;
 	readonly record: RunRecord;
 }
 
@@ -233,7 +233,7 @@ export type RunStatusRpcResponse = RunStatusRpcOk | AnalyzeRpcErr;
  * cleanup, not an error).
  */
 export interface RunPurgeRpcOk {
-	readonly ok:     true;
+	readonly ok: true;
 	readonly purged: boolean;
 }
 
@@ -252,7 +252,7 @@ export async function buildClassification(params: unknown): Promise<AnalyzeRpcRe
 	}
 	const shaper = shaperFor('classification');
 	const input: ClassificationShapeInput = {
-		scopeRef:   parsed.scopeRef,
+		scopeRef: parsed.scopeRef,
 		userPrompt: parsed.userPrompt,
 	};
 	const opts: ShapeOpts = { runId: parsed.runId };
@@ -283,7 +283,7 @@ export async function buildTask(params: unknown): Promise<AnalyzeRpcResponse> {
 		return {
 			ok: false,
 			error: {
-				code:    'invalid-params',
+				code: 'invalid-params',
 				message: "analyze.context.buildTask: target='generic' is not valid at task scope; " +
 					'task-level dispatch routes by task family namespace',
 			},
@@ -291,9 +291,9 @@ export async function buildTask(params: unknown): Promise<AnalyzeRpcResponse> {
 	}
 	const shaper = shaperFor('task', parsed.intent.target);
 	const input: TaskShapeInput = {
-		intent:        parsed.intent,
-		task:          parsed.task,
-		template:      parsed.template,
+		intent: parsed.intent,
+		task: parsed.task,
+		template: parsed.template,
 		upstreamTasks: parsed.upstream,
 	};
 	const opts: ShapeOpts = { runId: parsed.runId };
@@ -314,7 +314,7 @@ export async function classify(params: unknown): Promise<ClassifyRpcResponse> {
 
 	const input: ClassifyInput = {
 		userPrompt: parsed.userPrompt,
-		scopeRef:   parsed.scopeRef,
+		scopeRef: parsed.scopeRef,
 	};
 	const opts: ClassifyOpts = { runId: parsed.runId };
 
@@ -346,9 +346,9 @@ function classifyClassifierError(err: unknown): AnalyzeRpcErrorPayload {
 		return {
 			code,
 			message: err.message,
-			data:    {
+			data: {
 				lastFailure: {
-					code:    err.lastFailure.code,
+					code: err.lastFailure.code,
 					message: err.lastFailure.message,
 				},
 			},
@@ -408,8 +408,8 @@ export async function plan(params: unknown): Promise<PlanRpcResponse> {
 		const { loadAnalyzeConfig } = await import('../config/analyze.js');
 		const cfg = loadAnalyzeConfig();
 		const currentDepth = parsed.currentDepth ?? 0;
-		const rootScope    = parsed.rootScope    ?? parsed.intent.scope;
-		const cap          = cfg.maxPlanDepth[rootScope];
+		const rootScope = parsed.rootScope ?? parsed.intent.scope;
+		const cap = cfg.maxPlanDepth[rootScope];
 		if (currentDepth + 1 > cap) {
 			throw new MaxPlanDepthExceededError(currentDepth, rootScope, cap);
 		}
@@ -425,12 +425,12 @@ export async function plan(params: unknown): Promise<PlanRpcResponse> {
 		// (2) + (3) Run the planner.
 		const catalog = getTemplatesForTarget(parsed.intent.target);
 		const input: PlanBuilderInput = {
-			intent:        parsed.intent,
+			intent: parsed.intent,
 			contextBundle,
 			catalog,
 			...(parsed.parentTaskPath !== undefined ? { parentTaskPath: parsed.parentTaskPath } : {}),
-			...(parsed.currentDepth   !== undefined ? { currentDepth:   parsed.currentDepth   } : {}),
-			...(parsed.rootScope      !== undefined ? { rootScope:      parsed.rootScope      } : {}),
+			...(parsed.currentDepth !== undefined ? { currentDepth: parsed.currentDepth } : {}),
+			...(parsed.rootScope !== undefined ? { rootScope: parsed.rootScope } : {}),
 		};
 		const opts: PlanBuilderOpts = { runId: parsed.runId };
 
@@ -478,7 +478,7 @@ export async function plan(params: unknown): Promise<PlanRpcResponse> {
  */
 export async function runStart(
 	params: unknown,
-	send:   (msg: IpcStreamMessage) => void,
+	send: (msg: IpcStreamMessage) => void,
 	signal: AbortSignal,
 ): Promise<void> {
 	const start = Date.now();
@@ -490,14 +490,14 @@ export async function runStart(
 		const message = err instanceof Error ? err.message : String(err);
 		log.info({ message }, 'analyze.run.start invalid params');
 		send({
-			id:     0,
+			id: 0,
 			stream: 'analyze.result',
-			data:   {
-				ok:         false,
-				runId:      '',
-				stage:      'classify',
+			data: {
+				ok: false,
+				runId: '',
+				stage: 'classify',
 				durationMs: Date.now() - start,
-				error:      { code: 'invalid-params', message },
+				error: { code: 'invalid-params', message },
 			} satisfies RunStartRpcResponse,
 		});
 		send({ id: 0, stream: 'done', data: {} });
@@ -505,9 +505,11 @@ export async function runStart(
 	}
 
 	const args: RunAnalyzeArgs = {
-		runId:      parsed.runId,
+		runId: parsed.runId,
 		userPrompt: parsed.userPrompt,
-		scopeRef:   parsed.scopeRef,
+		scopeRef: parsed.scopeRef,
+		...(parsed.targetHint !== undefined ? { targetHint: parsed.targetHint } : {}),
+		...(parsed.scopeHint !== undefined ? { scopeHint: parsed.scopeHint } : {}),
 	};
 
 	const onEvent = (event: AnalyzeRunEvent): void => {
@@ -530,14 +532,14 @@ export async function runStart(
 		const message = err instanceof Error ? err.message : String(err);
 		log.error({ runId: parsed.runId, message }, 'analyze.run.start: uncaught orchestrator error');
 		send({
-			id:     0,
+			id: 0,
 			stream: 'analyze.result',
-			data:   {
-				ok:         false,
-				runId:      parsed.runId,
-				stage:      'classify',
+			data: {
+				ok: false,
+				runId: parsed.runId,
+				stage: 'classify',
 				durationMs: Date.now() - start,
-				error:      { code: 'internal-error', message },
+				error: { code: 'internal-error', message },
 			} satisfies RunStartRpcResponse,
 		});
 		send({ id: 0, stream: 'done', data: {} });
@@ -553,9 +555,9 @@ export async function runStart(
 	} else {
 		log.info(
 			{
-				runId:      result.runId,
-				stage:      result.stage,
-				code:       result.error.code,
+				runId: result.runId,
+				stage: result.stage,
+				code: result.error.code,
 				durationMs: result.durationMs,
 			},
 			'analyze.run.start failed',
@@ -586,32 +588,32 @@ function eventToProgressData(event: AnalyzeRunEvent): Record<string, unknown> {
 			return { step: 'classify', status: 'completed', intent: event.intent };
 		case 'plan-attempt':
 			return {
-				step:     'plan',
-				status:   `attempt-${event.attempt}-${event.accepted ? 'accepted' : 'rejected'}`,
-				attempt:  event.attempt,
+				step: 'plan',
+				status: `attempt-${event.attempt}-${event.accepted ? 'accepted' : 'rejected'}`,
+				attempt: event.attempt,
 				accepted: event.accepted,
 				...(event.invariantId !== undefined ? { invariantId: event.invariantId } : {}),
 			};
 		case 'plan-accepted':
 			return {
-				step:      'plan',
-				status:    'accepted',
+				step: 'plan',
+				status: 'accepted',
 				taskCount: event.taskCount,
-				planId:    event.planId,
+				planId: event.planId,
 			};
 		case 'task-started':
 			return {
-				step:     `task-${event.index}/${event.total}`,
-				status:   `started: ${event.template}`,
-				taskId:   event.taskId,
+				step: `task-${event.index}/${event.total}`,
+				status: `started: ${event.template}`,
+				taskId: event.taskId,
 				template: event.template,
-				index:    event.index,
-				total:    event.total,
+				index: event.index,
+				total: event.total,
 				...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
 			};
 		case 'task-completed':
 			return {
-				step:   `task-${event.taskId}`,
+				step: `task-${event.taskId}`,
 				status: event.status,
 				taskId: event.taskId,
 				...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
@@ -631,27 +633,27 @@ function eventToProgressData(event: AnalyzeRunEvent): Record<string, unknown> {
 function shapeTerminalFrame(result: RunAnalyzeResult): RunStartRpcResponse {
 	if (result.ok) {
 		return {
-			ok:             true,
-			runId:          result.runId,
-			intent:         result.intent,
-			finalReport:    result.finalReport,
+			ok: true,
+			runId: result.runId,
+			intent: result.intent,
+			finalReport: result.finalReport,
 			tasksCompleted: result.tasksCompleted,
-			tasksFailed:    result.tasksFailed,
-			durationMs:     result.durationMs,
+			tasksFailed: result.tasksFailed,
+			durationMs: result.durationMs,
 		};
 	}
 	const payload: AnalyzeRpcErrorPayload = {
-		code:    result.error.code as AnalyzeRpcErrorCode,
+		code: result.error.code as AnalyzeRpcErrorCode,
 		message: result.error.message,
 		...(result.error.data !== undefined ? { data: result.error.data } : {}),
 	};
 	return {
-		ok:         false,
-		runId:      result.runId,
-		stage:      result.stage,
+		ok: false,
+		runId: result.runId,
+		stage: result.stage,
 		...(result.intent !== undefined ? { intent: result.intent } : {}),
 		durationMs: result.durationMs,
-		error:      payload,
+		error: payload,
 	};
 }
 
@@ -689,7 +691,7 @@ export async function runStatus(params: unknown): Promise<RunStatusRpcResponse> 
 		return {
 			ok: false,
 			error: {
-				code:    'invalid-input',
+				code: 'invalid-input',
 				message: `analyze.run.status: no run record for runId='${parsed.runId}'`,
 			},
 		};
@@ -734,9 +736,9 @@ export async function runPurge(params: unknown): Promise<RunPurgeRpcResponse> {
 	return {
 		ok: false,
 		error: {
-			code:    'run-in-progress',
+			code: 'run-in-progress',
 			message: `analyze.run.purge: refused -- run '${parsed.runId}' is in-progress at stage='${result.stage}' (pass force=true to override)`,
-			data:    { stage: result.stage },
+			data: { stage: result.stage },
 		},
 	};
 }
@@ -751,23 +753,23 @@ export async function runPurge(params: unknown): Promise<RunPurgeRpcResponse> {
 function classifyPlannerError(err: unknown): AnalyzeRpcErrorPayload {
 	if (err instanceof MaxPlanDepthExceededError) {
 		return {
-			code:    'max-plan-depth-exceeded',
+			code: 'max-plan-depth-exceeded',
 			message: err.message,
-			data:    {
+			data: {
 				currentDepth: err.currentDepth,
-				rootScope:    err.rootScope,
-				cap:          err.cap,
+				rootScope: err.rootScope,
+				cap: err.cap,
 			},
 		};
 	}
 	if (err instanceof PlanBuilderExhausted) {
 		return {
-			code:    'plan-invariant-failed',
+			code: 'plan-invariant-failed',
 			message: err.message,
-			data:    {
+			data: {
 				lastFailure: {
 					invariantId: err.lastFailure.invariantId,
-					message:     err.lastFailure.message,
+					message: err.lastFailure.message,
 				},
 				totalAttempts: err.attempts.length,
 			},
@@ -792,9 +794,9 @@ function classifyPlannerError(err: unknown): AnalyzeRpcErrorPayload {
 // ---------------------------------------------------------------------------
 
 async function invoke(
-	thunk:    () => Promise<AnalyzeContextBundle>,
-	mode:     'classification' | 'run' | 'task',
-	runId:    string,
+	thunk: () => Promise<AnalyzeContextBundle>,
+	mode: 'classification' | 'run' | 'task',
+	runId: string,
 ): Promise<AnalyzeRpcResponse> {
 	try {
 		const bundle = await thunk();
@@ -819,10 +821,10 @@ async function invoke(
 function classifyShaperError(err: unknown): AnalyzeRpcErrorPayload {
 	if (err instanceof ScopeNotIndexedError) {
 		return {
-			code:    'scope-not-indexed',
+			code: 'scope-not-indexed',
 			message: err.message,
-			data:    {
-				scopePath:    err.scopePath,
+			data: {
+				scopePath: err.scopePath,
 				registeredAs: err.registeredAs,
 			},
 		};
@@ -855,34 +857,36 @@ function invalidParams(err: unknown): AnalyzeRpcErr {
 // ---------------------------------------------------------------------------
 
 interface ClassificationParams {
-	readonly runId:      string;
-	readonly scopeRef:   AnalyzeScopeRef;
+	readonly runId: string;
+	readonly scopeRef: AnalyzeScopeRef;
 	readonly userPrompt: string;
 }
 
 interface RunParams {
-	readonly runId:  string;
+	readonly runId: string;
 	readonly intent: ClassifiedIntent;
 }
 
 interface ClassifyParams {
-	readonly runId:      string;
+	readonly runId: string;
 	readonly userPrompt: string;
-	readonly scopeRef:   AnalyzeScopeRef;
+	readonly scopeRef: AnalyzeScopeRef;
 }
 
 interface PlanParams {
-	readonly runId:           string;
-	readonly intent:          ClassifiedIntent;
+	readonly runId: string;
+	readonly intent: ClassifiedIntent;
 	readonly parentTaskPath?: string;
-	readonly currentDepth?:   number;
-	readonly rootScope?:      AnalyzeScope;
+	readonly currentDepth?: number;
+	readonly rootScope?: AnalyzeScope;
 }
 
 interface RunStartParams {
-	readonly runId:      string;
+	readonly runId: string;
 	readonly userPrompt: string;
-	readonly scopeRef:   AnalyzeScopeRef;
+	readonly scopeRef: AnalyzeScopeRef;
+	readonly targetHint?: 'code' | 'data' | 'infra' | 'generic';
+	readonly scopeHint?: AnalyzeScope;
 }
 
 interface RunStatusParams {
@@ -895,9 +899,9 @@ interface RunPurgeParams {
 }
 
 interface TaskParams {
-	readonly runId:    string;
-	readonly intent:   ClassifiedIntent;
-	readonly task:     PlannedTask;
+	readonly runId: string;
+	readonly intent: ClassifiedIntent;
+	readonly task: PlannedTask;
 	readonly template: AnalyzeTaskTemplate;
 	readonly upstream: ReadonlyMap<string, unknown | null>;
 }
@@ -905,8 +909,8 @@ interface TaskParams {
 function parseClassificationParams(params: unknown): ClassificationParams {
 	const obj = requireObject(params, 'params');
 	return {
-		runId:      requireString(obj, 'runId'),
-		scopeRef:   parseScopeRef(obj['scopeRef']),
+		runId: requireString(obj, 'runId'),
+		scopeRef: parseScopeRef(obj['scopeRef']),
 		userPrompt: requireString(obj, 'userPrompt'),
 	};
 }
@@ -914,7 +918,7 @@ function parseClassificationParams(params: unknown): ClassificationParams {
 function parseRunParams(params: unknown): RunParams {
 	const obj = requireObject(params, 'params');
 	return {
-		runId:  requireString(obj, 'runId'),
+		runId: requireString(obj, 'runId'),
 		intent: parseIntent(obj['intent']),
 	};
 }
@@ -922,19 +926,40 @@ function parseRunParams(params: unknown): RunParams {
 function parseClassifyParams(params: unknown): ClassifyParams {
 	const obj = requireObject(params, 'params');
 	return {
-		runId:      requireString(obj, 'runId'),
+		runId: requireString(obj, 'runId'),
 		userPrompt: requireString(obj, 'userPrompt'),
-		scopeRef:   parseScopeRef(obj['scopeRef']),
+		scopeRef: parseScopeRef(obj['scopeRef']),
 	};
 }
 
 function parseRunStartParams(params: unknown): RunStartParams {
 	const obj = requireObject(params, 'params');
-	return {
-		runId:      requireString(obj, 'runId'),
+	const result: Record<string, unknown> = {
+		runId: requireString(obj, 'runId'),
 		userPrompt: requireString(obj, 'userPrompt'),
-		scopeRef:   parseScopeRef(obj['scopeRef']),
+		scopeRef: parseScopeRef(obj['scopeRef']),
 	};
+	if (obj['targetHint'] !== undefined) {
+		const th = obj['targetHint'];
+		const validTargets = ['code', 'data', 'infra', 'generic'];
+		if (typeof th !== 'string' || !validTargets.includes(th)) {
+			throw new TypeError(
+				`targetHint: must be one of ${validTargets.join(', ')}; got ${JSON.stringify(th)}`,
+			);
+		}
+		result['targetHint'] = th;
+	}
+	if (obj['scopeHint'] !== undefined) {
+		const sh = obj['scopeHint'];
+		const validScopes = ['XS', 'S', 'M', 'L', 'XL'];
+		if (typeof sh !== 'string' || !validScopes.includes(sh)) {
+			throw new TypeError(
+				`scopeHint: must be one of ${validScopes.join(', ')}; got ${JSON.stringify(sh)}`,
+			);
+		}
+		result['scopeHint'] = sh;
+	}
+	return result as unknown as RunStartParams;
 }
 
 function parseRunStatusParams(params: unknown): RunStatusParams {
@@ -961,7 +986,7 @@ function parseRunPurgeParams(params: unknown): RunPurgeParams {
 function parsePlanParams(params: unknown): PlanParams {
 	const obj = requireObject(params, 'params');
 	const result: Record<string, unknown> = {
-		runId:  requireString(obj, 'runId'),
+		runId: requireString(obj, 'runId'),
 		intent: parseIntent(obj['intent']),
 	};
 	if (typeof obj['parentTaskPath'] === 'string' && obj['parentTaskPath'].length > 0) {
@@ -987,9 +1012,9 @@ function parsePlanParams(params: unknown): PlanParams {
 function parseTaskParams(params: unknown): TaskParams {
 	const obj = requireObject(params, 'params');
 	return {
-		runId:    requireString(obj, 'runId'),
-		intent:   parseIntent(obj['intent']),
-		task:     parseTask(obj['task']),
+		runId: requireString(obj, 'runId'),
+		intent: parseIntent(obj['intent']),
+		task: parseTask(obj['task']),
 		template: parseTemplate(obj['template']),
 		upstream: parseUpstream(obj['upstream']),
 	};
@@ -1005,7 +1030,7 @@ function parseScopeRef(value: unknown): AnalyzeScopeRef {
 		);
 	}
 	return {
-		kind:  kind as AnalyzeScopeRef['kind'],
+		kind: kind as AnalyzeScopeRef['kind'],
 		value: requireString(obj, 'value'),
 	};
 }
@@ -1023,10 +1048,10 @@ function parseIntent(value: unknown): ClassifiedIntent {
 		throw new TypeError(`intent.scope: must be one of ${validScopes.join(', ')}; got '${scope}'`);
 	}
 	const result: Record<string, unknown> = {
-		target:    target as ClassifiedIntent['target'],
-		scope:     scope as ClassifiedIntent['scope'],
-		focused:   requireBoolean(obj, 'focused'),
-		scopeRef:  parseScopeRef(obj['scopeRef']),
+		target: target as ClassifiedIntent['target'],
+		scope: scope as ClassifiedIntent['scope'],
+		focused: requireBoolean(obj, 'focused'),
+		scopeRef: parseScopeRef(obj['scopeRef']),
 		reasoning: requireString(obj, 'reasoning'),
 	};
 	if (obj['focus'] !== undefined && obj['focus'] !== null) {
@@ -1050,11 +1075,11 @@ function parseTask(value: unknown): PlannedTask {
 		throw new TypeError(`task.kind: must be 'leaf' or 'planner'; got '${kind}'`);
 	}
 	const result: Record<string, unknown> = {
-		taskId:    requireString(obj, 'taskId'),
-		template:  requireString(obj, 'template'),
-		kind:      kind as 'leaf' | 'planner',
-		params:    params as Record<string, unknown>,
-		produces:  produces as string[],
+		taskId: requireString(obj, 'taskId'),
+		template: requireString(obj, 'template'),
+		kind: kind as 'leaf' | 'planner',
+		params: params as Record<string, unknown>,
+		produces: produces as string[],
 		rationale: requireString(obj, 'rationale'),
 	};
 	if (Array.isArray(obj['consumes'])) {
@@ -1082,10 +1107,10 @@ function parseTemplate(value: unknown): AnalyzeTaskTemplate {
 		throw new TypeError(`template.target: invalid '${target}'`);
 	}
 	return {
-		id:       requireString(obj, 'id'),
-		target:   target as AnalyzeTaskTemplate['target'],
-		family:   requireString(obj, 'family'),
-		kind:     kind as AnalyzeTaskTemplate['kind'],
+		id: requireString(obj, 'id'),
+		target: target as AnalyzeTaskTemplate['target'],
+		family: requireString(obj, 'family'),
+		kind: kind as AnalyzeTaskTemplate['kind'],
 		revision: requireString(obj, 'revision'),
 	};
 }

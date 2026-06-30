@@ -313,13 +313,32 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 		const runId = this._mintRunId();
 
+		// Parse leading slash command, e.g. `/code map this repo` or
+		// `/data:xl describe schemas`. Recognised forms:
+		//   /<target>          (target hint only; scope defaults to M)
+		//   /<target>:<scope>  (target + scope hint)
+		// Targets: code | data | infra | generic
+		// Scopes:  xs | s | m | l | xl   (lowercased on input; uppercased
+		// before the wire call to match AnalyzeScope enum values)
+		// The prefix is stripped from the prompt before persistence +
+		// wire so the user-message bubble shows the bare request.
+		const slash = this._parseSlashCommand(trimmed);
+		const promptText = slash !== undefined ? slash.rest : trimmed;
+		if (promptText.length === 0) {
+			this._onDidReceiveEvent.fire({
+				type: 'streamError',
+				message: 'Slash command needs a prompt after it.',
+			});
+			return;
+		}
+
 		// Persist the user prompt so it restores across IDE restarts
 		// alongside whatever assistant message follows.
 		this._appendMessage({
 			id: this._mintMessageId(),
 			runId,
 			role: 'user',
-			content: trimmed,
+			content: promptText,
 			timestamp: new Date().toISOString(),
 		});
 
@@ -330,7 +349,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._onDidReceiveEvent.fire({
 			type: 'userMessage',
 			runId,
-			content: trimmed,
+			content: promptText,
 			repo: scopePath,
 		});
 
@@ -339,8 +358,10 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		// observes the wire frames.
 		const handle = this.daemonService.stream('analyze.run.start', {
 			runId,
-			userPrompt: trimmed,
+			userPrompt: promptText,
 			scopeRef: { kind: 'workspace', value: scopePath },
+			...(slash?.target !== undefined ? { targetHint: slash.target } : {}),
+			...(slash?.scope !== undefined ? { scopeHint: slash.scope } : {}),
 		});
 		this._activeHandle = handle;
 
@@ -492,6 +513,32 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 	private _mintMessageId(): string {
 		return `msg-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0')}`;
+	}
+
+	/**
+	 * Parse leading slash command from a chat prompt. Recognised forms:
+	 *
+	 *   /code           map the architecture
+	 *   /data           describe the schemas
+	 *   /infra:xs       inventory k8s manifests
+	 *   /generic:l      cross-domain audit
+	 *
+	 * Target is required; scope optional (defaults to 'M' daemon-side).
+	 * Both case-insensitive on input; mapped to canonical enum values
+	 * before the wire call.
+	 *
+	 * Returns undefined when the input doesn't start with a recognised
+	 * `/<target>` prefix. Returns { target, scope?, rest } when it does.
+	 */
+	private _parseSlashCommand(input: string): { target: string; scope?: string; rest: string } | undefined {
+		const m = input.match(/^\/(code|data|infra|generic)(?::(xs|s|m|l|xl))?(?:\s+(.+))?$/i);
+		if (m === null) { return undefined; }
+		const target = m[1]!.toLowerCase();
+		const scope = m[2] !== undefined ? m[2].toUpperCase() : undefined;
+		const rest = (m[3] ?? '').trim();
+		const out: { target: string; scope?: string; rest: string } = { target, rest };
+		if (scope !== undefined) { out.scope = scope; }
+		return out;
 	}
 
 	private _mintRunId(): string {
