@@ -91,6 +91,10 @@ export async function runAggregator(args: RunAggregatorArgs): Promise<AggregateR
 			{
 				maxAttempts:     cfg.shaper.structuredOutputRetries,
 				disableThinking: true,
+				// Final report can be multi-page markdown across summary +
+				// findings[] entries. Lean on the same shaper budget so
+				// long reports don't get truncated mid-finding.
+				maxTokens:       cfg.shaper.ollamaNumPredict,
 			},
 		);
 	} catch (err) {

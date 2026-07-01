@@ -191,6 +191,10 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 				{
 					maxAttempts:     cfg.shaper.structuredOutputRetries,
 					disableThinking: true,
+					// Plans for L/XL scopes routinely produce 30-80 tasks
+					// each with consumes/produces arrays + a rationale; 8K
+					// is too tight. Use the same shaper budget.
+					maxTokens:       cfg.shaper.ollamaNumPredict,
 				},
 			);
 		} catch (err) {

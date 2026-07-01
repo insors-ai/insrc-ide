@@ -232,6 +232,7 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 		provider,
 		finalMessages,
 		cfg.shaper.structuredOutputRetries,
+		cfg.shaper.ollamaNumPredict,
 	);
 
 	// (7) Stamp meta + validate. `repoLastIndexedAt` carries the registry
@@ -512,9 +513,10 @@ async function runToolLoop(
 }
 
 async function runFinalStructuredEmit(
-	provider:               LLMProvider,
-	messages:               LLMMessage[],
+	provider:                LLMProvider,
+	messages:                LLMMessage[],
 	structuredOutputRetries: number,
+	maxOutputTokens:         number,
 ): Promise<AnalyzeContextBundle> {
 	// Per feedback_prompt_structure: structural reference goes trailing.
 	// The final user turn carries the explicit schema reminder so the
@@ -566,6 +568,12 @@ async function runFinalStructuredEmit(
 				// Harmless on other model families (the provider's wire
 				// layer applies it conditionally).
 				disableThinking: true,
+				// Output-token budget. The shaper bundle has 7 fields each
+				// of which can carry multi-section markdown; 8K is too
+				// small for code-target M/L/XL scopes (truncates as
+				// "Unterminated string in JSON"). Configured via
+				// analyze.shaper.ollamaNumPredict (default 20480).
+				maxTokens:       maxOutputTokens,
 			},
 		);
 		return raw;

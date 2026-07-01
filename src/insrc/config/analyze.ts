@@ -34,6 +34,22 @@ export interface AnalyzeShaperConfig {
 	readonly maxToolTurns:            number;
 	readonly structuredOutputRetries: number;
 	readonly ollamaNumCtx:            number;
+	/**
+	 * Max output tokens (num_predict) for the shaper's structured-output
+	 * call. The Ollama provider's default is 8192, which the code +
+	 * generic shapers routinely exceed -- they emit a multi-section
+	 * markdown bundle (system / focus / summary / structure / surface /
+	 * artefacts / upstream) that easily exceeds 8K tokens for non-trivial
+	 * scopes. Truncation surfaces as
+	 *   "Unterminated string in JSON at position N"
+	 * with retries exhausted -> shaper-schema-unrecoverable.
+	 *
+	 * 20480 gives the model ~2.5x headroom over 8192 without eating into
+	 * the prompt half of ollamaNumCtx (32768 total - prompt budget).
+	 * Bump higher via config.json `models.analyze.shaper.ollamaNumPredict`
+	 * for XL-scope runs on large workspaces.
+	 */
+	readonly ollamaNumPredict:        number;
 }
 
 /**
@@ -70,6 +86,7 @@ const DEFAULT_SHAPER: AnalyzeShaperConfig = {
 	maxToolTurns:            40,
 	structuredOutputRetries: 3,
 	ollamaNumCtx:            32_768,
+	ollamaNumPredict:        20_480,
 };
 
 /**
@@ -154,6 +171,10 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 					typeof shaperObj['ollamaNumCtx'] === 'number'
 						? (shaperObj['ollamaNumCtx'] as number)
 						: DEFAULT_SHAPER.ollamaNumCtx,
+				ollamaNumPredict:
+					typeof shaperObj['ollamaNumPredict'] === 'number'
+						? (shaperObj['ollamaNumPredict'] as number)
+						: DEFAULT_SHAPER.ollamaNumPredict,
 			},
 			maxPlanDepth: {
 				XS: typeof depthObj['XS'] === 'number' ? (depthObj['XS'] as number) : DEFAULT_MAX_PLAN_DEPTH.XS,
