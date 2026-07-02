@@ -31,11 +31,11 @@ import { localize } from '../../../../../nls.js';
  *  the daemon's raw progress-frame field names. */
 export interface LiveStepsEvent {
 	/** From the daemon's progress frame -- 'classify' / 'plan' /
-	 *  'execute' / 'task-N/M' / 'task-<taskId>'. */
+	 *  'execute' / 'task-N/M' / 'task-<taskId>' / 'tool-<name>'. */
 	readonly step: string;
 	/** From the frame -- 'started' / 'completed' / 'ok' / 'failed' /
 	 *  'skipped-dependency-unavailable' / 'accepted' / 'substep-<id>' /
-	 *  etc. */
+	 *  'token-<substep>' / etc. */
 	readonly status: string;
 	readonly taskId?: string;
 	readonly template?: string;
@@ -49,6 +49,21 @@ export interface LiveStepsEvent {
 	/** Human-readable detail for stage-substep events, appended to the
 	 *  parent row's status text. */
 	readonly detail?: string;
+	/**
+	 * Trace-frame discriminator. Present on:
+	 *   - 'shaper-tool-call' / 'shaper-tool-response' -- render as a
+	 *     nested sub-row under the parent stage row.
+	 *   - 'llm-token' -- render as a live-typing preview under the
+	 *     parent stage/substep row (does NOT create its own row).
+	 *   Undefined on plain stage/task events.
+	 */
+	readonly trace?: string;
+	/** Pipeline stage for a trace frame ('classify' | 'plan' | 'execute'). */
+	readonly stage?: string;
+	/** Tool name for shaper-tool-call / shaper-tool-response frames. */
+	readonly tool?: string;
+	/** Live-typing preview tail (cap ~240 chars) for llm-token frames. */
+	readonly preview?: string;
 }
 
 type RowState = 'idle' | 'in-progress' | 'ok' | 'failed' | 'skipped';
@@ -59,6 +74,12 @@ interface RowHandle {
 	readonly titleEl: HTMLElement;
 	readonly statusEl: HTMLElement;
 	readonly key: string;
+	/**
+	 * Optional live-typing preview line rendered below the status.
+	 * Lazily inserted on first llm-token frame that targets this row.
+	 * Its content is truncated to the last ~240 chars of the stream.
+	 */
+	previewEl?: HTMLElement;
 }
 
 export class LiveStepsWidget {
@@ -80,11 +101,34 @@ export class LiveStepsWidget {
 	}
 
 	update(event: LiveStepsEvent): void {
+		// llm-token frames do NOT create a row -- they update the
+		// live-typing preview under the closest existing stage/substep
+		// row (matched via `stage`). If no matching row exists yet we
+		// drop the frame silently; the next stage-substep event will
+		// create the row and the following token frame will attach.
+		if (event.trace === 'llm-token') {
+			const parentKey = event.stage !== undefined ? `stage:${event.stage}` : undefined;
+			const parentRow = parentKey !== undefined ? this._rows.get(parentKey) : undefined;
+			if (parentRow !== undefined && event.preview !== undefined) {
+				this._updatePreview(parentRow, event.preview);
+			}
+			return;
+		}
 		const key = this._keyFor(event);
 		const row = this._rows.get(key) ?? this._createRow(key, event);
 		this._applyEvent(row, event);
 		// Auto-scroll the body so the newest step stays visible.
 		this._bodyEl.scrollTop = this._bodyEl.scrollHeight;
+	}
+
+	private _updatePreview(row: RowHandle, preview: string): void {
+		if (row.previewEl === undefined) {
+			row.previewEl = dom.append(row.element, dom.$('div.insrc-chat-live-step-preview'));
+		}
+		// Preserve whitespace + wrap long lines; the preview is one
+		// visual line but its content might contain newlines from the
+		// LLM stream's raw JSON.
+		row.previewEl.textContent = preview;
 	}
 
 	/**
@@ -175,6 +219,12 @@ export class LiveStepsWidget {
 	// -------------------------------------------------------------------------
 
 	private _keyFor(event: LiveStepsEvent): string {
+		// Shaper tool-call trace: key on (stage, tool) so the call + its
+		// response land on the same sub-row. Parent-task-path 'shaper-tools'
+		// segregates these from real executor tasks.
+		if (event.trace === 'shaper-tool-call' || event.trace === 'shaper-tool-response') {
+			return `shaper-tool:${event.stage ?? 'unknown'}:${event.tool ?? event.step}`;
+		}
 		if (event.taskId !== undefined) {
 			return `task:${event.parentTaskPath ?? ''}:${event.taskId}`;
 		}
@@ -182,6 +232,9 @@ export class LiveStepsWidget {
 	}
 
 	private _titleFor(event: LiveStepsEvent): string {
+		if (event.trace === 'shaper-tool-call' || event.trace === 'shaper-tool-response') {
+			return `tool ${event.tool ?? '?'}`;
+		}
 		if (event.taskId !== undefined) {
 			const prefix = event.parentTaskPath !== undefined
 				? `${event.parentTaskPath}.${event.taskId}`
@@ -196,6 +249,19 @@ export class LiveStepsWidget {
 	}
 
 	private _statusTextFor(event: LiveStepsEvent): string {
+		// Tool-trace sub-rows show the args/output preview in the
+		// status column; running state clears it once terminal.
+		if (event.trace === 'shaper-tool-call') {
+			return event.detail !== undefined && event.detail.length > 0
+				? event.detail
+				: localize('chatLiveStepRunning', 'running…');
+		}
+		if (event.trace === 'shaper-tool-response') {
+			if (event.detail !== undefined && event.detail.length > 0) {
+				return event.detail;
+			}
+			return event.status === 'ok' ? '' : event.status;
+		}
 		if (event.taskId !== undefined) {
 			if (event.status === 'ok' || event.status === 'failed' || event.status === 'skipped-dependency-unavailable') {
 				return '';

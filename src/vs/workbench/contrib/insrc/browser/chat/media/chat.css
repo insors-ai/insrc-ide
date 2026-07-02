@@ -269,8 +269,26 @@
 .insrc-chat-live-step {
 	display: flex;
 	align-items: baseline;
+	flex-wrap: wrap;
 	gap: 6px;
 	line-height: 1.6;
+}
+
+/* Live-typing preview line for llm-token trace frames. Flex-wrap
+ * pushes it to a new flex line via flex-basis:100%. Italic + dimmed
+ * so it's visually distinct from the stable row content. */
+.insrc-chat-live-step-preview {
+	flex: 0 0 100%;
+	padding-left: 20px;
+	margin-top: 2px;
+	opacity: 0.55;
+	font-size: 11px;
+	font-style: italic;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-height: 3.2em;
+	word-break: break-all;
 }
 
 .insrc-chat-live-step .codicon {

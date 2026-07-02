@@ -182,7 +182,28 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 		? { runId: opts.runId, parentTaskPath }
 		: { runId: opts.runId };
 
+	// Live-preview state for the planner's structured emit. Mirrors
+	// the shaper's throttling in analyze/context/driver.ts: emit
+	// snapshots when >=250ms have passed OR >=400 chars are new,
+	// preview cap 240 chars. Reset per attempt so the widget's line
+	// tracks the current attempt, not the historical accumulation.
+	const onLlmToken = opts.onLlmToken;
+	let acc = '';
+	let lastEmit = 0;
+	let lastEmitLen = 0;
+	const onStreamToken = onLlmToken === undefined ? undefined : (delta: string) => {
+		acc += delta;
+		const now = Date.now();
+		const bytesSince = acc.length - lastEmitLen;
+		if (now - lastEmit >= 250 || bytesSince >= 400) {
+			lastEmit = now;
+			lastEmitLen = acc.length;
+			onLlmToken(acc.length > 240 ? acc.slice(-240) : acc);
+		}
+	};
+
 	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		acc = ''; lastEmit = 0; lastEmitLen = 0;  // reset preview per attempt
 		let raw: PlanTask;
 		try {
 			raw = await provider.completeStructured<PlanTask>(
@@ -195,6 +216,7 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 					// each with consumes/produces arrays + a rationale; 8K
 					// is too tight. Use the same shaper budget.
 					maxTokens:       cfg.shaper.ollamaNumPredict,
+					...(onStreamToken !== undefined ? { onToken: onStreamToken } : {}),
 				},
 			);
 		} catch (err) {

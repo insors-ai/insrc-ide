@@ -268,6 +268,23 @@ export interface StructuredCompletionOpts {
    * cloud providers ignore the flag.
    */
   readonly disableThinking?: boolean | undefined;
+  /**
+   * Optional token-level callback for the structured-output stream.
+   * Currently only Ollama streams structured-output responses; when
+   * set, the provider streams the response chunk-by-chunk and invokes
+   * this callback for each content delta. Cloud providers ignore
+   * this until they migrate to streaming structured-output.
+   *
+   * Wired for two use cases:
+   *   - UI: bridge live token deltas to the chat panel so the
+   *     planner / shaper progress row updates as tokens arrive
+   *     instead of sitting silent for minutes (ISSUES.md I-002).
+   *   - Truncation detection: the provider inspects the terminal
+   *     stream chunk's `done_reason` field. When Ollama reports
+   *     `length` (num_predict hit), the provider throws a
+   *     `response-truncated` error the retry loop can dispatch on.
+   */
+  readonly onToken?: ((token: string) => void) | undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -65,6 +65,22 @@ export type DaemonStreamMessage =
 		/** Human-readable detail line for stage-substep events, e.g.
 		 *  'building code/M run bundle'. */
 		readonly detail?: string;
+		/**
+		 * Trace-frame discriminator. Present on the sub-events the
+		 * shaper's tool loop + streaming structured emit produce --
+		 * 'shaper-tool-call' | 'shaper-tool-response' | 'llm-token'.
+		 * Absent on stage-level frames. ISSUES.md I-002.
+		 */
+		readonly trace?: string;
+		/** Pipeline stage the trace belongs to
+		 *  ('classify' | 'plan' | 'execute'). Present only on
+		 *  trace frames. */
+		readonly stage?: string;
+		/** Tool name for shaper-tool-call / shaper-tool-response. */
+		readonly tool?: string;
+		/** Live-typing preview of the accumulated LLM stream
+		 *  (cap ~240 chars). Present only on llm-token frames. */
+		readonly preview?: string;
 	}
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }

@@ -183,6 +183,10 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 					parentTaskPath?: string;
 					substep?: string;
 					detail?: string;
+					trace?: string;
+					stage?: string;
+					tool?: string;
+					preview?: string;
 				} = {
 					type: 'progress',
 					step: String(data?.['step'] ?? data?.['message'] ?? ''),
@@ -195,6 +199,10 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 				if (typeof data?.['parentTaskPath'] === 'string') { out.parentTaskPath = data['parentTaskPath'] as string; }
 				if (typeof data?.['substep'] === 'string') { out.substep = data['substep'] as string; }
 				if (typeof data?.['detail'] === 'string') { out.detail = data['detail'] as string; }
+				if (typeof data?.['trace'] === 'string') { out.trace = data['trace'] as string; }
+				if (typeof data?.['stage'] === 'string') { out.stage = data['stage'] as string; }
+				if (typeof data?.['tool'] === 'string') { out.tool = data['tool'] as string; }
+				if (typeof data?.['preview'] === 'string') { out.preview = data['preview'] as string; }
 				return out;
 			}
 			case 'liveStep':

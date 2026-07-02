@@ -625,6 +625,41 @@ function eventToProgressData(event: AnalyzeRunEvent): Record<string, unknown> {
 				taskId: event.taskId,
 				...(event.parentTaskPath !== undefined ? { parentTaskPath: event.parentTaskPath } : {}),
 			};
+		case 'shaper-tool-call':
+			// Nest under the parent stage row via parentTaskPath so the
+			// LiveStepsWidget indents these as sub-rows. Use a synthetic
+			// path 'shaper-tools' since real tasks haven't started yet
+			// during the shaper phase.
+			return {
+				step: `tool-${event.tool}`,
+				status: 'started',
+				trace: 'shaper-tool-call',
+				stage: event.stage,
+				tool: event.tool,
+				parentTaskPath: 'shaper-tools',
+				...(event.argsPreview !== undefined ? { detail: event.argsPreview } : {}),
+			};
+		case 'shaper-tool-response':
+			return {
+				step: `tool-${event.tool}`,
+				status: event.ok ? 'ok' : 'failed',
+				trace: 'shaper-tool-response',
+				stage: event.stage,
+				tool: event.tool,
+				parentTaskPath: 'shaper-tools',
+				...(event.notePreview !== undefined ? { detail: event.notePreview } : {}),
+			};
+		case 'llm-token':
+			// Throttled streaming preview. Non-terminal: the widget
+			// updates a preview line under the parent substep row's
+			// status but keeps the row's icon in in-progress state.
+			return {
+				step: event.stage,
+				status: `token-${event.substep}`,
+				substep: event.substep,
+				preview: event.preview,
+				trace: 'llm-token',
+			};
 		case 'done':
 			// Not emitted as a progress frame -- handler emits analyze.result
 			// from the run result directly.

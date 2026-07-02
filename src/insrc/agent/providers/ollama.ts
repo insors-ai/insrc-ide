@@ -487,12 +487,19 @@ export class OllamaProvider implements LLMProvider {
           ? [...apiMessages, { role: 'user' as const, content: extraSystemNote }]
           : apiMessages;
         try {
+          // Stream instead of collect-and-parse so we can (a) bridge
+          // token deltas to the UI's progress row via opts.onToken and
+          // (b) inspect the terminal chunk's done_reason -- when it's
+          // 'length' the num_predict cap cut the model off mid-JSON
+          // and we surface a distinct 'response-truncated' error the
+          // retry-loop feedback names explicitly (ISSUES.md I-003).
           const response = await this.client.chat({
             model:    this.model,
             messages: msgs,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             format:   schema as any,
             keep_alive: '24h',
+            stream:   true,
             options: {
               num_ctx: this.numCtx,
               num_predict: opts?.maxTokens ?? 8_192,
@@ -500,9 +507,41 @@ export class OllamaProvider implements LLMProvider {
             },
             ...(disableThinking ? { think: false } : {}),
           });
-          const text = response.message.content ?? '';
+
+          let text = '';
+          let doneReason: string | undefined;
+          for await (const chunk of response) {
+            const delta = chunk.message?.content ?? '';
+            if (delta.length > 0) {
+              text += delta;
+              opts?.onToken?.(delta);
+            }
+            if (chunk.done === true) {
+              // ollama-js exposes `done_reason` on the terminal chunk
+              // once the server has flushed the final ` \"done\": true `
+              // frame. Values: 'stop' (normal), 'length' (num_predict
+              // exhausted), 'load' (model warm-up preamble -- ignore).
+              const rawReason = (chunk as unknown as { done_reason?: string }).done_reason;
+              if (typeof rawReason === 'string' && rawReason !== 'load') {
+                doneReason = rawReason;
+              }
+            }
+          }
           if (text.length === 0) {
             throw new Error('ollama.completeStructured: empty response content');
+          }
+          if (doneReason === 'length') {
+            // num_predict cap hit mid-response. The JSON is guaranteed
+            // to be malformed (unterminated string / missing closing
+            // brace / etc.). Surface a distinct error the structured-
+            // retry loop's feedback note quotes verbatim so the model
+            // knows to keep the next response shorter rather than
+            // retrying identical output.
+            throw new Error(
+              `ollama.completeStructured: response-truncated: `
+              + `num_predict cap (${opts?.maxTokens ?? 8_192} tokens) hit before the model closed the JSON. `
+              + `Emit a more concise response; keep long string fields brief.`,
+            );
           }
           const stripped = stripJsonFence(text);
           try {

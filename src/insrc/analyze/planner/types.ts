@@ -62,6 +62,16 @@ export interface PlanBuilderOpts {
 	readonly runId: string;
 	/** Force-skip cache reads. Tests only. */
 	readonly bypassCache?: boolean;
+	/**
+	 * Optional token-level stream callback fired by the planner's
+	 * structured-output call. Wired by the orchestrator so the chat
+	 * panel's LiveStepsWidget shows a live-typing preview under the
+	 * "Plan: composing task list" row instead of sitting silent for
+	 * the full planner LLM window (ISSUES.md I-002). Called with the
+	 * throttled preview tail (~240 chars); the widget renders it as
+	 * an italic subline under the parent row.
+	 */
+	readonly onLlmToken?: (preview: string) => void;
 }
 
 /**

@@ -125,6 +125,38 @@ export type StructuredCall = (extraSystemNote: string | undefined) => Promise<un
 
 export type StructuredValidator<T> = (raw: unknown) => ValidationResult<T>;
 
+/**
+ * Build the retry-feedback note for attempts 2..N. Historically this
+ * said "return valid JSON conforming to the schema" -- which qwen3.6
+ * interprets as "be more explicit about what you're producing" and it
+ * fence-wraps the response ` ```json ... ``` ` on the retry (ISSUES.md
+ * I-003). The reworded note names the two failure modes we've actually
+ * seen -- markdown fence wrappers and mid-stream truncation -- so the
+ * model knows what NOT to do rather than only what to do.
+ */
+function buildRetryNote(errors: readonly string[]): string {
+	const errorList = errors.length > 0
+		? `\n  - ${errors.join('\n  - ')}\n`
+		: ' (no structured error captured)';
+	return (
+		'Your previous response could not be parsed.' + errorList +
+		'\n' +
+		'Retry with a raw JSON object that conforms to the schema. Rules:\n' +
+		'  - Emit the JSON object directly. Do NOT wrap it in a markdown\n' +
+		'    code fence (no ```json ..., no ``` ...). The response must\n' +
+		'    start with `{` and end with `}`.\n' +
+		'  - Do NOT prefix the JSON with explanatory prose (no "Here is\n' +
+		'    the JSON:", no "Sure, ..."). The very first character of\n' +
+		'    your response must be `{`.\n' +
+		'  - Do NOT abbreviate or elide fields with placeholders like\n' +
+		'    "..." -- emit every required field in full.\n' +
+		'  - Every string value must be complete + properly terminated.\n' +
+		'    If a field is at risk of being long, keep it concise rather\n' +
+		'    than truncating mid-string.\n' +
+		'  - Fix every schema-validation error listed above.'
+	);
+}
+
 
 /**
  * Issue the provider call, validate. On validation failure, append
@@ -159,7 +191,7 @@ export async function withStructuredRetry<T>(
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 		const note = attempt === 1
 			? undefined
-			: `Your previous response failed schema validation:\n  - ${lastErrors.join('\n  - ')}\n\nReturn valid JSON conforming to the schema. The errors above must all be fixed in your next response.`;
+			: buildRetryNote(lastErrors);
 
 		let raw: unknown;
 		try {

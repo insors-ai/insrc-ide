@@ -29,7 +29,7 @@
 
 import { getLogger } from '../../shared/logger.js';
 
-import { classify } from '../classifier/index.js';
+import { classify, pickScope } from '../classifier/index.js';
 import {
 	ClassifierLlmUnavailableError,
 	ClassifierPromptMissingError,
@@ -44,6 +44,7 @@ import {
 	ShaperToolLoopExhausted,
 } from '../context/driver.js';
 import { ScopeNotIndexedError } from '../context/invariants.js';
+import type { ShaperTraceEvent } from '../context/types.js';
 import {
 	getTemplatesForTarget,
 	MaxPlanDepthExceededError,
@@ -65,7 +66,10 @@ import type {
 	RunRecord,
 	RunStage,
 } from './types.js';
-import type { ClassifiedIntent } from '../../shared/analyze-types.js';
+import type {
+	AnalyzeScope,
+	ClassifiedIntent,
+} from '../../shared/analyze-types.js';
 
 const log = getLogger('analyze:orchestrator:driver');
 
@@ -166,22 +170,63 @@ export async function runAnalyze(
 
 	let intent: ClassifiedIntent;
 	if (args.targetHint !== undefined) {
-		// Skip the classifier entirely -- caller (chat panel slash
-		// command) has explicitly picked the target. Synthesise a
-		// ClassifiedIntent with the same shape the classifier would
-		// have produced. Saves ~3 min of LLM time + dodges
-		// classifier-flakiness on edge-case prompts.
-		const scope = args.scopeHint ?? 'M';
+		// Skip the full classifier -- caller (chat panel slash command)
+		// has explicitly picked the target. Saves the ~3-min classifier
+		// round-trip. But the classifier ALSO picks the scope band; if
+		// the slash command didn't append :xs|:s|:m|:l|:xl we run a
+		// cheap scope-only picker (~30 s) instead of hardcoding 'M'
+		// (ISSUES.md I-001). The picker sees a compact workspace-signals
+		// block + the user prompt and returns a scope enum + reasoning.
+		// Falls back to 'M' if the picker throws.
+		let pickedScope: AnalyzeScope;
+		let pickReasoning: string;
+		if (args.scopeHint !== undefined) {
+			pickedScope = args.scopeHint;
+			pickReasoning = 'scope hinted via slash command suffix';
+		} else {
+			emit({
+				type: 'stage-substep',
+				stage: 'classify',
+				substep: 'scope-picker',
+				detail: 'picking scope band',
+			});
+			try {
+				const picked = await pickScope({
+					userPrompt,
+					target:   args.targetHint,
+					scopeRef: initialScopeRef,
+					runId,
+				});
+				pickedScope   = picked.scope;
+				pickReasoning = picked.reasoning;
+			} catch (err) {
+				// Preserve the slash-command promise: don't fail the whole
+				// run just because the picker had a hiccup. Fall back to
+				// M with a note in the reasoning so downstream stages
+				// (and the run.json) can see why.
+				pickedScope   = 'M';
+				pickReasoning = `scope-picker failed (${(err as Error).message}); ` +
+					'falling back to default scope=M';
+				log.warn(
+					{ runId, err: (err as Error).message },
+					'runAnalyze: scope-picker failed; falling back to M',
+				);
+			}
+		}
 		intent = {
 			target: args.targetHint,
-			scope,
+			scope:  pickedScope,
 			focused: false,
 			scopeRef: initialScopeRef,
-			reasoning: `target hinted via slash command (classifier skipped); ` +
-				`scope=${scope}${args.scopeHint === undefined ? ' (default)' : ' (hinted)'}`,
+			reasoning: `target hinted via slash command (classifier skipped); ${pickReasoning}`,
 		};
 		log.info(
-			{ runId, target: intent.target, scope: intent.scope, source: 'targetHint' },
+			{
+				runId,
+				target: intent.target,
+				scope:  intent.scope,
+				source: args.scopeHint !== undefined ? 'scopeHint' : 'scope-picker',
+			},
 			'runAnalyze: classifier skipped via targetHint',
 		);
 	} else {
@@ -223,7 +268,13 @@ export async function runAnalyze(
 	let contextBundle;
 	try {
 		const shaper = shaperFor('run', intent.target);
-		contextBundle = await shaper.buildRunBundle({ intent }, { runId });
+		contextBundle = await shaper.buildRunBundle(
+			{ intent },
+			{
+				runId,
+				onTrace: (traceEvent) => forwardShaperTrace('plan', traceEvent, emit),
+			},
+		);
 	} catch (err) {
 		const failure = classifyShaperError(err);
 		record = patch(record, { stage: 'plan', status: 'failed', error: failure });
@@ -246,7 +297,15 @@ export async function runAnalyze(
 				contextBundle,
 				catalog: getTemplatesForTarget(intent.target),
 			},
-			opts: { runId },
+			opts: {
+				runId,
+				onLlmToken: (preview) => emit({
+					type:    'llm-token',
+					stage:   'plan',
+					substep: 'planner',
+					preview,
+				}),
+			},
 		});
 	} catch (err) {
 		const failure = classifyPlannerError(err);
@@ -441,6 +500,49 @@ function failResult(
 
 function nowIso(): string {
 	return new Date().toISOString();
+}
+
+/**
+ * Translate an in-process `ShaperTraceEvent` from the shaper's tool
+ * loop + final structured emit into the wire-transported
+ * `AnalyzeRunEvent` variant, then dispatch via the run's emit fn.
+ * `stage` names which pipeline stage the trace belongs to
+ * ('classify' for buildClassificationBundle, 'plan' for
+ * buildRunBundle, 'execute' for task-level buildTaskBundle calls).
+ * ISSUES.md I-002.
+ */
+function forwardShaperTrace(
+	stage: 'classify' | 'plan' | 'execute',
+	trace: ShaperTraceEvent,
+	emit:  (event: AnalyzeRunEvent) => void,
+): void {
+	switch (trace.type) {
+		case 'tool-call':
+			emit({
+				type:  'shaper-tool-call',
+				stage,
+				tool:  trace.tool,
+				...(trace.argsPreview !== undefined ? { argsPreview: trace.argsPreview } : {}),
+			});
+			return;
+		case 'tool-response':
+			emit({
+				type:  'shaper-tool-response',
+				stage,
+				tool:  trace.tool,
+				ok:    trace.ok,
+				...(trace.notePreview !== undefined ? { notePreview: trace.notePreview } : {}),
+			});
+			return;
+		case 'llm-token':
+			emit({
+				type:    'llm-token',
+				stage,
+				substep: 'bundle-shaper',
+				preview: trace.preview,
+			});
+			return;
+	}
 }
 
 // ---------------------------------------------------------------------------

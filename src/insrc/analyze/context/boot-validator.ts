@@ -25,7 +25,10 @@ import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CLASSIFY_PROMPT_PATH } from '../classifier/index.js';
+import {
+	CLASSIFY_PROMPT_PATH,
+	SCOPE_PICKER_PROMPT_PATH,
+} from '../classifier/index.js';
 import { PLANNER_PROMPT_PATH } from '../planner/index.js';
 import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
 import { DATA_AGGREGATE_PROMPT_PATH    } from '../runtimes/data/index.js';
@@ -98,6 +101,7 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 		out.push({ componentId: shaperId, relPath });
 	}
 	out.push({ componentId: 'classifier',        relPath: CLASSIFY_PROMPT_PATH });
+	out.push({ componentId: 'scope-picker',      relPath: SCOPE_PICKER_PROMPT_PATH });
 	out.push({ componentId: 'planner',           relPath: PLANNER_PROMPT_PATH });
 	out.push({ componentId: 'code.aggregate.report',    relPath: CODE_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });

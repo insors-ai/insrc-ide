@@ -142,6 +142,47 @@ export type AnalyzeRunEvent =
 		readonly detail?: string;
 	}
 	| {
+		/**
+		 * The shaper's tool loop invoked a read-only tool. Fires
+		 * BEFORE the tool executes so the UI shows the pending call
+		 * with a spinner. Paired with `shaper-tool-response` on
+		 * completion. `stage` is 'plan' for buildRunBundle,
+		 * 'classify' for buildClassificationBundle, 'execute' for
+		 * task-level shaper calls under the executor.
+		 */
+		readonly type: 'shaper-tool-call';
+		readonly stage: 'classify' | 'plan' | 'execute';
+		readonly tool: string;
+		readonly argsPreview?: string;
+	}
+	| {
+		/**
+		 * Terminates a `shaper-tool-call` pair. `ok:false` when the
+		 * tool signalled failure (bad args, missing file, permission
+		 * denied). The UI flips the row's icon to pass / error and
+		 * appends a short output preview.
+		 */
+		readonly type: 'shaper-tool-response';
+		readonly stage: 'classify' | 'plan' | 'execute';
+		readonly tool: string;
+		readonly ok: boolean;
+		readonly notePreview?: string;
+	}
+	| {
+		/**
+		 * Throttled streaming preview of an LLM structured-output
+		 * response as it arrives (currently just the shaper's final
+		 * emit; planner integration is a follow-up). Fires at most
+		 * every ~250ms or every ~400 new chars. `preview` carries
+		 * the accumulated tail (cap ~240 chars) for the UI to render
+		 * as a live-typing line under the parent stage row.
+		 */
+		readonly type: 'llm-token';
+		readonly stage: 'classify' | 'plan' | 'execute';
+		readonly substep: string;
+		readonly preview: string;
+	}
+	| {
 		readonly type: 'plan-attempt';
 		readonly attempt: number;
 		readonly accepted: boolean;

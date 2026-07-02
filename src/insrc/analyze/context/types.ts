@@ -98,7 +98,51 @@ export interface ShapeOpts {
 	readonly runId: string;
 	/** Force-rebuild even if cache hits. Tests only -- no CLI surface. */
 	readonly bypassCache?: boolean;
+	/**
+	 * Optional trace callback fired inside the shaper's tool loop +
+	 * final structured emit. Wired up-stack by the orchestrator so the
+	 * chat panel can render per-tool-call sub-rows + a streaming
+	 * planner-token preview under the plan-stage row (ISSUES.md I-002).
+	 *
+	 * The shaper doesn't care what the callback does with the event --
+	 * it just fires; the orchestrator translates to `AnalyzeRunEvent`
+	 * with the correct stage tag. If unset, the shaper runs silently
+	 * (in-process test callers don't need to see the trace).
+	 */
+	readonly onTrace?: (event: ShaperTraceEvent) => void;
 }
+
+/**
+ * Fine-grained trace events the shaper emits while its tool loop +
+ * final structured emit run. Kept small + local to the context/
+ * module -- the orchestrator maps to `AnalyzeRunEvent` for wire-level
+ * transport.
+ */
+export type ShaperTraceEvent =
+	| {
+		readonly type: 'tool-call';
+		readonly tool: string;
+		/** Truncated + JSON-serialised call args, cap ~200 chars. */
+		readonly argsPreview?: string;
+	}
+	| {
+		readonly type: 'tool-response';
+		readonly tool: string;
+		readonly ok: boolean;
+		/** Truncated output preview, cap ~200 chars. */
+		readonly notePreview?: string;
+	}
+	| {
+		/**
+		 * Fires when the shaper's final structured-emit call is
+		 * streaming tokens. The orchestrator throttles these before
+		 * forwarding on the wire so IPC isn't flooded. `preview`
+		 * carries the tail of the accumulated response for the UI to
+		 * render as a live-typing line.
+		 */
+		readonly type: 'llm-token';
+		readonly preview: string;
+	};
 
 /**
  * Pre-classification input. Target-agnostic; carries the raw user

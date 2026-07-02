@@ -88,6 +88,7 @@ import type {
 	ShapeOpts,
 	ShaperId,
 	ShaperMode,
+	ShaperTraceEvent,
 	TaskShapeInput,
 } from './types.js';
 
@@ -221,11 +222,13 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 	});
 
 	// (6) Run the tool-loop + final structured emit.
+	const onTrace = opts.onTrace;
 	const { messages: finalMessages, toolCallCount } = await runToolLoop(
 		provider,
 		messages,
 		toolDeps,
 		cfg.shaper.maxToolTurns,
+		onTrace,
 	);
 
 	const rawBundle = await runFinalStructuredEmit(
@@ -233,6 +236,7 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 		finalMessages,
 		cfg.shaper.structuredOutputRetries,
 		cfg.shaper.ollamaNumPredict,
+		onTrace,
 	);
 
 	// (7) Stamp meta + validate. `repoLastIndexedAt` carries the registry
@@ -441,6 +445,7 @@ async function runToolLoop(
 	messages:     LLMMessage[],
 	deps:         ToolDeps,
 	maxToolTurns: number,
+	onTrace?:     ((event: ShaperTraceEvent) => void) | undefined,
 ): Promise<ToolLoopResult> {
 	let toolCallCount = 0;
 	const tools = getReadOnlyTools();
@@ -494,11 +499,30 @@ async function runToolLoop(
 		// Execute every tool call sequentially -- the project's
 		// no-parallel-LLM-calls rule applies to provider calls; tool
 		// execution is not LLM but we keep it serial for simplicity and
-		// determinism (matches the existing executor's contract).
+		// determinism (matches the existing executor's contract). Each
+		// call fires a paired trace event (call + response) so the UI's
+		// LiveStepsWidget can grow a sub-row per tool interaction --
+		// otherwise a 6+ minute tool loop looks like a single silent
+		// stage row to the user (ISSUES.md I-002).
 		const resultBlocks: ContentBlock[] = [];
 		for (const call of toolCalls) {
 			toolCallCount += 1;
+			if (onTrace !== undefined) {
+				onTrace({
+					type:         'tool-call',
+					tool:         call.name,
+					argsPreview:  previewToolArgs(call.input),
+				});
+			}
 			const result = await executeTool(call.name, call.input, deps);
+			if (onTrace !== undefined) {
+				onTrace({
+					type:         'tool-response',
+					tool:         call.name,
+					ok:           result.success !== false,
+					notePreview:  previewToolOutput(result.output),
+				});
+			}
 			resultBlocks.push({
 				type:         'tool_result',
 				tool_use_id:  call.id,
@@ -517,6 +541,7 @@ async function runFinalStructuredEmit(
 	messages:                LLMMessage[],
 	structuredOutputRetries: number,
 	maxOutputTokens:         number,
+	onTrace?:                ((event: ShaperTraceEvent) => void) | undefined,
 ): Promise<AnalyzeContextBundle> {
 	// Per feedback_prompt_structure: structural reference goes trailing.
 	// The final user turn carries the explicit schema reminder so the
@@ -557,6 +582,28 @@ async function runFinalStructuredEmit(
 		},
 	];
 
+	// Live-preview state: accumulate the incoming stream, keep the tail
+	// visible, throttle emissions so a burst of small chunks doesn't
+	// spam the IPC channel. The throttle is time-based (>= 250ms since
+	// last emit) OR size-based (>= 400 chars new). Cap the preview at
+	// 240 chars so IPC frames stay small.
+	let acc = '';
+	let lastEmit = 0;
+	let lastEmitLen = 0;
+	const onStreamToken = onTrace === undefined ? undefined : (delta: string) => {
+		acc += delta;
+		const now = Date.now();
+		const bytesSince = acc.length - lastEmitLen;
+		if (now - lastEmit >= 250 || bytesSince >= 400) {
+			lastEmit = now;
+			lastEmitLen = acc.length;
+			onTrace({
+				type:    'llm-token',
+				preview: acc.length > 240 ? acc.slice(-240) : acc,
+			});
+		}
+	};
+
 	try {
 		const raw = await provider.completeStructured<AnalyzeContextBundle>(
 			finalMessages,
@@ -574,6 +621,7 @@ async function runFinalStructuredEmit(
 				// "Unterminated string in JSON"). Configured via
 				// analyze.shaper.ollamaNumPredict (default 20480).
 				maxTokens:       maxOutputTokens,
+				...(onStreamToken !== undefined ? { onToken: onStreamToken } : {}),
 			},
 		);
 		return raw;
@@ -588,6 +636,54 @@ async function runFinalStructuredEmit(
 		const message = err instanceof Error ? err.message : String(err);
 		throw new ShaperSchemaUnrecoverable(structuredOutputRetries, [message]);
 	}
+}
+
+/**
+ * Render tool-call input as a compact single-line preview for the
+ * UI's LiveStepsWidget sub-row. Path / key values pass through raw;
+ * everything else JSON.stringifies. Cap at 200 chars to keep IPC
+ * frames small.
+ */
+function previewToolArgs(input: unknown): string {
+	if (input === null || input === undefined) {
+		return '';
+	}
+	if (typeof input === 'string') {
+		return input.length > 200 ? input.slice(0, 197) + '...' : input;
+	}
+	if (typeof input === 'object') {
+		const rec = input as Record<string, unknown>;
+		// Prefer 'path' / 'file' / 'query' / 'name' as the salient
+		// preview field when present -- reads better than dumped JSON.
+		for (const salient of ['path', 'file', 'query', 'name', 'symbol', 'id']) {
+			const v = rec[salient];
+			if (typeof v === 'string' && v.length > 0) {
+				return v.length > 200 ? v.slice(0, 197) + '...' : v;
+			}
+		}
+	}
+	try {
+		const s = JSON.stringify(input);
+		return s.length > 200 ? s.slice(0, 197) + '...' : s;
+	} catch {
+		return '(unrenderable)';
+	}
+}
+
+/**
+ * Render tool-call output as a single-line preview. Truncates hard --
+ * many tool outputs are multi-KB and the sub-row only shows what
+ * fits on one line.
+ */
+function previewToolOutput(output: unknown): string {
+	if (output === null || output === undefined) {
+		return '';
+	}
+	const s = typeof output === 'string' ? output : (() => {
+		try { return JSON.stringify(output); } catch { return String(output); }
+	})();
+	const oneLine = s.replace(/\s+/g, ' ').trim();
+	return oneLine.length > 200 ? oneLine.slice(0, 197) + '...' : oneLine;
 }
 
 function classifyOllamaError(err: unknown): Error {

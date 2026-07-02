@@ -351,6 +351,10 @@ export class InsrcChatViewPane extends ViewPane {
 		if (typeof e['parentTaskPath'] === 'string') { (out as { parentTaskPath?: string }).parentTaskPath = e['parentTaskPath'] as string; }
 		if (typeof e['substep'] === 'string') { (out as { substep?: string }).substep = e['substep'] as string; }
 		if (typeof e['detail'] === 'string') { (out as { detail?: string }).detail = e['detail'] as string; }
+		if (typeof e['trace'] === 'string') { (out as { trace?: string }).trace = e['trace'] as string; }
+		if (typeof e['stage'] === 'string') { (out as { stage?: string }).stage = e['stage'] as string; }
+		if (typeof e['tool'] === 'string') { (out as { tool?: string }).tool = e['tool'] as string; }
+		if (typeof e['preview'] === 'string') { (out as { preview?: string }).preview = e['preview'] as string; }
 		return out;
 	}
 
