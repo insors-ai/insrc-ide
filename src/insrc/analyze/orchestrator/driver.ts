@@ -210,6 +210,16 @@ export async function runAnalyze(
 	}
 	emit({ type: 'stage-started', stage: 'plan' });
 
+	// The plan stage has two multi-minute sub-steps that would
+	// otherwise sit silent (see ISSUES.md I-002). Emit stage-substep
+	// events at their boundaries so the UI has something to show
+	// during the 5-15 min plan window.
+	emit({
+		type: 'stage-substep',
+		stage: 'plan',
+		substep: 'bundle-shaper',
+		detail: `building ${intent.target}/${intent.scope} run bundle`,
+	});
 	let contextBundle;
 	try {
 		const shaper = shaperFor('run', intent.target);
@@ -221,6 +231,12 @@ export async function runAnalyze(
 		log.warn({ runId, code: failure.code }, 'runAnalyze: bundle build failed');
 		return emitDoneAndReturn(failResult('plan', failure, intent, start, runId));
 	}
+	emit({
+		type: 'stage-substep',
+		stage: 'plan',
+		substep: 'planner',
+		detail: 'composing task list',
+	});
 
 	let tree;
 	try {

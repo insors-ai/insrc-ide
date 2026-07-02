@@ -349,6 +349,8 @@ export class InsrcChatViewPane extends ViewPane {
 		if (typeof e['index'] === 'number') { (out as { index?: number }).index = e['index'] as number; }
 		if (typeof e['total'] === 'number') { (out as { total?: number }).total = e['total'] as number; }
 		if (typeof e['parentTaskPath'] === 'string') { (out as { parentTaskPath?: string }).parentTaskPath = e['parentTaskPath'] as string; }
+		if (typeof e['substep'] === 'string') { (out as { substep?: string }).substep = e['substep'] as string; }
+		if (typeof e['detail'] === 'string') { (out as { detail?: string }).detail = e['detail'] as string; }
 		return out;
 	}
 
@@ -444,6 +446,15 @@ export class InsrcChatViewPane extends ViewPane {
 		const total = typeof e['total'] === 'number' ? e['total'] as number : undefined;
 		if (template !== undefined && index !== undefined && total !== undefined) {
 			return `${template}  ·  ${index}/${total}`;
+		}
+		// stage-substep events break the silence between stage-started
+		// and the next stage-completed. Prefer the detail line -- e.g.
+		// "plan: building code/M run bundle" -- over the raw wire
+		// status "substep-bundle-shaper".
+		const substep = typeof e['substep'] === 'string' ? e['substep'] as string : undefined;
+		if (substep !== undefined) {
+			const detail = typeof e['detail'] === 'string' ? e['detail'] as string : undefined;
+			return `${step}: ${detail !== undefined && detail.length > 0 ? detail : substep}`;
 		}
 		return `${step}: ${status}`;
 	}

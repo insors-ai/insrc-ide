@@ -128,6 +128,20 @@ export type AnalyzeRunEvent =
 		readonly intent: ClassifiedIntent;
 	}
 	| {
+		/**
+		 * Fine-grained sub-step within a stage, for UI progress that
+		 * doesn't want to sit silent through multi-minute stage
+		 * bodies (esp. the plan stage: bundle-shaper tool loop
+		 * followed by planner LLM). `substep` is a stable short id
+		 * the UI dispatches on; `detail` is optional human-readable
+		 * text to append to the progress row.
+		 */
+		readonly type: 'stage-substep';
+		readonly stage: 'classify' | 'plan' | 'execute';
+		readonly substep: string;
+		readonly detail?: string;
+	}
+	| {
 		readonly type: 'plan-attempt';
 		readonly attempt: number;
 		readonly accepted: boolean;

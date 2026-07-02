@@ -584,6 +584,13 @@ function eventToProgressData(event: AnalyzeRunEvent): Record<string, unknown> {
 	switch (event.type) {
 		case 'stage-started':
 			return { step: event.stage, status: 'started' };
+		case 'stage-substep':
+			return {
+				step: event.stage,
+				status: `substep-${event.substep}`,
+				substep: event.substep,
+				...(event.detail !== undefined ? { detail: event.detail } : {}),
+			};
 		case 'classified':
 			return { step: 'classify', status: 'completed', intent: event.intent };
 		case 'plan-attempt':

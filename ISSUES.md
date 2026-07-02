@@ -53,3 +53,56 @@ Leaning toward (1). Defer decision until after a real end-to-end
 (`analyze-mr30tzkc-b9b037`).
 
 ---
+
+## I-002 · Plan-stage silence: substep coverage is coarse (P2)
+
+**Where:**
+- `src/insrc/analyze/orchestrator/driver.ts` — `runAnalyze()` plan-stage
+- `src/insrc/analyze/orchestrator/types.ts` — `AnalyzeRunEvent.stage-substep`
+- `src/vs/workbench/contrib/insrc/browser/chat/liveStepsWidget.ts` — substep rendering
+
+**Symptom:**
+The plan stage sits silent between `stage-started` and the first
+`plan-attempt`/`plan-accepted` for 5–15 minutes because two heavy
+sub-phases run back-to-back with no wire events between them: the
+run-bundle shaper's tool loop, then the planner LLM's first call.
+The chat panel just cycles "Plan: started" the whole time and
+users think the run has hung.
+
+**Fix landed (this commit):** Orchestrator now emits
+`stage-substep` events at both boundaries (`substep: 'bundle-shaper'`
+before `buildRunBundle`, `substep: 'planner'` before the planner
+call). The daemon RPC layer forwards these on the wire; the chat
+panel's progress strip + LiveStepsWidget render the `detail` line
+so the user sees "Plan: building code/M run bundle" flip to
+"Plan: composing task list".
+
+**Still coarse:**
+- The bundle-shaper tool loop itself is silent; a run can spend
+  6+ minutes inside `buildRunBundle` and the UI still shows
+  a single "building code/M run bundle" line. Ideally the shaper
+  emits a per-tool-call trace event (`shaper-tool-call`,
+  `shaper-tool-response`) so the widget can grow a nested row per
+  tool interaction.
+- The planner LLM's first attempt is also silent -- only
+  `plan-attempt` fires on validation failure or accept. A
+  streaming-token bridge (like `liveStep`) would make the row
+  update as tokens arrive.
+
+**Proposed direction:**
+1. **Shaper tool-call trace.** Add `shaper-tool-call` +
+   `shaper-tool-response` variants to `AnalyzeRunEvent`. Wire
+   `buildRunBundle` to emit each. Widget renders as indented
+   sub-rows under the bundle-shaper row.
+2. **Planner token stream.** Piggyback on the existing `liveStep`
+   frame the daemon already emits for LLM steps; make the chat
+   panel show the streaming preview inline under the planner row.
+
+Both are additive -- the current substep coverage handles the
+common case (2 heavy sub-phases) and unblocks users; the deeper
+trace is a follow-up for the pathological runs.
+
+**Filed:** 2026-07-02 after users hit `Plan: started` cycling on
+`analyze-mr30tzkc-b9b037`.
+
+---

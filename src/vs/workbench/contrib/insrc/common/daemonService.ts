@@ -58,6 +58,13 @@ export type DaemonStreamMessage =
 		readonly index?: number;
 		readonly total?: number;
 		readonly parentTaskPath?: string;
+		/** Sub-step id when the daemon fires a stage-substep event
+		 *  (e.g. 'bundle-shaper' or 'planner' during the plan
+		 *  stage). Undefined for stage-started / task-* events. */
+		readonly substep?: string;
+		/** Human-readable detail line for stage-substep events, e.g.
+		 *  'building code/M run bundle'. */
+		readonly detail?: string;
 	}
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }

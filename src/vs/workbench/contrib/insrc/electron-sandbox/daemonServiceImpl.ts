@@ -181,6 +181,8 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 					index?: number;
 					total?: number;
 					parentTaskPath?: string;
+					substep?: string;
+					detail?: string;
 				} = {
 					type: 'progress',
 					step: String(data?.['step'] ?? data?.['message'] ?? ''),
@@ -191,6 +193,8 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 				if (typeof data?.['index'] === 'number') { out.index = data['index'] as number; }
 				if (typeof data?.['total'] === 'number') { out.total = data['total'] as number; }
 				if (typeof data?.['parentTaskPath'] === 'string') { out.parentTaskPath = data['parentTaskPath'] as string; }
+				if (typeof data?.['substep'] === 'string') { out.substep = data['substep'] as string; }
+				if (typeof data?.['detail'] === 'string') { out.detail = data['detail'] as string; }
 				return out;
 			}
 			case 'liveStep':

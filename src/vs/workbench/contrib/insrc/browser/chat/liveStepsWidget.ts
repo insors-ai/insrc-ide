@@ -34,13 +34,21 @@ export interface LiveStepsEvent {
 	 *  'execute' / 'task-N/M' / 'task-<taskId>'. */
 	readonly step: string;
 	/** From the frame -- 'started' / 'completed' / 'ok' / 'failed' /
-	 *  'skipped-dependency-unavailable' / 'accepted' / etc. */
+	 *  'skipped-dependency-unavailable' / 'accepted' / 'substep-<id>' /
+	 *  etc. */
 	readonly status: string;
 	readonly taskId?: string;
 	readonly template?: string;
 	readonly index?: number;
 	readonly total?: number;
 	readonly parentTaskPath?: string;
+	/** Sub-step id when the daemon emits a stage-substep event
+	 *  (e.g. 'bundle-shaper' / 'planner'). Undefined for stage-started
+	 *  and task-* events. */
+	readonly substep?: string;
+	/** Human-readable detail for stage-substep events, appended to the
+	 *  parent row's status text. */
+	readonly detail?: string;
 }
 
 type RowState = 'idle' | 'in-progress' | 'ok' | 'failed' | 'skipped';
@@ -193,6 +201,15 @@ export class LiveStepsWidget {
 				return '';
 			}
 			return localize('chatLiveStepRunning', 'running…');
+		}
+		// Stage-substep events carry a stable id in `substep` and an
+		// optional human-readable line in `detail`. Prefer detail when
+		// present so the row shows "building code/M run bundle" rather
+		// than the raw "substep-bundle-shaper" wire status.
+		if (event.substep !== undefined) {
+			return event.detail !== undefined && event.detail.length > 0
+				? event.detail
+				: event.substep;
 		}
 		return event.status;
 	}
