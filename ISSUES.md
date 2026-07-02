@@ -106,3 +106,58 @@ trace is a follow-up for the pathological runs.
 `analyze-mr30tzkc-b9b037`.
 
 ---
+
+## I-003 · qwen3.6 fence-wraps structured output; retries loop until exhaustion (P0)
+
+**Where:**
+- `src/insrc/agent/providers/ollama.ts` — `completeStructured()` JSON.parse
+- Failing run: `analyze-mr30tzkc-b9b037`
+
+**Symptom:**
+On the plan-stage code shaper's structured-output call, Ollama +
+qwen3.6:35b-a3b sometimes ignores the schema-constrained decoding
+contract (the `format: schema` option) and emits its JSON wrapped
+in a markdown code fence:
+
+```
+```json
+{ "system": "...", ... }
+```
+```
+
+`JSON.parse(text)` rejects it immediately. The retry loop then
+prompts the model with "your last response was not valid JSON,
+please retry" — which qwen3.6 interprets as "be more explicit
+about what you're producing" and it fence-wraps AGAIN, more
+verbosely. Every attempt fails identically → the whole run gives
+up with `shaper-schema-unrecoverable` after ~15 min.
+
+Observed in `analyze-mr30tzkc-b9b037`:
+- Attempt 1: truncated at char 9771 (unrelated; long shaper response)
+- Attempt 2: fence-wrapped -> rejected
+- Attempt 3: fence-wrapped -> rejected -> run terminates
+
+**Fix landed (this commit):** `stripJsonFence()` helper runs
+before `JSON.parse` in the Ollama provider. Matches
+` ```json\n...\n``` ` and language-less ` ```\n...\n``` ` variants,
+returns the fence body. Fence-free responses pass through
+untouched. This defensive strip catches the qwen quirk without
+touching the schema-constrained decoding contract — Ollama still
+does its best-effort grammar enforcement; we just no longer die
+when the model breaks it in this specific way.
+
+**Follow-ups worth considering:**
+- The retry loop's "please retry with valid JSON" message may
+  make qwen3.6 MORE likely to fence-wrap on the next attempt.
+  Consider rephrasing to "your last response could not be
+  parsed; emit raw JSON without any wrapping" so it's aware of
+  the failure mode explicitly.
+- Long shaper responses that legitimately hit `num_predict`
+  (attempt 1 of this run) still fail catastrophically. Streaming
+  the shaper output + parsing on stream-close would let us
+  detect truncation earlier + emit a specific error code the
+  UI can surface differently.
+
+**Filed:** 2026-07-02 during `analyze-mr30tzkc-b9b037` triage.
+
+---

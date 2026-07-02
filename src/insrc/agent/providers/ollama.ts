@@ -28,6 +28,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Some Ollama models (qwen3.6 in particular) occasionally wrap their
+// structured-output response in a markdown code fence -- e.g.
+//   ```json
+//   { "system": "...", ... }
+//   ```
+// Ollama's schema-constrained decoding usually prevents this, but on
+// long / complex schemas the model can still emit a fence, and once
+// it does, plain JSON.parse rejects every retry identically. Strip
+// leading + trailing fences before parsing. Also handles the (rare)
+// language-less variant ```\n...\n```. Leaves fence-free text alone.
+function stripJsonFence(text: string): string {
+  const trimmed = text.trim();
+  const fenceMatch = /^```(?:[a-zA-Z0-9_+-]+)?\s*\n([\s\S]*?)\n```\s*$/m.exec(trimmed);
+  if (fenceMatch !== null && fenceMatch[1] !== undefined) {
+    return fenceMatch[1].trim();
+  }
+  return trimmed;
+}
+
 // Lazy defaults from the infra-only `config/local.ts` loader. Lazy
 // because the provider is sometimes constructed before the daemon's
 // config initialization order has settled.
@@ -485,10 +504,11 @@ export class OllamaProvider implements LLMProvider {
           if (text.length === 0) {
             throw new Error('ollama.completeStructured: empty response content');
           }
+          const stripped = stripJsonFence(text);
           try {
-            return JSON.parse(text);
+            return JSON.parse(stripped);
           } catch (err) {
-            throw new Error(`ollama.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${text.slice(0, 200)}`);
+            throw new Error(`ollama.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${stripped.slice(0, 200)}`);
           }
         } catch (err) {
           if (err instanceof Error && err.message.startsWith('ollama.completeStructured:')) {
