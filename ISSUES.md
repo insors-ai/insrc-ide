@@ -9,9 +9,14 @@ Priority levels:
 - **P1** — known-wrong behaviour; users can work around it
 - **P2** — polish; would improve UX / code quality
 
+Status labels:
+- **OPEN** — no code fix in tree yet
+- **PARTIAL** — primary symptom addressed; follow-ups still open
+- **FIXED** — no work remaining; move to git history + delete entry
+
 ---
 
-## I-001 · Slash commands skip scope inference (P1)
+## I-001 · Slash commands skip scope inference (P1) · OPEN
 
 **Where:**
 - `src/insrc/analyze/orchestrator/driver.ts` — `runAnalyze()` branch on `args.targetHint`
@@ -54,7 +59,7 @@ Leaning toward (1). Defer decision until after a real end-to-end
 
 ---
 
-## I-002 · Plan-stage silence: substep coverage is coarse (P2)
+## I-002 · Plan-stage silence: substep coverage is coarse (P2) · PARTIAL
 
 **Where:**
 - `src/insrc/analyze/orchestrator/driver.ts` — `runAnalyze()` plan-stage
@@ -107,7 +112,7 @@ trace is a follow-up for the pathological runs.
 
 ---
 
-## I-003 · qwen3.6 fence-wraps structured output; retries loop until exhaustion (P0)
+## I-003 · qwen3.6 fence-wraps structured output; retries loop until exhaustion (P0) · PARTIAL
 
 **Where:**
 - `src/insrc/agent/providers/ollama.ts` — `completeStructured()` JSON.parse
