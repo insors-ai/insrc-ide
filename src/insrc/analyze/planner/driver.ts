@@ -47,6 +47,7 @@ import {
 	writeFeedback,
 	writePlanFinal,
 } from './cache.js';
+import { invariantFixHint, renderFixHint } from './invariant-fix-hints.js';
 import { renderCatalog, renderDepthPolicy } from './render-catalog.js';
 import {
 	PLAN_TASK_SCHEMA,
@@ -266,6 +267,13 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 			return stamped;
 		}
 
+		// Snapshot the prior-failure history BEFORE pushing the new one
+		// so `appendCorrectionTurn` can detect repeats without seeing
+		// the current failure in the list. ISSUES.md I-004: same
+		// (invariantId, target) two attempts in a row escalates the
+		// note wording so qwen3.6 treats it as "change approach"
+		// rather than "try again".
+		const priorFailures = [...failures];
 		attempts.push(stamped);
 		failures.push(failure);
 
@@ -279,11 +287,13 @@ export async function runPlanner(args: RunPlannerArgs): Promise<PlanTask> {
 				attempt:     attempt + 1,
 				invariantId: failure.invariantId,
 				message:     failure.message,
+				repeatOfPrevious: priorFailures.length > 0 &&
+					priorFailures[priorFailures.length - 1]!.invariantId === failure.invariantId,
 			},
 			'Plan Builder validation failure -- corrective retry',
 		);
 
-		messages = appendCorrectionTurn(messages, stamped, failure);
+		messages = appendCorrectionTurn(messages, stamped, failure, priorFailures);
 	}
 
 	throw new PlanBuilderExhausted(attempts, failures);
@@ -344,10 +354,16 @@ function buildInitialMessages(args: BuildMessagesArgs): LLMMessage[] {
 }
 
 function appendCorrectionTurn(
-	prior:    LLMMessage[],
-	rejected: PlanTask,
-	failure:  PlanValidationFailure,
+	prior:         LLMMessage[],
+	rejected:      PlanTask,
+	failure:       PlanValidationFailure,
+	priorFailures: readonly PlanValidationFailure[],
 ): LLMMessage[] {
+	const hint = invariantFixHint(failure.invariantId);
+	const fixHintBlock = renderFixHint(hint);
+	const offendingTaskBlock = renderOffendingTaskSnippet(rejected, failure);
+	const repetitionBanner = repetitionBannerFor(failure, priorFailures);
+
 	return [
 		...prior,
 		{ role: 'assistant', content: JSON.stringify(rejected) },
@@ -361,12 +377,101 @@ function appendCorrectionTurn(
 				(failure.target !== undefined
 					? `Pointer: \`${JSON.stringify(failure.target)}\`\n\n`
 					: '\n') +
-				`Emit a corrected PlanTask. Address ${failure.invariantId} specifically -- do not ` +
-				`re-architect the whole plan; fix the named issue and keep the rest.\n` +
-				`\n` +
-				`Respond with ONLY the corrected JSON object -- no markdown fences, no prose.`,
+				repetitionBanner +
+				offendingTaskBlock +
+				fixHintBlock +
+				`\n\n` +
+				`Emit the corrected PlanTask JSON. Fix ONLY the named issue -- keep the ` +
+				`rest of the plan intact. Respond with ONLY the JSON object -- no markdown ` +
+				`fences, no prose.`,
 		},
 	];
+}
+
+/**
+ * When failure.target names a specific task (by index or taskId),
+ * render a focused snippet of that task's { taskId, template, kind,
+ * params, produces, consumes, rationale } so the model can see
+ * exactly what it emitted for the task it's being asked to fix.
+ *
+ * The full rejected plan is ALREADY visible in the assistant turn
+ * above; this snippet just highlights the offender + gives the
+ * model a concrete "here's what you wrote" anchor.
+ *
+ * Returns an empty string when the failure isn't task-scoped (INV-1,
+ * INV-13, INV-14 plan-level, INV-15).
+ */
+function renderOffendingTaskSnippet(
+	rejected: PlanTask,
+	failure:  PlanValidationFailure,
+): string {
+	if (failure.target === undefined) return '';
+	const target = failure.target;
+
+	// Prefer taskId match; fall back to index.
+	const targetTaskId = typeof target['taskId'] === 'string' ? target['taskId'] as string : undefined;
+	const targetIndex  = typeof target['index']  === 'number' ? target['index']  as number : undefined;
+
+	let offending;
+	if (targetTaskId !== undefined) {
+		offending = rejected.tasks.find(t => t.taskId === targetTaskId);
+	} else if (targetIndex !== undefined) {
+		offending = rejected.tasks[targetIndex];
+	}
+	if (offending === undefined) return '';
+
+	const snippet = {
+		taskId:    offending.taskId,
+		template:  offending.template,
+		kind:      offending.kind,
+		produces:  offending.produces,
+		consumes:  offending.consumes ?? [],
+		params:    offending.params,
+		rationale: offending.rationale,
+	};
+	return (
+		`## OFFENDING TASK (what you emitted)\n` +
+		'```json\n' +
+		JSON.stringify(snippet, null, 2) +
+		'\n```\n\n'
+	);
+}
+
+/**
+ * When the same (invariantId, taskId) failed on the previous attempt,
+ * escalate the note wording so the model treats the retry as
+ * "change your approach" rather than "try again in the same way".
+ * Repetition-key uses (invariantId, target.taskId ?? target.index)
+ * as identity -- distinguishes "same violation on same task" from
+ * "same invariant but different task".
+ */
+function repetitionBannerFor(
+	current: PlanValidationFailure,
+	prior:   readonly PlanValidationFailure[],
+): string {
+	if (prior.length === 0) return '';
+	const previous = prior[prior.length - 1]!;
+	if (previous.invariantId !== current.invariantId) return '';
+	if (targetIdentity(previous) !== targetIdentity(current)) return '';
+
+	// Same violation on the same task/pointer as the last attempt.
+	return (
+		`## REPEATED FAILURE\n` +
+		`You just emitted the SAME violation (\`${current.invariantId}\` on the ` +
+		`same target) as your previous attempt. Your last correction did NOT ` +
+		`fix the problem -- it re-introduced it.\n` +
+		`\n` +
+		`Try a DIFFERENT remedy from the menu below this time. Do NOT re-emit ` +
+		`a plan with the same structural mistake.\n\n`
+	);
+}
+
+function targetIdentity(f: PlanValidationFailure): string {
+	if (f.target === undefined) return '<no-target>';
+	const t = f.target;
+	if (typeof t['taskId'] === 'string') return `taskId:${t['taskId'] as string}`;
+	if (typeof t['index']  === 'number') return `index:${String(t['index'])}`;
+	return JSON.stringify(t);
 }
 
 // ---------------------------------------------------------------------------

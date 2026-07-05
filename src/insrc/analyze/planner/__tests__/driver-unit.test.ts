@@ -297,7 +297,7 @@ test('appendCorrectionTurn: re-issues with the assistant turn + VALIDATOR FEEDBA
 		invariantId: 'INV-1',
 		message:     'tasks list must be non-empty',
 	};
-	const out = _appendCorrectionTurnForTest(prior, rejected, failure);
+	const out = _appendCorrectionTurnForTest(prior, rejected, failure, []);
 	assert.equal(out.length, 4);
 	assert.equal(out[2]!.role, 'assistant');
 	assert.equal(out[3]!.role, 'user');
@@ -305,6 +305,8 @@ test('appendCorrectionTurn: re-issues with the assistant turn + VALIDATOR FEEDBA
 	assert.match(userBody, /VALIDATOR FEEDBACK/);
 	assert.match(userBody, /INV-1/);
 	assert.match(userBody, /tasks list must be non-empty/);
+	// I-004: the corrective turn now includes prescriptive fix hints.
+	assert.match(userBody, /HOW TO FIX/);
 });
 
 // ---------------------------------------------------------------------------
@@ -455,8 +457,86 @@ test('appendCorrectionTurn with failure.target renders the pointer', () => {
 		message:     'aggregator must be last',
 		target:      { aggregatorIndex: 5, lastIndex: 19 },
 	};
-	const out = _appendCorrectionTurnForTest(prior, rejected, failure);
+	const out = _appendCorrectionTurnForTest(prior, rejected, failure, []);
 	const userBody = out[2]!.content as string;
 	assert.match(userBody, /Pointer:/);
 	assert.match(userBody, /aggregatorIndex/);
+});
+
+test('appendCorrectionTurn: escalation banner fires when the same (invariantId, taskId) repeats', () => {
+	const prior = [
+		{ role: 'user' as const, content: 'init' },
+	];
+	const rejected: PlanTask = {
+		planId: 'p-root', goal: 'g', target: 'code', scope: 'M',
+		tasks: [], reasoning: 'r',
+	};
+	const failure: PlanValidationFailure = {
+		invariantId: 'INV-11',
+		message:     'task t13: consumes report at same index',
+		target:      { taskId: 't13' },
+	};
+	// A prior identical failure means this is the SECOND time we see it.
+	const priorFailures: PlanValidationFailure[] = [
+		{
+			invariantId: 'INV-11',
+			message:     'task t13: consumes report at same index',
+			target:      { taskId: 't13' },
+		},
+	];
+	const out = _appendCorrectionTurnForTest(prior, rejected, failure, priorFailures);
+	const userBody = out[2]!.content as string;
+	assert.match(userBody, /REPEATED FAILURE/);
+	assert.match(userBody, /SAME violation/);
+	assert.match(userBody, /DIFFERENT remedy/);
+});
+
+test('appendCorrectionTurn: no escalation banner when previous failure was a different invariant', () => {
+	const prior = [
+		{ role: 'user' as const, content: 'init' },
+	];
+	const rejected: PlanTask = {
+		planId: 'p-root', goal: 'g', target: 'code', scope: 'M',
+		tasks: [], reasoning: 'r',
+	};
+	const failure: PlanValidationFailure = {
+		invariantId: 'INV-11',
+		message:     'task t13: topo violation',
+		target:      { taskId: 't13' },
+	};
+	const priorFailures: PlanValidationFailure[] = [
+		{
+			invariantId: 'INV-7',
+			message:     'task t9: unmet dep',
+			target:      { taskId: 't9' },
+		},
+	];
+	const out = _appendCorrectionTurnForTest(prior, rejected, failure, priorFailures);
+	const userBody = out[2]!.content as string;
+	assert.doesNotMatch(userBody, /REPEATED FAILURE/);
+});
+
+test('appendCorrectionTurn: no escalation banner when same invariant hits a different task', () => {
+	const prior = [
+		{ role: 'user' as const, content: 'init' },
+	];
+	const rejected: PlanTask = {
+		planId: 'p-root', goal: 'g', target: 'code', scope: 'M',
+		tasks: [], reasoning: 'r',
+	};
+	const failure: PlanValidationFailure = {
+		invariantId: 'INV-11',
+		message:     'task t20: topo violation',
+		target:      { taskId: 't20' },
+	};
+	const priorFailures: PlanValidationFailure[] = [
+		{
+			invariantId: 'INV-11',
+			message:     'task t5: topo violation',
+			target:      { taskId: 't5' },
+		},
+	];
+	const out = _appendCorrectionTurnForTest(prior, rejected, failure, priorFailures);
+	const userBody = out[2]!.content as string;
+	assert.doesNotMatch(userBody, /REPEATED FAILURE/);
 });

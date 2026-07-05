@@ -150,54 +150,53 @@ indistinguishable in logs (both surfaced as "not valid JSON").
 
 ---
 
-## I-004 · Planner corrective-retry loop lets qwen3.6 repeat the same invariant failure (P0) · OPEN
+## I-004 · Planner corrective-retry loop lets qwen3.6 repeat the same invariant failure (P0) · FIXED
 
 **Where:**
+- `src/insrc/analyze/planner/invariant-fix-hints.ts` (new)
 - `src/insrc/analyze/planner/driver.ts` — `appendCorrectionTurn()`
+- `src/insrc/analyze/planner/__tests__/driver-unit.test.ts` — tests for fix hints + repeat detection
 - Failing run: `analyze-mr4meutp-a138cd`
 
-**Symptom:**
+**Was:**
 Run failed at plan stage with `plan-invariant-failed` after 3
-planner attempts, all failing INV-11 with the SAME task + message:
-`task t13: consumes 'report' is produced at index 12, not earlier than 12`.
-The corrective-retry note tells the model what went wrong but not
-what to CHANGE, so qwen3.6 re-emits an almost-identical plan every
-attempt. Attempt 2 completed in 40 s, attempt 3 in 64 s -- fast
-turnarounds indicate the model isn't grappling with the fix, just
-re-emitting.
+planner attempts, all failing INV-11 with the SAME task + message.
+The corrective-retry note said WHAT went wrong but not what to
+CHANGE. Attempt 2 completed in 40 s, attempt 3 in 64 s -- too fast
+to be actually reasoning about the fix; qwen3.6 was just re-emitting
+the same structure.
 
-**Why the current retry note is too weak:**
-Current message (paraphrased): `The plan failed invariant INV-11:
-task t13 consumes 'report' at index 12 (>= t13's index). Emit a
-corrected PlanTask.`
-
-That names the failure but not the SPACE of fixes. INV-11 has
-three orthogonal remedies: (a) reorder tasks so the producer comes
-strictly earlier, (b) change t13 to consume a different item, (c)
-add a new earlier task that produces the item. qwen3.6 needs the
-fix menu spelled out; without it, it treats the note as ambient
-feedback and re-emits the same structure.
-
-**Proposed direction:**
-1. **Prescriptive per-invariant fix menus.** Author a fix-hint
-   table keyed on invariantId. For INV-11: enumerate the three
-   remedies. For invariants where the fix is unambiguous, name it
-   directly. Fall back to the current generic message for unknown
-   invariants.
-2. **Cite the offending task's params in the note.** Currently
-   only the taskId + invariant id + message land in the note; the
-   model doesn't see the exact `consumes: [...]` list of t13 that
-   would help it decide which of the three remedies fits.
-3. **Track repeated failure of the same invariantId + target
-   pointer.** If attempt N fails with the same `(invariantId,
-   target)` as attempt N-1, escalate the note ("You emitted the
-   SAME violation twice in a row. Change your approach.") or bail
-   early instead of burning the third attempt on the same output.
-
-Order of implementation: (1) + (2) together (both edit
-`appendCorrectionTurn` in one commit), (3) as a follow-up if the
-first still isn't enough.
+**Fix landed:**
+- New `invariant-fix-hints.ts` module carries a per-invariant
+  fix-menu table (INV-1 through INV-15). Each entry has a
+  one-line `what` summary + a numbered `remedies` list. For
+  ambiguous invariants (INV-7, INV-11) the menu enumerates every
+  orthogonal remedy (reorder, replace consumes, add producer,
+  remove consumes entry). For unambiguous ones (INV-2, INV-6,
+  INV-8, INV-15) the fix is stated directly. Unknown invariant
+  ids fall back to a generic hint.
+- `appendCorrectionTurn` now:
+    - Extracts the offending task (by `target.taskId` or
+      `target.index`) and includes its {taskId, template, kind,
+      params, produces, consumes, rationale} as an OFFENDING
+      TASK json snippet -- so the model has a focused anchor
+      instead of scanning its own multi-KB rejected plan.
+    - Renders the invariant's fix menu as a numbered HOW TO FIX
+      block right below the validator message.
+    - Detects same `(invariantId, target-identity)` repetition
+      against the previous attempt's failure and prepends a
+      REPEATED FAILURE escalation banner: "You just emitted the
+      SAME violation as your previous attempt. Try a DIFFERENT
+      remedy from the menu below." Identity = `taskId` when
+      present, else `index`, else the target JSON.
+- Retry-loop logging now includes a `repeatOfPrevious` field so
+  daemon logs surface when consecutive attempts hit the same
+  invariant on the same task.
+- 3 new unit tests cover: escalation banner fires on repeat,
+  no banner when previous was a different invariant, no banner
+  when same invariant hits a different task.
 
 **Filed:** 2026-07-03 during `analyze-mr4meutp-a138cd` triage.
+**Closed:** 2026-07-04, same triage session.
 
 ---
