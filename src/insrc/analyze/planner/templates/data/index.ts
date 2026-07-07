@@ -116,6 +116,11 @@ export const dataAdherenceCheck: AnalyzeTaskTemplate = {
 					},
 				},
 			},
+			constraintIds:     {
+				type:  'array',
+				items: { type: 'string' },
+				description: 'Doc-summary entity ids whose keyConstraints hydrate as the constraint set (plans/docs-module.md Phase 7).',
+			},
 			maxSourceExcerpts: { type: 'integer', minimum: 1, maximum: 30 },
 		},
 	},

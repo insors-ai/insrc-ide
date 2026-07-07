@@ -120,6 +120,12 @@ const EXPECTED_READ_ONLY_TOOL_IDS: readonly string[] = [
 	'git_log',
 	'git_show',
 	'git_status',
+
+	// docs -- Phase 7 docs-module tool surface
+	'docs_family_list',
+	'docs_project_context',
+	'docs_retrieve',
+	'docs_summary_get',
 ];
 
 test('READ_ONLY_TOOL_IDS matches the expected snapshot', () => {

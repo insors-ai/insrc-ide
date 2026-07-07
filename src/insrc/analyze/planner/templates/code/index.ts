@@ -211,6 +211,11 @@ export const codeAdherenceCheck: AnalyzeTaskTemplate = {
 				},
 				description: 'Inline constraint list, used when the plan does not have an upstream docs.constraint.enumerate task.',
 			},
+			constraintIds: {
+				type:  'array',
+				items: { type: 'string' },
+				description: 'Doc-summary entity ids whose keyConstraints hydrate as the constraint set. Cheaper than a docs.constraint.enumerate subtask when the constraints are already summarised by the post-indexing summariser (plans/docs-module.md Phase 7). Priority-3 sourcing: used when constraintsSource + constraints are both absent.',
+			},
 			maxSourceExcerpts: {
 				type:    'integer',
 				minimum: 1,

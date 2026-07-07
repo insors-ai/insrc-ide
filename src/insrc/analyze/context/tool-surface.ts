@@ -138,6 +138,16 @@ export const READ_ONLY_TOOL_IDS: readonly string[] = Object.freeze([
 	'git_log',
 	'git_show',
 	'git_status',
+
+	// docs -- pre-baked doc summaries + hybrid retrieval
+	// (plans/docs-module.md Phase 7). Available to every shaper --
+	// the docs shaper leans on these heavily; code / data / infra
+	// shapers use them when they want to sample design-doc
+	// grounding for artefacts.
+	'docs_family_list',
+	'docs_project_context',
+	'docs_retrieve',
+	'docs_summary_get',
 ]);
 
 const READ_ONLY_SET = new Set<string>(READ_ONLY_TOOL_IDS);

@@ -53,12 +53,14 @@ You are building the bundle for a specific leaf or planner task fired by the pla
 
 ## Tool-use guidance
 
-Docs shapers do NOT drive a graph tool-loop (docs don't have call/inherit graphs). Instead:
+Docs shapers do NOT drive a graph tool-loop (docs don't have call/inherit graphs). Instead use the docs-specific tools:
 
-- **First**, if a pre-baked `LiveProjectContext` is available for the scope repo, read it. It carries family breakdown, top subjects, decisions + constraints with citations, recent activity. Cite decisions / constraints back to their source entity id.
-- **Use `retrieveDocSections`** (via the `docs.retrieve` tool or equivalent) for both keyword and semantic queries. Prefer it over raw `search_grep` -- the retriever handles ranking, dedup, path bias.
-- **Use `file_read`** to pull full section bodies only after you have decided which excerpts to cite. The retriever's previews are usually enough for run-mode summaries.
-- **Use `search_list-dir`** for coarse discovery (finding `design/`, `plans/`, `docs/` directories under scope). Fall back to `search_glob` for basename patterns (`ADR-*.md`, `RFC-*.md`).
+- **`docs_project_context`** FIRST -- returns the pre-baked LiveProjectContext for the session repo. Family breakdown, top subjects, decisions + constraints (each with source citation), placeholder count. Zero LLM cost; use this to seed your `summary` layer instead of re-summarising docs one at a time.
+- **`docs_retrieve`** for topic-driven retrieval. Vector ANN + keyword ranking over document / section / config entities, filtered to the session repo. Returns citations ready to paste into `artefacts`. Supports `filenameHint` (e.g. `"design/"`) to bias family. Prefer over raw `search_grep` -- retriever handles ranking, dedup, path bias.
+- **`docs_family_list`** to enumerate every summarised doc in a family (e.g. all ADRs, all design docs). Useful for building `structure` layers.
+- **`docs_summary_get`** to hydrate a specific document's summary (title, decisions, constraints, subjects) by entity id -- cheaper than reading its full body.
+- **`file_read`** to pull full section bodies ONLY after you've decided which excerpts to cite. The retriever's previews are usually enough for run-mode.
+- **`search_list-dir` / `search_glob`** for coarse discovery when the summariser has not yet run (`docs_project_context` returns empty rollups) -- fall back to filesystem globs (`design/**`, `plans/**`, `ADR-*.md`, `RFC-*.md`).
 
 ## Format reminders (HARD)
 

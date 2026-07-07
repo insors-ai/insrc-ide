@@ -63,7 +63,7 @@ You are building the bundle for a specific leaf or planner task. The planner alr
 - **For file-driver connections** use `db_file_list_files`, `db_file_describe`, `db_file_sample`. `db_file_sample_shape` is helpful when divergent shapes are likely (multiple CSVs under a glob).
 - **For KV connections** use `db_kv_list_namespaces`, `db_kv_describe_namespace`, `db_kv_sample_shape`. Avoid `db_kv_scan` over large namespaces -- it's a slow path; only use it when the task explicitly demands.
 - **Sampling defaults** -- 5-10 rows per table is enough for the LLM downstream to see shape. Larger samples waste tokens without adding clarity.
-- **Consult design docs when they cover the schema.** If the scope repo contains `design/`, `plans/`, `docs/`, `ADR-*.md`, or `SPEC-*.md` files that describe the data model, PII policy, retention, or migrations, sample the relevant sections into `artefacts`. Cap at 5 doc-section excerpts alongside your schema excerpts, each cited as `cite: { kind: 'section', entityId, file, heading }`. Goal: ground schema claims in stated intent; do NOT summarise the docs.
+- **Consult design docs when they cover the schema.** If the scope repo contains `design/`, `plans/`, `docs/`, `ADR-*.md`, or `SPEC-*.md` files that describe the data model, PII policy, retention, or migrations, sample the relevant sections into `artefacts`. Use `docs_project_context` first (returns pre-baked constraints + decisions with citations, zero LLM cost), then `docs_retrieve` for topic-specific sections. Cap at 5 doc-section excerpts alongside your schema excerpts, each cited as `cite: { kind: 'section', entityId, file, heading }`. Goal: ground schema claims in stated intent; do NOT summarise the docs.
 
 ## Format reminders
 

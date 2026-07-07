@@ -25,6 +25,8 @@ import { fileURLToPath } from 'node:url';
 import { OllamaProvider } from '../../../agent/providers/ollama.js';
 import { loadAnalyzeConfig } from '../../../config/analyze.js';
 import { loadLocalProviderConfig } from '../../../config/local.js';
+import { getDb } from '../../../db/client.js';
+import { getEntity } from '../../../db/entities.js';
 import { getLogger } from '../../../shared/logger.js';
 import type {
 	LLMMessage,
@@ -32,6 +34,7 @@ import type {
 	StructuredSchema,
 } from '../../../shared/types.js';
 
+import { assembleLiveProjectContext } from '../../context/live-project-context.js';
 import type { TemplateExecuteArgs } from '../../executor/types.js';
 
 const log = getLogger('analyze:runtimes:shared:adherence');
@@ -186,12 +189,14 @@ export async function runAdherenceCheck(args: AdherenceRunArgs): Promise<Adheren
 		? Math.max(1, Math.min(30, params['maxSourceExcerpts'] as number))
 		: 12;
 
-	const constraints = resolveConstraints(executeArgs, params);
+	const constraints = await resolveConstraints(executeArgs, params);
 	if (constraints.length === 0) {
 		throw new Error(
-			`${templateId}: no constraints available. Provide params.constraintsSource ` +
-			`(upstream taskId of a docs.constraint.enumerate task) OR ` +
-			`params.constraints inline.`,
+			`${templateId}: no constraints available. Provide one of: ` +
+			`params.constraintsSource (upstream taskId of a docs.constraint.enumerate task), ` +
+			`params.constraints (inline list), OR ` +
+			`params.constraintIds (list of doc-summary entity ids -- the runtime hydrates their ` +
+			`keyConstraints from the LiveProjectContext).`,
 		);
 	}
 
@@ -288,10 +293,11 @@ export async function runAdherenceCheck(args: AdherenceRunArgs): Promise<Adheren
 // Constraint sourcing
 // ---------------------------------------------------------------------------
 
-function resolveConstraints(
+async function resolveConstraints(
 	args:   TemplateExecuteArgs,
 	params: Record<string, unknown>,
-): ConstraintInput[] {
+): Promise<ConstraintInput[]> {
+	// Priority 1: upstream task output.
 	const source = params['constraintsSource'];
 	if (typeof source === 'string' && source.length > 0) {
 		const upstream = args.upstreamOutputs.get(source);
@@ -302,11 +308,77 @@ function resolveConstraints(
 			}
 		}
 	}
+
+	// Priority 2: inline constraint objects.
 	const inline = params['constraints'];
 	if (Array.isArray(inline)) {
 		return normaliseConstraints(inline);
 	}
+
+	// Priority 3: constraintIds -- doc-summary entity ids whose
+	// keyConstraints are hydrated from the LiveProjectContext
+	// (plans/docs-module.md Phase 7). Lets the planner point at
+	// specific docs by id without needing a docs.constraint.enumerate
+	// upstream task in every plan.
+	const constraintIds = params['constraintIds'];
+	if (Array.isArray(constraintIds) && constraintIds.length > 0) {
+		const ids = constraintIds.filter(x => typeof x === 'string' && x.length > 0) as string[];
+		if (ids.length > 0) {
+			return await hydrateFromConstraintIds(args, ids);
+		}
+	}
+
 	return [];
+}
+
+/**
+ * Given a set of doc-summary entity ids, hydrate their
+ * `keyConstraints` into the shared ConstraintInput shape. Each
+ * constraint is cited back to its source entity + file + doc
+ * title. Skips ids that don't resolve to a summarised doc.
+ */
+async function hydrateFromConstraintIds(
+	args: TemplateExecuteArgs,
+	ids:  readonly string[],
+): Promise<ConstraintInput[]> {
+	const db = await getDb();
+	const repoPath = args.intent.scopeRef.value;
+	// Assemble the live context once to lift decisions/constraints
+	// with their citations pre-computed. This avoids per-id lookups
+	// against getDocSummary + entity hydration.
+	const ctx = await assembleLiveProjectContext(db, repoPath, {
+		maxDecisions:   500,
+		maxConstraints: 500,
+	});
+	const idSet = new Set(ids);
+	const out: ConstraintInput[] = [];
+	// Fetch entity metadata (for `file` + `heading`) on demand, cached
+	// per entity id to avoid duplicate lookups.
+	const fileByEntityId = new Map<string, string>();
+	for (const c of ctx.constraints) {
+		if (!idSet.has(c.sourceEntityId)) continue;
+		let file = fileByEntityId.get(c.sourceEntityId);
+		if (file === undefined) {
+			const entity = await getEntity(db, c.sourceEntityId);
+			file = entity?.file ?? '';
+			fileByEntityId.set(c.sourceEntityId, file);
+		}
+		out.push({
+			constraint:     c.constraint,
+			sourceEntityId: c.sourceEntityId,
+			...(file.length > 0 ? { file } : {}),
+			heading:        c.docTitle,
+		});
+	}
+	log.info(
+		{
+			templateContext: 'runAdherenceCheck',
+			requestedIds:    ids.length,
+			hydrated:        out.length,
+		},
+		'runAdherenceCheck: hydrated constraints from constraintIds',
+	);
+	return out;
 }
 
 function normaliseConstraints(raw: readonly unknown[]): ConstraintInput[] {
@@ -396,3 +468,9 @@ function buildProvider(modelId: string, numCtx: number): LLMProvider {
 	const local = loadLocalProviderConfig();
 	return new OllamaProvider(modelId, local.host, numCtx);
 }
+
+// ---------------------------------------------------------------------------
+// Test hooks
+// ---------------------------------------------------------------------------
+
+export const _resolveConstraintsForTest = resolveConstraints;
