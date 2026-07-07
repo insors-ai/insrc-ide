@@ -113,7 +113,7 @@ export const ANALYZE_CONTEXT_BUNDLE_SCHEMA = {
 				},
 				shaper: {
 					type: 'string',
-					enum: ['classification', 'generic', 'code', 'data', 'infra'],
+					enum: ['classification', 'generic', 'code', 'data', 'infra', 'docs'],
 				},
 				toolCalls: {
 					type:    'integer',
