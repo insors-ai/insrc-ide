@@ -41,11 +41,14 @@ type FamilyMatcher = (file: string, base: string) => boolean;
 const PATTERNS: ReadonlyArray<{ family: DocFamily; match: FamilyMatcher }> = [
 	{
 		family: 'design',
-		match:  (file) => /(^|\/)design(\/|$)/i.test(file),
+		// Match `design/` OR `designs/` (plural). Real repos use both
+		// spellings (e.g. insors-extraction has `docs/designs/*.html`).
+		match:  (file) => /(^|\/)designs?(\/|$)/i.test(file),
 	},
 	{
 		family: 'plans',
-		match:  (file) => /(^|\/)plans(\/|$)/i.test(file),
+		// Match `plan/` OR `plans/` -- both idioms appear in the wild.
+		match:  (file) => /(^|\/)plans?(\/|$)/i.test(file),
 	},
 	{
 		family: 'adr',

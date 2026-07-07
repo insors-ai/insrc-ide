@@ -24,6 +24,16 @@ test('plans/ matches for docs directly under plans', () => {
 	assert.equal(inferDocFamily('plans/foo.md'), 'plans');
 });
 
+test('designs/ (plural) matches the design family', () => {
+	// insors-extraction stores design HTMLs under docs/designs/.
+	assert.equal(inferDocFamily('/repo/docs/designs/match-scoring.html'), 'design');
+	assert.equal(inferDocFamily('designs/foo.md'), 'design');
+});
+
+test('plan/ (singular) matches the plans family', () => {
+	assert.equal(inferDocFamily('/repo/plan/foo.md'), 'plans');
+});
+
 test('docs/ matches for docs under docs/', () => {
 	assert.equal(inferDocFamily('/repo/docs/api/reference.md'), 'docs');
 });
