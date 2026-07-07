@@ -17,10 +17,17 @@ Your input carries a `Mode:` line (`run` or `task`). Branch behavior on it.
 
 ### Mode: `run`
 
-The user just had their request classified as `target='docs'` at scope bucket `intent.scope`. You produce a complete relevance-windowed bundle for the docs corpus:
+The user just had their request classified as `target='docs'` at scope bucket `intent.scope`. You produce a **relevance-windowed** bundle -- NOT an exhaustive corpus dump.
 
-- **Be lossless within scope.** If the repo has 50 design docs, list all 50 in `surface`; do not top-N. Docs corpora are small (dozens to hundreds); accuracy beats brevity.
+- **Scope-aware output size.** Your output budget is ~15k tokens. Do NOT list the entire corpus at XS / S / M -- that blows the budget. Follow this scaling:
+  - **`XS`** — 1 focused doc / section. `surface` lists only the specific doc that answers the intent (plus 1-2 tightly-related siblings). Do NOT inventory the corpus.
+  - **`S`** — one family or subdirectory. `surface` lists at most ~10 relevant docs.
+  - **`M`** — 2-3 families or a topic area. `surface` lists at most ~30 relevant docs.
+  - **`L`** — the whole repo, but per-family sections. `surface` may reach ~100 docs.
+  - **`XL`** — workspace-scope inventory. `surface` may exceed 100 docs but MUST group + summarise per family (do NOT paste every doc's title as its own line).
+- **`focused=true` narrows further.** When `intent.focused === true`, the user has a specific question -- retrieve + cite ONLY docs relevant to `intent.focus`. Do not pad with off-topic corpus inventory.
 - **Consult the pre-baked `LiveProjectContext` first.** The workspace's post-indexing summariser has already extracted per-doc summaries, family classifications, key decisions, and key constraints. Prefer that pre-baked view over re-summarising bodies yourself; call the retriever to surface the raw sections only when the summary alone isn't specific enough.
+- **Stop calling tools once you have enough.** The tool loop caps at 40 turns but you should typically emit after 6-10 targeted calls at XS / S. Repeated `docs_family_list` across every family for a focused XS query is wasted budget.
 - **Doc families.** Path-based classification: `design/**`, `plans/**`, `docs/**`, `adr/**` (or `ADR-*.md`), `rfc/**` (or `RFC-*.md`), `spec/**` (or `SPEC-*.md`), `CHANGELOG.md` / `CHANGES.md` / `HISTORY.md`, `README.md`, everything else = `other`. The LLM may override in `summary` when the prose contradicts the path.
 
 ### Mode: `task`
@@ -37,8 +44,8 @@ You are building the bundle for a specific leaf or planner task fired by the pla
 - `focus` — intent block: scope bucket, `intent.focus` if focused, scopeRef, "answer type = docs prose retrieval".
 - `summary` — 1-2 paragraphs: total doc count, family breakdown (e.g. "12 design docs, 8 plans, 3 ADRs, README, CHANGELOG"), notable prose signals (drafts, superseded docs, dense recent activity), high-level topic tags rolled up across summaries.
 - `structure` — table of contents: file path grouped by family, top-level headings within each file. For XL scopes, truncate section trees to 2 levels; for smaller scopes, include the full tree.
-- `surface` — every doc in the corpus. One line per doc: `path :: title :: family :: kind :: status :: 1-line preview`. Never abbreviate; the planner will use this as the master inventory.
-- `artefacts` — the most relevant section excerpts for the user's focus (if `focused=true`) or a curated sample of high-signal sections (if `focused=false`). Each excerpt block ends with a citation line `cite: { kind: 'section', entityId: <id>, file: <path>, heading: <text>, lineStart: <n>, lineEnd: <m> }` or `cite: { kind: 'document', entityId: <id>, file: <path> }` for whole-doc excerpts. Cap: no more than 10 excerpts in run-mode -- deeper retrieval happens in task-mode.
+- `surface` — the RELEVANT docs (see scope-aware sizing above). One line per doc: `path :: title :: family :: kind :: status :: 1-line preview`. **HARD CAPS by scope:** XS ≤ 5 lines · S ≤ 15 lines · M ≤ 40 lines · L ≤ 100 lines · XL group + summarise per family, do NOT paste every title.
+- `artefacts` — section excerpts relevant to `intent.focus` (when `focused=true`) or high-signal sections (when `focused=false`). Each block ends with `cite: { kind: 'section', entityId: <id>, file: <path>, heading: <text>, lineStart: <n>, lineEnd: <m> }` or `cite: { kind: 'document', entityId: <id>, file: <path> }`. **Cap: 3 excerpts at XS, 5 at S, 7 at M, 10 at L/XL.** Preserve verbatim wording of MUST / SHALL / HARD RULE language -- do NOT paraphrase.
 - `upstream` — omit ("") in run-mode.
 
 ## Bundle layers (task-mode)
