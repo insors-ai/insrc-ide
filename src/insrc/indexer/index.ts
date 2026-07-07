@@ -329,6 +329,8 @@ export class IndexerService {
       case 'config-full':    await this.configFullIndex(job.scope);         break;
       case 'config-file':    await this.configFileEvent(job.filePath, job.scope, job.event); break;
       case 'config-reindex': await this.configReindex(job.scope);           break;
+      case 'doc-summarise-repo':   await this.docSummariseRepo(job.repoPath);   break;
+      case 'doc-summarise-entity': await this.docSummariseEntity(job.entityId); break;
     }
   }
 
@@ -436,6 +438,11 @@ export class IndexerService {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');
       await updateRepoStatus(this.db, repoPath, 'ready', new Date().toISOString());
+      // Post-indexing doc summarisation (plans/docs-module.md Section 8).
+      // Enqueued at background priority -- the queue runs it after
+      // whatever else is pending. Skip-if-unchanged inside the driver
+      // makes re-runs cheap; safe to fire on every full-index.
+      this.queue.enqueue({ kind: 'doc-summarise-repo', repoPath });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error({ repo: repoPath, err: msg }, 'full index failed');
@@ -469,6 +476,29 @@ export class IndexerService {
     // create or update
     await this.indexFile(filePath, repoPath, true);
     this.scheduleSettle(repoPath, filePath);
+    // Doc-summariser follow-up: if the touched file produced doc /
+    // section entities, enqueue per-entity summarisation. Queue
+    // dedups by entityId so rapid saves collapse; driver skip-if-
+    // unchanged means re-fire on unchanged body is a cheap point
+    // lookup + hash compare. See plans/docs-module.md Section 8.
+    await this.enqueueDocSummarisationForFile(filePath);
+  }
+
+  private async enqueueDocSummarisationForFile(filePath: string): Promise<void> {
+    const ext = extname(filePath).toLowerCase();
+    if (ext !== '.md' && ext !== '.mdx') return;
+    try {
+      const { findEntitiesByFile } = await import('../db/entities.js');
+      const entities = await findEntitiesByFile(this.db, filePath);
+      for (const e of entities) {
+        if (e.kind === 'document' || e.kind === 'section') {
+          this.queue.enqueue({ kind: 'doc-summarise-entity', entityId: e.id });
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ file: filePath, err: msg }, 'doc summarisation enqueue failed (non-fatal)');
+    }
   }
 
   /**
@@ -520,6 +550,87 @@ export class IndexerService {
       'cross-file settle pass complete',
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Doc summariser handlers (plans/docs-module.md Section 8)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sweep every doc + section entity in the repo, call the
+   * summariser LLM per entity. Sequential (no parallel LLM);
+   * skip-if-unchanged in the driver means unchanged bodies short-
+   * circuit at a hash compare. Background priority -- the queue
+   * runs it after all user-priority jobs drain.
+   *
+   * Failure of ANY single entity's summarisation is logged +
+   * swallowed; the sweep continues so partial progress accumulates
+   * even if some docs consistently break.
+   */
+  private async docSummariseRepo(repoPath: string): Promise<void> {
+    const { summariseDoc } = await import('../analyze/summariser/index.js');
+    const { listEntitiesForRepo } = await import('../db/entities.js');
+    const entities = await listEntitiesForRepo(this.db, repoPath);
+    const docs = entities.filter(e => e.kind === 'document' || e.kind === 'section');
+    if (docs.length === 0) {
+      log.debug({ repo: repoPath }, 'doc summariser: no doc entities in repo');
+      return;
+    }
+    log.info({ repo: repoPath, count: docs.length }, 'doc summariser: sweep started');
+    const t0 = Date.now();
+    let summarised = 0, skipped = 0, failed = 0;
+    for (const entity of docs) {
+      try {
+        const res = await summariseDoc({ db: this.db, entity });
+        if (res.ok) {
+          if (res.skipped === 'unchanged') skipped += 1;
+          else                             summarised += 1;
+        } else {
+          failed += 1;
+        }
+      } catch (err) {
+        // summariseDoc is designed not to throw for LLM/schema
+        // failures, but a bug or an OOM could still throw. Log +
+        // continue so one bad entity doesn't stop the sweep.
+        failed += 1;
+        log.warn(
+          { repo: repoPath, entityId: entity.id, err: err instanceof Error ? err.message : String(err) },
+          'doc summariser: entity threw (continuing sweep)',
+        );
+      }
+    }
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    log.info(
+      { repo: repoPath, summarised, skipped, failed, elapsed: `${elapsed}s` },
+      'doc summariser: sweep complete',
+    );
+  }
+
+  /**
+   * Single-entity summarisation. Fired by the file-event handler
+   * when a doc file changes. Cheap: driver skip-if-unchanged
+   * makes no-op saves collapse to a hash compare.
+   */
+  private async docSummariseEntity(entityId: string): Promise<void> {
+    const { summariseDoc } = await import('../analyze/summariser/index.js');
+    const { getEntity } = await import('../db/entities.js');
+    const entity = await getEntity(this.db, entityId);
+    if (entity === null) {
+      log.debug({ entityId }, 'doc summariser: entity gone (deleted between enqueue and run)');
+      return;
+    }
+    try {
+      await summariseDoc({ db: this.db, entity });
+    } catch (err) {
+      log.warn(
+        { entityId, err: err instanceof Error ? err.message : String(err) },
+        'doc summariser: single-entity threw (non-fatal)',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reembed
+  // ---------------------------------------------------------------------------
 
   private async reembed(repoPath: string): Promise<void> {
     // Loaded lazily to avoid a circular import with db/entities

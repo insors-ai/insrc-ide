@@ -234,6 +234,14 @@ export interface GraphStore {
 	// Config
 	configEntry:         AnyDb;
 	configByScope:       AnyDb;
+
+	// Doc summaries -- one row per doc/section entity, produced by the
+	// post-indexing summariser (plans/docs-module.md Section 8).
+	docSummary:          AnyDb;
+	// Secondary index: repoId -> entityU64. dupSort so a repo has many
+	// summary rows; enables per-repo sweeps without scanning the whole
+	// docSummary sub-DB.
+	docSummaryByRepo:    AnyDb;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +351,13 @@ export async function getGraphStore(): Promise<GraphStore> {
 			// Config -- configEntry is utf8 id keyed
 			configEntry:        root.openDB({ name: 'config_entry', keyEncoding: 'ordered-binary' }),
 			configByScope:      open_('config_by_scope', { dupSort: true }),
+
+			// Doc summaries -- keyed by entity u64 (matches the entity
+			// sub-DB); values are msgpack-encoded DocSummary. The
+			// repo-secondary index enables per-repo sweeps for
+			// live-project-context assembly.
+			docSummary:         open_('doc_summary'),
+			docSummaryByRepo:   open_('doc_summary_by_repo', { dupSort: true }),
 		};
 
 		// Schema-version pre-flight check. Wrapped in a write txn so the

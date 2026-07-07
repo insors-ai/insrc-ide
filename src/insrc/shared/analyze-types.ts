@@ -128,3 +128,96 @@ export interface AnalyzeTaskTemplate {
 	 */
 	readonly isAggregator?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Doc summariser types (plans/docs-module.md Section 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Path-based doc family classification. Assigned at summarisation time
+ * by matching the doc entity's file path against a set of glob patterns
+ * ordered by priority (design > plans > docs > adr > rfc > spec >
+ * changelog > readme > other). The LLM can override in `summary`.
+ */
+export type DocFamily =
+	| 'design'
+	| 'plans'
+	| 'docs'
+	| 'adr'
+	| 'rfc'
+	| 'spec'
+	| 'changelog'
+	| 'readme'
+	| 'other';
+
+/**
+ * LLM-inferred document kind. Orthogonal to family (which is path-
+ * based). A doc under `plans/` might still be a `reference` rather
+ * than a `plan` if the prose is descriptive.
+ */
+export type DocSummaryKind =
+	| 'design'
+	| 'plan'
+	| 'requirement'
+	| 'reference'
+	| 'changelog'
+	| 'other';
+
+/**
+ * Freshness signal derived from prose cues (headers like "Status:
+ * FIXED", "superseded by X", "DRAFT"). Best-effort; `unknown` when
+ * the doc gives no signal.
+ */
+export type DocStatus =
+	| 'current'
+	| 'superseded'
+	| 'draft'
+	| 'unknown';
+
+/**
+ * Per-doc summary persisted to the `docSummary` sub-DB after the
+ * indexer completes on a repo (or on a per-file basis when the
+ * watcher fires an update). Keyed by `entityId` = the doc / section
+ * entity's SHA-32 identifier.
+ *
+ * See plans/docs-module.md Section 8 for the full design.
+ */
+export interface DocSummary {
+	/** Canonical doc title -- from the doc's first H1 heading, or the
+	 *  file's basename if none. */
+	readonly title:           string;
+	/** Path-based family classification (design / plans / docs / etc). */
+	readonly family:          DocFamily;
+	/** LLM-inferred kind (may differ from family; e.g. a doc under
+	 *  `plans/` might still be a `reference`). */
+	readonly kind:            DocSummaryKind;
+	/** 1-6 short topic tags identifying what the doc covers. */
+	readonly subjects:        readonly string[];
+	/** 1-3 sentence gist. */
+	readonly summary:         string;
+	/** 0-8 named decisions the doc records. */
+	readonly keyDecisions:    readonly string[];
+	/** 0-8 named constraints / rules / requirements the doc states. */
+	readonly keyConstraints:  readonly string[];
+	/** Code entity ids the doc mentions (best-effort regex extraction
+	 *  + graph lookup). */
+	readonly relatedEntities: readonly string[];
+	/** Freshness signal from prose cues. */
+	readonly status:          DocStatus;
+	/** ISO timestamp when the summary was written. */
+	readonly summarisedAt:    string;
+	/** Model that produced the summary. Bump-safe: swapping models
+	 *  bulk-invalidates via this field, not via contentHash. */
+	readonly modelId:         string;
+	/** SHA-256 of the source body at summarisation time. Drives
+	 *  skip-if-unchanged on re-summarise. */
+	readonly contentHash:     string;
+	/**
+	 * If the summarisation itself failed (LLM unavailable, schema
+	 * unrecoverable after retries), a placeholder row is written with
+	 * every string field set to '' + status='unknown' + an
+	 * `errorCode` explaining why. Prevents endless retry on a doc
+	 * that consistently breaks; explicit re-summarise clears it.
+	 */
+	readonly errorCode?:      string;
+}

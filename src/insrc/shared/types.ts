@@ -620,7 +620,24 @@ export type IndexJob =
   | { kind: 'reembed'; repoPath: string }
   | { kind: 'config-full';    scope: ConfigScope }
   | { kind: 'config-file';    filePath: string; scope: ConfigScope; event: 'create' | 'update' | 'delete' }
-  | { kind: 'config-reindex'; scope: ConfigScope };
+  | { kind: 'config-reindex'; scope: ConfigScope }
+  /**
+   * Post-indexing doc summarisation. Sweeps every doc / section
+   * entity in the repo, calls the summariser LLM per entity, writes
+   * to the `docSummary` sub-DB. Runs at background priority AFTER
+   * a full index completes (fired inline at the end of full-index)
+   * OR on demand. Skip-if-unchanged means re-summarise is cheap.
+   *
+   * See plans/docs-module.md Section 8.
+   */
+  | { kind: 'doc-summarise-repo'; repoPath: string }
+  /**
+   * Single-entity doc summarisation. Fired by the file watcher
+   * when a doc file is created / updated -- the indexer re-parses,
+   * upserts entities, then enqueues one of these per doc entity
+   * so the summary follows the body.
+   */
+  | { kind: 'doc-summarise-entity'; entityId: string };
 
 // ---------------------------------------------------------------------------
 // Config management

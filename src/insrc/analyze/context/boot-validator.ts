@@ -30,6 +30,7 @@ import {
 	SCOPE_PICKER_PROMPT_PATH,
 } from '../classifier/index.js';
 import { PLANNER_PROMPT_PATH } from '../planner/index.js';
+import { DOC_SUMMARISER_PROMPT_PATH } from '../summariser/index.js';
 import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
 import { DATA_AGGREGATE_PROMPT_PATH    } from '../runtimes/data/index.js';
 import { INFRA_AGGREGATE_PROMPT_PATH   } from '../runtimes/infra/index.js';
@@ -103,6 +104,7 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	out.push({ componentId: 'classifier',        relPath: CLASSIFY_PROMPT_PATH });
 	out.push({ componentId: 'scope-picker',      relPath: SCOPE_PICKER_PROMPT_PATH });
 	out.push({ componentId: 'planner',           relPath: PLANNER_PROMPT_PATH });
+	out.push({ componentId: 'doc-summariser',    relPath: DOC_SUMMARISER_PROMPT_PATH });
 	out.push({ componentId: 'code.aggregate.report',    relPath: CODE_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'infra.aggregate.report',   relPath: INFRA_AGGREGATE_PROMPT_PATH   });

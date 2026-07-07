@@ -68,6 +68,7 @@ import {
 	SHARED_MODULES_NAMESPACE_BY_LANG,
 	SHARED_MODULES_REPO_ID,
 } from '../shared/repo-namespaces.js';
+import { deleteDocSummaryInTxn } from './doc-summaries.js';
 
 const log = getLogger('db.entities');
 
@@ -536,6 +537,12 @@ export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promis
 	// recovery paths).
 	const { deleteEntityVecsForRepo } = await import('./lance/entity-vec.js');
 	await deleteEntityVecsForRepo(repo);
+	// Doc-summary repo cascade: repo-scoped drop of every summary row +
+	// secondary-index entry. Belt-and-suspenders alongside the per-id
+	// cascade `detachDeleteEntitiesInTxn` fires -- catches summary rows
+	// whose primary entity_string_by_u64 mapping was lost.
+	const { deleteDocSummariesForRepo } = await import('./doc-summaries.js');
+	await deleteDocSummariesForRepo(null as unknown as DbClient, repo);
 }
 
 export async function getEntity(_db: DbClient, id: string): Promise<Entity | null> {
@@ -988,6 +995,10 @@ function detachDeleteEntitiesInTxn(s: GraphStore, u64s: readonly bigint[]): void
 		// Walk in_edge by prefix(u64), removing both the in_edge
 		// entry and the matching out_edge mirror at (from, kind, u64).
 		sweepIncomingEdges(s, u64);
+		// Doc-summariser cascade (plans/docs-module.md Section 8):
+		// drop any DocSummary row + its secondary index entry keyed
+		// on this u64. Cheap no-op when the entity isn't a doc.
+		deleteDocSummaryInTxn(s, u64);
 		// Drop derived indices BEFORE the row itself so we have the
 		// row's (repoId, kind, name) available for the name_index
 		// lookup. Reverse-lookup via entityStringByU64 is O(1).

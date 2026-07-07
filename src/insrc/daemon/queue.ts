@@ -92,6 +92,27 @@ export class IndexQueue {
       if (already) return;
     }
 
+    // Deduplicate doc-summarise-repo jobs for the same repo. If a
+    // background summarisation is already queued, skip -- the
+    // enqueued sweep will pick up whatever's new when it runs.
+    if (job.kind === 'doc-summarise-repo') {
+      const already = this.queue.some(
+        j => j.kind === 'doc-summarise-repo' && j.repoPath === job.repoPath,
+      );
+      if (already) return;
+    }
+
+    // Deduplicate doc-summarise-entity jobs for the same entity.
+    // Watcher-driven per-file summarisation -- only the latest
+    // enqueued instance survives; the driver's skip-if-unchanged
+    // makes the trailing enqueue cheap anyway.
+    if (job.kind === 'doc-summarise-entity') {
+      const idx = this.queue.findIndex(
+        j => j.kind === 'doc-summarise-entity' && j.entityId === job.entityId,
+      );
+      if (idx >= 0) return;
+    }
+
     this.queue.push(job);
     this.resolve?.(); // wake up the drain loop if it's waiting
   }
