@@ -1080,7 +1080,7 @@ function parseScopeRef(value: unknown): AnalyzeScopeRef {
 function parseIntent(value: unknown): ClassifiedIntent {
 	const obj = requireObject(value, 'intent');
 	const target = requireString(obj, 'target');
-	const validTargets = ['code', 'data', 'infra', 'generic'];
+	const validTargets = ['code', 'data', 'infra', 'generic', 'docs'];
 	if (!validTargets.includes(target)) {
 		throw new TypeError(`intent.target: must be one of ${validTargets.join(', ')}; got '${target}'`);
 	}
@@ -1144,7 +1144,7 @@ function parseTemplate(value: unknown): AnalyzeTaskTemplate {
 		throw new TypeError(`template.kind: must be 'leaf' or 'planner'; got '${kind}'`);
 	}
 	const target = requireString(obj, 'target');
-	const validTargets = ['code', 'data', 'infra', 'generic'];
+	const validTargets = ['code', 'data', 'infra', 'generic', 'docs'];
 	if (!validTargets.includes(target)) {
 		throw new TypeError(`template.target: invalid '${target}'`);
 	}
