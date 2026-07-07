@@ -751,6 +751,13 @@ function buildToolDeps(args: BuildToolDepsArgs): ToolDeps {
 	return {
 		sessionId,
 		repoPath,
+		// V1 shaper closure = the scope's containing repo only.
+		// plans/docs-module.md Section 6.3 pins the docs retriever to
+		// this policy; graph_search + docs_* tools use this to bound
+		// their queries. A future revision may widen to the transitive
+		// DEPENDS_ON closure, but doing so at the shaper boundary is
+		// out of scope for the docs module.
+		closureRepos:   [repoPath],
 		send:           () => { /* shaper does not stream */ },
 		requestId:      0,
 		ollamaProvider: args.provider,
