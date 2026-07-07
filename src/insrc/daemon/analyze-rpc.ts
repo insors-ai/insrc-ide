@@ -927,7 +927,7 @@ interface RunStartParams {
 	readonly runId: string;
 	readonly userPrompt: string;
 	readonly scopeRef: AnalyzeScopeRef;
-	readonly targetHint?: 'code' | 'data' | 'infra' | 'generic';
+	readonly targetHint?: 'code' | 'data' | 'infra' | 'generic' | 'docs';
 	readonly scopeHint?: AnalyzeScope;
 }
 
@@ -983,7 +983,7 @@ function parseRunStartParams(params: unknown): RunStartParams {
 	};
 	if (obj['targetHint'] !== undefined) {
 		const th = obj['targetHint'];
-		const validTargets = ['code', 'data', 'infra', 'generic'];
+		const validTargets = ['code', 'data', 'infra', 'generic', 'docs'];
 		if (typeof th !== 'string' || !validTargets.includes(th)) {
 			throw new TypeError(
 				`targetHint: must be one of ${validTargets.join(', ')}; got ${JSON.stringify(th)}`,

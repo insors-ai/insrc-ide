@@ -87,10 +87,58 @@ export const dataAggregateReport: AnalyzeTaskTemplate = {
 	isAggregator: true,
 };
 
+/** plans/docs-module.md Phase 4. Data-side adherence check. */
+export const dataAdherenceCheck: AnalyzeTaskTemplate = {
+	id:          'data.adherence.check',
+	target:      'data',
+	family:      'adherence',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Check data-layer adherence against a set of doc-derived constraints. `dataSubject` names a connection / table / dataset; constraints come from an upstream docs.constraint.enumerate task OR params.constraints inline. Preserves BOTH doc and data positions on contradictions -- reader decides.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['dataSubject'],
+		properties: {
+			dataSubject:       { type: 'string', minLength: 1 },
+			constraintsSource: { type: 'string' },
+			constraints:       {
+				type:  'array',
+				items: {
+					type:                 'object',
+					additionalProperties: true,
+					required:             ['constraint'],
+					properties: {
+						constraint:     { type: 'string' },
+						sourceEntityId: { type: 'string' },
+						file:           { type: 'string' },
+						heading:        { type: 'string' },
+					},
+				},
+			},
+			maxSourceExcerpts: { type: 'integer', minimum: 1, maximum: 30 },
+		},
+	},
+	produces:     ['adherence-report'],
+	outputSchema: {
+		type:                 'object',
+		required:             ['dataSubject', 'matches', 'drifts', 'missingImpl', 'contradictions'],
+		additionalProperties: true,
+		properties: {
+			dataSubject:    { type: 'string' },
+			matches:        { type: 'array' },
+			drifts:         { type: 'array' },
+			missingImpl:    { type: 'array' },
+			contradictions: { type: 'array' },
+		},
+	},
+};
+
 export const DATA_TEMPLATES: readonly AnalyzeTaskTemplate[] = [
 	dataDiscoveryConnections,
 	dataDiscoveryObjects,
 	dataSchemaTable,
+	dataAdherenceCheck,
 	dataAggregateReport,
 ];
 

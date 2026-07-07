@@ -35,6 +35,11 @@ import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
 import { DATA_AGGREGATE_PROMPT_PATH    } from '../runtimes/data/index.js';
 import { INFRA_AGGREGATE_PROMPT_PATH   } from '../runtimes/infra/index.js';
 import { GENERIC_AGGREGATE_PROMPT_PATH } from '../runtimes/generic/index.js';
+import {
+	DOCS_AGGREGATE_PROMPT_PATH,
+	DOCS_CONSTRAINT_ENUMERATE_PROMPT_PATH,
+	DOCS_DECISION_TRACE_PROMPT_PATH,
+} from '../runtimes/docs/index.js';
 import { getLogger } from '../../shared/logger.js';
 
 import { PROMPT_PATHS } from './index.js';
@@ -109,6 +114,9 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'infra.aggregate.report',   relPath: INFRA_AGGREGATE_PROMPT_PATH   });
 	out.push({ componentId: 'generic.aggregate.report', relPath: GENERIC_AGGREGATE_PROMPT_PATH });
+	out.push({ componentId: 'docs.aggregate.report',        relPath: DOCS_AGGREGATE_PROMPT_PATH             });
+	out.push({ componentId: 'docs.decision.trace',          relPath: DOCS_DECISION_TRACE_PROMPT_PATH        });
+	out.push({ componentId: 'docs.constraint.enumerate',    relPath: DOCS_CONSTRAINT_ENUMERATE_PROMPT_PATH  });
 	return out;
 }
 

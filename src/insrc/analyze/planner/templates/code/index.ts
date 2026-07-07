@@ -165,12 +165,81 @@ export const codeAggregateReport: AnalyzeTaskTemplate = {
 	isAggregator: true,
 };
 
+/**
+ * plans/docs-module.md Phase 4. Cross-cutting adherence check.
+ * Given a code subject + a set of doc-derived constraints,
+ * evaluate implementation adherence. Preserves BOTH doc position
+ * and code position on contradictions -- reader decides.
+ */
+export const codeAdherenceCheck: AnalyzeTaskTemplate = {
+	id:          'code.adherence.check',
+	target:      'code',
+	family:      'adherence',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Check code adherence against a set of doc-derived constraints. Consumes constraints (from an upstream docs.constraint.enumerate task OR passed inline via params.constraints) + a code subject. Emits matches / drifts / missing-impl / contradictions. On contradictions, preserves BOTH doc position and code position verbatim -- no auto-adjudication.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['codeSubject'],
+		properties: {
+			codeSubject: {
+				type:        'string',
+				minLength:   1,
+				description: 'The code area to check (a file path, symbol name, or free-form subject like "the analyze framework classifier").',
+			},
+			constraintsSource: {
+				// Which upstream task provides the constraints. Optional
+				// -- planner may pass `constraints` inline via
+				// `params.constraints` if a suitable upstream task
+				// isn't in the plan.
+				type: 'string',
+				description: 'taskId of the upstream docs.constraint.enumerate task whose output feeds constraints.',
+			},
+			constraints: {
+				type:  'array',
+				items: {
+					type:                 'object',
+					additionalProperties: true,
+					required:             ['constraint'],
+					properties: {
+						constraint:     { type: 'string' },
+						sourceEntityId: { type: 'string' },
+						file:           { type: 'string' },
+						heading:        { type: 'string' },
+					},
+				},
+				description: 'Inline constraint list, used when the plan does not have an upstream docs.constraint.enumerate task.',
+			},
+			maxSourceExcerpts: {
+				type:    'integer',
+				minimum: 1,
+				maximum: 30,
+			},
+		},
+	},
+	produces:     ['adherence-report'],
+	outputSchema: {
+		type:                 'object',
+		required:             ['codeSubject', 'matches', 'drifts', 'missingImpl', 'contradictions'],
+		additionalProperties: true,
+		properties: {
+			codeSubject:    { type: 'string' },
+			matches:        { type: 'array' },
+			drifts:         { type: 'array' },
+			missingImpl:    { type: 'array' },
+			contradictions: { type: 'array' },
+		},
+	},
+};
+
 export const CODE_TEMPLATES: readonly AnalyzeTaskTemplate[] = [
 	codeDiscoveryModules,
 	codeDiscoveryEntrypoints,
 	codeSurfaceFunctional,
 	codeStructureModuleTree,
 	codeSubrunDeepDive,
+	codeAdherenceCheck,
 	codeAggregateReport,
 ];
 

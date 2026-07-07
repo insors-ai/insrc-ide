@@ -48,6 +48,7 @@ const TARGET_TO_KINDS: Readonly<Record<AnalyzeTarget, ReadonlyArray<AnalyzeScope
 	code:    ['repo', 'module', 'file', 'symbol', 'workspace'],
 	data:    ['connection', 'workspace'],
 	infra:   ['manifest-dir', 'workspace'],
+	docs:    ['repo', 'module', 'file', 'workspace'],
 	generic: ['repo', 'module', 'file', 'symbol', 'connection', 'manifest-dir', 'workspace'],
 });
 

@@ -287,7 +287,18 @@ export async function optimizeEntityVecIndex(
 // Search
 // ---------------------------------------------------------------------------
 
-export type EntityVecFilter = 'all' | 'code' | 'artifact';
+/**
+ * ANN query filter. Coarse forms map to a single `artifact` flag
+ * check; the object form specifies an explicit kind allowlist
+ * (see plans/docs-module.md Section 6.4). The kinds form is
+ * required by the docs retriever to scope ANN to `document |
+ * section | config` without also including code entities.
+ */
+export type EntityVecFilter =
+	| 'all'
+	| 'code'
+	| 'artifact'
+	| { readonly kinds: readonly string[] };
 
 export async function searchEntityVecs(
 	queryVec: number[],
@@ -305,6 +316,15 @@ export async function searchEntityVecs(
 	}
 	if (filter === 'code')     conditions.push('artifact = false');
 	if (filter === 'artifact') conditions.push('artifact = true');
+	if (typeof filter === 'object' && Array.isArray(filter.kinds)) {
+		// Empty kinds array means "no rows match" -- Lance's DataFusion
+		// backend rejects `kind IN ()`, so short-circuit here.
+		if (filter.kinds.length === 0) return [];
+		const list = filter.kinds
+			.map(k => `'${escapeLanceString(k)}'`)
+			.join(', ');
+		conditions.push(`kind IN (${list})`);
+	}
 	// Always exclude the seed sentinel from results
 	conditions.push("id != '_seed_entity_vec'");
 

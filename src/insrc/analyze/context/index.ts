@@ -54,6 +54,7 @@ const PROMPT_PATHS: Readonly<Record<ShaperId, string>> = {
 	code:           'prompts/analyze/code.system.md',
 	data:           'prompts/analyze/data.system.md',
 	infra:          'prompts/analyze/infra.system.md',
+	docs:           'prompts/analyze/docs.system.md',
 };
 
 function shaperIdForRun(target: RunTarget): ShaperId {

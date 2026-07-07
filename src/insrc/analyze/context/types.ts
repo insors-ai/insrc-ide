@@ -22,7 +22,7 @@ import type {
 export type ShaperMode = 'classification' | 'run' | 'task';
 
 /** Shaper ids -- five total, dispatched by mode + target. */
-export type ShaperId = 'classification' | 'generic' | 'code' | 'data' | 'infra';
+export type ShaperId = 'classification' | 'generic' | 'code' | 'data' | 'infra' | 'docs';
 
 /**
  * Layered bundle the shaper emits. Layer set is identical across

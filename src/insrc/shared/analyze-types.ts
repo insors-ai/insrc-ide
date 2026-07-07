@@ -24,7 +24,7 @@
  */
 
 /** Per-target dispatch key. Mirrors design/analyze-framework.md "Intent". */
-export type AnalyzeTarget = 'code' | 'data' | 'infra' | 'generic';
+export type AnalyzeTarget = 'code' | 'data' | 'infra' | 'generic' | 'docs';
 
 /** Scope buckets (INVERTED depth policy -- XL is structural, XS is detailed). */
 export type AnalyzeScope = 'XS' | 'S' | 'M' | 'L' | 'XL';

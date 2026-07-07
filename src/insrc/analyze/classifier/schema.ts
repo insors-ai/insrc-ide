@@ -23,7 +23,7 @@ import type { ClassifiedIntent } from '../../shared/analyze-types.js';
 
 export const CLASSIFIER_SCHEMA_VERSION = 1;
 
-export const TARGET_ENUM = ['code', 'data', 'infra', 'generic'] as const;
+export const TARGET_ENUM = ['code', 'data', 'infra', 'generic', 'docs'] as const;
 export const SCOPE_BUCKET_ENUM = ['XS', 'S', 'M', 'L', 'XL'] as const;
 export const SCOPE_REF_KIND_ENUM = [
 	'repo',

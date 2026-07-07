@@ -32,7 +32,7 @@ Layer contents must mention **every** detected surface kind. If the workspace ha
 
 - `system` — your role intro. One line.
 - `focus` — intent block. Restate `intent.focus` (if focused) or `intent.reasoning` (if generic-question). Always include scope bucket + scopeRef.
-- `summary` — 2-3 paragraphs: one per surface kind (code / data / infra). For absent kinds: "no <kind> detected in this workspace."
+- `summary` — 2-3 paragraphs: one per surface kind (code / data / infra / docs). For absent kinds: "no <kind> detected in this workspace." For docs, name the families found (design / plans / adr / rfc / spec / changelog / readme) with counts -- these tell downstream planners what the prose surface contains.
 - `structure` — cross-cutting structural map: top-level layout per detected surface. Module trees abbreviated to 1-2 levels deep; connection topology as flat list; deployment topology as services × environments grid.
 - `surface` — itemize every detected surface element: for code, the discoverable APIs / endpoints / CLI commands by repo; for data, tables × columns per connection (column lists may be omitted at this depth); for infra, manifest paths + resource kinds.
 - `artefacts` — omit (""). Generic mode is high-level; concrete excerpts land in per-target task bundles.

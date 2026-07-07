@@ -21,6 +21,7 @@ import { registerCodeTemplates    } from './code/index.js';
 import { registerDataTemplates    } from './data/index.js';
 import { registerInfraTemplates   } from './infra/index.js';
 import { registerGenericTemplates } from './generic/index.js';
+import { registerDocsTemplates    } from './docs/index.js';
 
 const log = getLogger('analyze:planner:templates:bootstrap');
 
@@ -35,6 +36,7 @@ export function registerBuiltinTemplates(): void {
 	registerDataTemplates();
 	registerInfraTemplates();
 	registerGenericTemplates();
+	registerDocsTemplates();
 	_bootstrapped = true;
 	log.info({ count: getTemplateCatalog().length }, 'analyze templates registered');
 }

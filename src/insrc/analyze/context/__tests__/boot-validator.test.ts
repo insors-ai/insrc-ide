@@ -191,6 +191,7 @@ const SHAPER_ROLE_INTRO_HINTS: Readonly<Record<keyof typeof PROMPT_PATHS, RegExp
 	code:           /code-shaper/i,
 	data:           /data-shaper/i,
 	infra:          /infrastructure-shaper|infra-shaper/i,
+	docs:           /docs-shaper/i,
 };
 
 for (const id of Object.keys(PROMPT_PATHS) as (keyof typeof PROMPT_PATHS)[]) {

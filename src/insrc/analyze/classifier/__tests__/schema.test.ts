@@ -60,8 +60,8 @@ test('CLASSIFIER_SCHEMA_VERSION is a positive integer', () => {
 	assert.ok(CLASSIFIER_SCHEMA_VERSION >= 1);
 });
 
-test('TARGET_ENUM enumerates the documented four targets', () => {
-	assert.deepEqual([...TARGET_ENUM].sort(), ['code', 'data', 'generic', 'infra']);
+test('TARGET_ENUM enumerates the documented five targets', () => {
+	assert.deepEqual([...TARGET_ENUM].sort(), ['code', 'data', 'docs', 'generic', 'infra']);
 });
 
 test('SCOPE_BUCKET_ENUM enumerates the five buckets in size order', () => {

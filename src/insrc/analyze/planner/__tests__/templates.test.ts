@@ -130,10 +130,10 @@ test('registerTemplate: family=aggregate AND isAggregator:true is accepted', () 
 // registerBuiltinTemplates -- expected count + collision-free + idempotent
 // ---------------------------------------------------------------------------
 
-test('registerBuiltinTemplates registers exactly 15 builtins (6 code + 4 data + 4 infra + 1 generic) without collision', () => {
+test('registerBuiltinTemplates registers exactly 24 builtins (7 code + 5 data + 5 infra + 1 generic + 6 docs) without collision', () => {
 	freshRegistry();
 	assert.doesNotThrow(() => registerBuiltinTemplates());
-	assert.equal(getTemplateCatalog().length, 15);
+	assert.equal(getTemplateCatalog().length, 24);
 });
 
 test('registerBuiltinTemplates is idempotent (latch prevents double-register)', () => {
@@ -148,7 +148,7 @@ test('registerBuiltinTemplates is idempotent (latch prevents double-register)', 
 test('every per-target subset has its own aggregator', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
-	for (const target of ['code', 'data', 'infra', 'generic'] as const) {
+	for (const target of ['code', 'data', 'infra', 'generic', 'docs'] as const) {
 		const agg = getAggregatorFor(target);
 		assert.notEqual(agg, undefined, `target=${target} should have an aggregator`);
 		assert.equal(agg!.target, target);
@@ -161,11 +161,11 @@ test('every per-target subset has its own aggregator', () => {
 // getTemplatesForTarget
 // ---------------------------------------------------------------------------
 
-test('getTemplatesForTarget(code) returns 6 code templates (5 leaf + 1 planner)', () => {
+test('getTemplatesForTarget(code) returns 7 code templates (6 leaf + 1 planner)', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
 	const code = getTemplatesForTarget('code');
-	assert.equal(code.length, 6);
+	assert.equal(code.length, 7);
 	for (const t of code) {
 		assert.equal(t.target, 'code');
 	}
@@ -175,24 +175,37 @@ test('getTemplatesForTarget(code) returns 6 code templates (5 leaf + 1 planner)'
 	assert.equal(planners[0]!.id, 'code.subrun.deep-dive');
 });
 
-test('getTemplatesForTarget(data) returns 4 data templates', () => {
+test('getTemplatesForTarget(data) returns 5 data templates', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
 	const data = getTemplatesForTarget('data');
-	assert.equal(data.length, 4);
+	assert.equal(data.length, 5);
 	for (const t of data) {
 		assert.equal(t.target, 'data');
 	}
 });
 
-test('getTemplatesForTarget(infra) returns 4 infra templates', () => {
+test('getTemplatesForTarget(infra) returns 5 infra templates', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
 	const infra = getTemplatesForTarget('infra');
-	assert.equal(infra.length, 4);
+	assert.equal(infra.length, 5);
 	for (const t of infra) {
 		assert.equal(t.target, 'infra');
 	}
+});
+
+test('getTemplatesForTarget(docs) returns 6 docs templates (5 leaf + 1 planner)', () => {
+	freshRegistry();
+	registerBuiltinTemplates();
+	const docs = getTemplatesForTarget('docs');
+	assert.equal(docs.length, 6);
+	for (const t of docs) {
+		assert.equal(t.target, 'docs');
+	}
+	const planners = docs.filter(t => t.kind === 'planner');
+	assert.equal(planners.length, 1);
+	assert.equal(planners[0]!.id, 'docs.subrun.deep-dive');
 });
 
 test('getTemplatesForTarget(generic) returns the FULL catalog (INV-4 permits cross-target)', () => {
@@ -253,7 +266,7 @@ test('aggregator templates produce exactly [\'report\']', () => {
 	freshRegistry();
 	registerBuiltinTemplates();
 	const aggregators = getTemplateCatalog().filter(t => t.isAggregator === true);
-	assert.equal(aggregators.length, 4); // code + data + infra + generic
+	assert.equal(aggregators.length, 5); // code + data + infra + generic + docs
 	for (const t of aggregators) {
 		assert.deepEqual([...t.produces!], ['report'],
 			`aggregator ${t.id} should produce ['report'], got ${JSON.stringify(t.produces)}`);

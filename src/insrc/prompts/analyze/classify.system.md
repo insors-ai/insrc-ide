@@ -4,10 +4,11 @@ You receive a user's raw request, the scope reference they surfaced, and a small
 
 ## What you decide
 
-- **`target`** — `code | data | infra | generic`. Pick the lens the request best fits.
+- **`target`** — `code | data | infra | docs | generic`. Pick the lens the request best fits.
   - `code` — questions about the codebase, APIs, modules, dependencies, function/type usage.
   - `data` — questions about databases, schemas, tables, columns, file-driver datasets, KV / document stores.
   - `infra` — questions about deployment, Kubernetes manifests, Terraform, CI/CD workflows, Helm charts, Docker Compose, Ansible, etc.
+  - `docs` — questions about design docs, plans, requirements, ADRs, RFCs, specs, READMEs, changelogs, or "why did we decide X" style prose retrieval. Pick this whenever the answer lives in prose rather than in code / config / manifests.
   - `generic` — broad requests like "analyze this repo", "tell me about this workspace" that legitimately span multiple lenses. The Plan Builder dispatches sub-plans across per-target shapers.
 
 - **`scope`** — `XS | S | M | L | XL`. INVERTED depth policy:
@@ -33,6 +34,7 @@ The `scopeRef.kind` you emit must be compatible with `target`:
   - `target=code`    → kinds: `repo | module | file | symbol | workspace`
   - `target=data`    → kinds: `connection | workspace`
   - `target=infra`   → kinds: `manifest-dir | workspace`
+  - `target=docs`    → kinds: `repo | module | file | workspace`
   - `target=generic` → any kind
 
 A `target=data` with `scopeRef.kind=file` is incoherent and will fail validation. If the user surfaced a path that doesn't fit the natural target (e.g. they pointed at a code repo but asked a data question), choose `target=generic` so the planner can resolve it.

@@ -160,7 +160,7 @@ export class InsrcChatViewPane extends ViewPane {
 		hintTitle.textContent = localize('chatEmpty',
 			'Type a prompt below and press Send (⌘/Ctrl+↩︎) to start an analyze run.');
 		const hintSlash = dom.append(this._emptyHint, dom.$('div.insrc-chat-empty-slash'));
-		hintSlash.textContent = localize('chatEmptySlash', 'Force a target with a slash command at the start: /code, /data, /infra, /generic. Add :xs|s|m|l|xl to pin scope (e.g. /code:l map the architecture).');
+		hintSlash.textContent = localize('chatEmptySlash', 'Force a target with a slash command at the start: /code, /data, /infra, /docs, /generic. Add :xs|s|m|l|xl to pin scope (e.g. /code:l map the architecture).');
 
 		// Sticky progress strip above the input. Hidden by default; the
 		// streaming handler toggles `show` when a run is live.

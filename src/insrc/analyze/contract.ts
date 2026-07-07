@@ -21,5 +21,5 @@
  *      design/analyze-context-builder.md "The bundle"
  */
 export const CONTRACT_FOOTER_MD = `## Contract reminder
-- Cite every claim. Use \`{ kind: 'source', file, lineStart, lineEnd }\` for source excerpts, \`{ kind: 'entity', entityId }\` for indexer-known entities, \`{ kind: 'doc', url, anchor? }\` for external references.
+- Cite every claim. Use \`{ kind: 'source', file, lineStart, lineEnd }\` for source excerpts, \`{ kind: 'entity', entityId }\` for indexer-known code entities, \`{ kind: 'document', entityId, file }\` for whole-doc citations, \`{ kind: 'section', entityId, file, heading, lineStart, lineEnd }\` for section-level doc citations, \`{ kind: 'doc', url, anchor? }\` for external references.
 - No free text outside the structured JSON output.`;

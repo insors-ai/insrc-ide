@@ -531,7 +531,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	 * `/<target>` prefix. Returns { target, scope?, rest } when it does.
 	 */
 	private _parseSlashCommand(input: string): { target: string; scope?: string; rest: string } | undefined {
-		const m = input.match(/^\/(code|data|infra|generic)(?::(xs|s|m|l|xl))?(?:\s+(.+))?$/i);
+		const m = input.match(/^\/(code|data|infra|generic|docs)(?::(xs|s|m|l|xl))?(?:\s+(.+))?$/i);
 		if (m === null) { return undefined; }
 		const target = m[1]!.toLowerCase();
 		const scope = m[2] !== undefined ? m[2].toUpperCase() : undefined;

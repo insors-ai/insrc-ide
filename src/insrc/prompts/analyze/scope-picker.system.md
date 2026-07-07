@@ -30,6 +30,7 @@ Weigh three inputs, in decreasing priority:
 3. **Target family** — some targets skew smaller than others:
    - `data` — often bounded by connection count; XL is unusual. Prefer M / L unless the user surfaced multiple connections.
    - `infra` — often bounded by manifest-dir count; XL is unusual. Prefer M / L.
+   - `docs` — bounded by doc corpus size (usually a few dozen to a few hundred docs). Prefer S / M. XL is only appropriate when the workspace has hundreds of design + plan + spec docs and the user genuinely wants a comprehensive survey.
    - `code` — full XS-XL range in play.
    - `generic` — biases toward L / XL by nature (spans multiple lenses).
 

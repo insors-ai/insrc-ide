@@ -87,10 +87,58 @@ export const infraAggregateReport: AnalyzeTaskTemplate = {
 	isAggregator: true,
 };
 
+/** plans/docs-module.md Phase 4. Infra-side adherence check. */
+export const infraAdherenceCheck: AnalyzeTaskTemplate = {
+	id:          'infra.adherence.check',
+	target:      'infra',
+	family:      'adherence',
+	kind:        'leaf',
+	revision:    'r1',
+	description: 'Check infra manifest adherence against a set of doc-derived constraints. `infraSubject` names a manifest / family / environment; constraints come from an upstream docs.constraint.enumerate task OR params.constraints inline. Preserves BOTH doc and infra positions on contradictions -- reader decides.',
+	inputSchema: {
+		type:                 'object',
+		additionalProperties: false,
+		required:             ['infraSubject'],
+		properties: {
+			infraSubject:      { type: 'string', minLength: 1 },
+			constraintsSource: { type: 'string' },
+			constraints:       {
+				type:  'array',
+				items: {
+					type:                 'object',
+					additionalProperties: true,
+					required:             ['constraint'],
+					properties: {
+						constraint:     { type: 'string' },
+						sourceEntityId: { type: 'string' },
+						file:           { type: 'string' },
+						heading:        { type: 'string' },
+					},
+				},
+			},
+			maxSourceExcerpts: { type: 'integer', minimum: 1, maximum: 30 },
+		},
+	},
+	produces:     ['adherence-report'],
+	outputSchema: {
+		type:                 'object',
+		required:             ['infraSubject', 'matches', 'drifts', 'missingImpl', 'contradictions'],
+		additionalProperties: true,
+		properties: {
+			infraSubject:   { type: 'string' },
+			matches:        { type: 'array' },
+			drifts:         { type: 'array' },
+			missingImpl:    { type: 'array' },
+			contradictions: { type: 'array' },
+		},
+	},
+};
+
 export const INFRA_TEMPLATES: readonly AnalyzeTaskTemplate[] = [
 	infraDiscoveryFamilies,
 	infraInventoryKubernetes,
 	infraInventoryTerraform,
+	infraAdherenceCheck,
 	infraAggregateReport,
 ];
 

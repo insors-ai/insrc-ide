@@ -28,6 +28,7 @@ import { CODE_RUNTIMES    } from './code/index.js';
 import { DATA_RUNTIMES    } from './data/index.js';
 import { INFRA_RUNTIMES   } from './infra/index.js';
 import { GENERIC_RUNTIMES } from './generic/index.js';
+import { DOCS_RUNTIMES    } from './docs/index.js';
 
 const log = getLogger('analyze:runtimes:bootstrap');
 
@@ -52,6 +53,7 @@ export function registerBuiltinRuntimes(): void {
 		{ name: 'data',    runtimes: DATA_RUNTIMES    },
 		{ name: 'infra',   runtimes: INFRA_RUNTIMES   },
 		{ name: 'generic', runtimes: GENERIC_RUNTIMES },
+		{ name: 'docs',    runtimes: DOCS_RUNTIMES    },
 	];
 
 	let total = 0;

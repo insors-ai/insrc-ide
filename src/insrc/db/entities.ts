@@ -693,6 +693,52 @@ export async function listEntitiesByKind(
 	return out;
 }
 
+/**
+ * Variadic version of `listEntitiesByKind`: return every entity
+ * whose kind is in the given set. Single entity-table scan; O(N)
+ * with the kind check inlined per row. plans/docs-module.md Section
+ * 6.4 -- the docs retriever calls this to enumerate every doc /
+ * section / config entity in a repo without three separate scans.
+ *
+ * Unknown kind strings are silently ignored (their kindByte
+ * mapping returns undefined so no row will match). Empty kind
+ * list returns [].
+ */
+export async function listEntitiesByKinds(
+	_db: DbClient,
+	kinds: readonly EntityKind[],
+	opts: { readonly repo?: string | undefined } = {},
+): Promise<Entity[]> {
+	if (kinds.length === 0) return [];
+	const store = await getGraphStore();
+	const kindBytes = new Set<number>();
+	for (const k of kinds) {
+		const b = ENTITY_KIND_BYTE[k as keyof typeof ENTITY_KIND_BYTE];
+		if (b !== undefined) kindBytes.add(b);
+	}
+	if (kindBytes.size === 0) return [];
+
+	let repoFilter: number | null = null;
+	if (opts.repo !== undefined) {
+		const id = lookupRepoIdInTxn(store, opts.repo);
+		if (id === undefined) return [];
+		repoFilter = id;
+	}
+
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>();
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		const rowKindByte = ENTITY_KIND_BYTE[row.kind];
+		if (rowKindByte === undefined || !kindBytes.has(rowKindByte)) continue;
+		if (repoFilter !== null && row.repoId !== repoFilter) continue;
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+	}
+	return out;
+}
+
 export async function listEntitiesForRepo(_db: DbClient, repo: string): Promise<Entity[]> {
 	const store = await getGraphStore();
 	const repoId = lookupRepoIdInTxn(store, repo);
