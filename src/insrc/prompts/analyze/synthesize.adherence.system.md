@@ -58,11 +58,13 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
 
 - **`structure`** — mandatory markdown map with these sub-sections, in order:
     - `## Rule` — every constraint / decision text (bulleted) + full citation
-    - `## Matches` — code sites that comply. Each: `- <name> :: <file>:<startLine> :: <one-line why it complies>`
+    - `## Matches` — code sites that comply. Each: `- <name-or-quoted-line-text> :: <file>:<startLine> :: <one-line why it complies>`
     - `## Drifts` — code sites that plausibly violate. Same shape. If none, write `_None_`.
     - `## Contradictions` — verbatim pairs of opposing rule statements. Each pair: two bulleted lines, each with a citation. If none, write `_None_`.
     - `## Related docs` — every unique doc file that surfaced in doc.mention / doc.decision.trace / doc.constraint.enumerate, deduped by file
     - Add a `## Diagnostics` section only if any exploration returned `unsupported` or `failed`.
+
+    HARD CAP per scope for BOTH `## Matches` and `## Drifts`: XS ≤5 lines, S ≤10, M ≤15, L ≤25, XL ≤50. When more evidence was retrieved than the cap allows, pick the highest-signal lines (unique files first; forbidden-value hits before ambiguous ones) and append a single trailing bullet: `- _+N more sites elided; representative sample above._`. Do NOT emit a list longer than the cap -- the num_predict budget is tight and the caller cares about representative evidence, not an exhaustive enumeration.
 
 - **`surface`** — flat inventory of files the bundle touches. One line per unique source (deduped by file):
     - `<file> :: <heading OR entity name> :: <bucket: rule / match / drift / contradiction / related>`

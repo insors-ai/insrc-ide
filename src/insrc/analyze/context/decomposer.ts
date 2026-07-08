@@ -97,6 +97,7 @@ const EXPLORATION_TYPES: readonly ExplorationType[] = [
 	'test.locate',
 	'usage.example',
 	'capability.reuse-check',
+	'search.text',
 	'doc.mention',
 	'doc.decision.trace',
 	'doc.constraint.enumerate',
