@@ -74,9 +74,12 @@ export async function runGrepSearch(opts: GrepSearchOptions): Promise<SearchGrep
 	});
 	if (rg !== null) return rg;
 
+	// No `g` flag on purpose: `regex.test()` with `g` advances
+	// `lastIndex` across calls, so testing many lines with one shared
+	// regex silently misses matches after the first hit. `.test` on a
+	// non-global regex is stateless and correct here.
 	const flags = (opts.caseInsensitive === true ? 'i' : '')
-		+ (opts.multiline === true ? 'm' : '')
-		+ 'g';
+		+ (opts.multiline === true ? 'm' : '');
 	const regex = new RegExp(opts.pattern, flags);
 	const hits: GrepHit[] = [];
 	let truncated = false;
