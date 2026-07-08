@@ -105,10 +105,14 @@ export async function executePlan(args: ExecutePlanArgs): Promise<ExecutedPlan> 
 
 		// Substitute placeholders like `$e1.hits[0].path` in params
 		// against prior outputs BEFORE dispatch. Placeholders that
-		// can't be resolved leave the param as `undefined` and the
-		// runner surfaces its own "required" error -- the executor
-		// treats that as a failed exploration + moves on.
-		const exp: Exploration = substitutePlaceholders(originalExp, outputsById);
+		// resolve to `undefined` (missing dep, bad accessor) or to
+		// empty arrays (dependent output legitimately empty -- e.g.
+		// a module.profile with no exports) return an
+		// `unmetPrerequisites` marker so the executor skips the
+		// runner cleanly instead of letting it throw a generic
+		// "required" error. That keeps the Diagnostics section
+		// readable: "prerequisite empty" vs "runtime failure".
+		const { exp, unmetPrerequisites } = substitutePlaceholders(originalExp, outputsById);
 
 		let output: ExplorationOutput = {
 			type: 'failed',
@@ -124,6 +128,22 @@ export async function executePlan(args: ExecutePlanArgs): Promise<ExecutedPlan> 
 				type: 'unsupported',
 				requested: exp.type,
 				reason: `V1 executor does not implement exploration type '${exp.type}'`,
+			};
+		} else if (unmetPrerequisites.length > 0) {
+			// A placeholder resolved to nothing / to an empty array. The
+			// decomposer emits many recipes with optional steps ("only
+			// when profile.exports is non-empty") whose skip signal is
+			// exactly this. Do NOT invoke the runner -- it would throw
+			// a generic "required" error that the caller reads as a
+			// framework bug rather than a designed skip.
+			output = {
+				type: 'failed',
+				requested: exp.type,
+				errorCode: 'prerequisite-empty',
+				message:
+					`skipped: placeholder(s) [${unmetPrerequisites.join(', ')}] ` +
+					`resolved to empty/undefined against prior outputs. ` +
+					`The dependent exploration produced no data for these accessors.`,
 			};
 		} else {
 			const cacheable = !NON_CACHEABLE.has(exp.type);
@@ -224,39 +244,61 @@ function classifyExplorationError(err: unknown): string {
  *   $e2.profile.exports[0..2]    -- pick indices [0, 1, 2] from an array field
  *   $e1.hits                     -- return the whole `hits` array
  *
- * When a placeholder can't be resolved (missing dep, index out of
- * range, unknown field), the substituted value is `undefined` and
- * the runner surfaces its own "required" error. That gets caught +
- * turned into a `failed` output by the outer loop.
- *
  * The substitution is applied recursively to string values in
  * params. String values NOT starting with `$e` are passed through
  * verbatim.
+ *
+ * Returns the substituted Exploration alongside an
+ * `unmetPrerequisites` list. A prerequisite is "unmet" when a
+ * placeholder resolved to `undefined` (missing dep / bad accessor)
+ * OR to an empty array (dependent output was legitimately empty --
+ * common when a recipe's optional step depends on `$eN.field[0..K]`
+ * and the field is empty). The outer executor loop uses this list
+ * to skip the runner cleanly instead of dispatching with garbage
+ * params.
  */
+interface SubstituteResult {
+	readonly exp:                 Exploration;
+	readonly unmetPrerequisites:  readonly string[];
+}
+
 function substitutePlaceholders(
 	exp:            Exploration,
 	outputsById:    ReadonlyMap<string, ExplorationOutput>,
-): Exploration {
-	const params = substituteValue(exp.params, outputsById) as Record<string, unknown>;
+): SubstituteResult {
+	const unmet: string[] = [];
+	const params = substituteValue(exp.params, outputsById, unmet) as Record<string, unknown>;
 	// If nothing changed, keep the original object so cache hashing
 	// stays stable.
-	if (params === exp.params) return exp;
-	return { ...exp, params };
+	const finalExp = params === exp.params ? exp : { ...exp, params };
+	return { exp: finalExp, unmetPrerequisites: unmet };
 }
 
 function substituteValue(
 	value:       unknown,
 	outputsById: ReadonlyMap<string, ExplorationOutput>,
+	unmet:       string[],
 ): unknown {
 	if (typeof value === 'string') {
 		if (!value.startsWith('$e')) return value;
-		return resolvePlaceholder(value, outputsById);
+		const resolved = resolvePlaceholder(value, outputsById);
+		if (resolved === undefined) {
+			unmet.push(value);
+			return resolved;
+		}
+		// An empty array signals a legitimate "the dependent output
+		// carries no value for this accessor" -- treat it as an unmet
+		// prerequisite so the outer loop skips the exploration cleanly.
+		if (Array.isArray(resolved) && resolved.length === 0) {
+			unmet.push(value);
+		}
+		return resolved;
 	}
 	if (Array.isArray(value)) {
 		let mutated = false;
 		const out: unknown[] = [];
 		for (const item of value) {
-			const sub = substituteValue(item, outputsById);
+			const sub = substituteValue(item, outputsById, unmet);
 			if (sub !== item) mutated = true;
 			out.push(sub);
 		}
@@ -267,7 +309,7 @@ function substituteValue(
 		let mutated = false;
 		const out: Record<string, unknown> = {};
 		for (const k of Object.keys(obj)) {
-			const sub = substituteValue(obj[k], outputsById);
+			const sub = substituteValue(obj[k], outputsById, unmet);
 			if (sub !== obj[k]) mutated = true;
 			out[k] = sub;
 		}

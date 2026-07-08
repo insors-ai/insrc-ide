@@ -151,10 +151,10 @@ test('$eN.field[0..2] returns an array of items', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Unresolved placeholder -> undefined (runner handles as required error)
+// Unresolved placeholder -> skip runner + emit prerequisite-empty diagnostic
 // ---------------------------------------------------------------------------
 
-test('placeholder referencing unknown dep resolves to undefined', async () => {
+test('placeholder referencing unknown dep skips the runner cleanly', async () => {
 	let sawPath: unknown = 'unset';
 	_overrideRunnerForTest('module.profile', async (exp) => {
 		sawPath = (exp.params as { path: unknown }).path;
@@ -175,14 +175,23 @@ test('placeholder referencing unknown dep resolves to undefined', async () => {
 			}),
 		],
 	};
-	await executePlan({
+	const executed = await executePlan({
 		runId: 'r', repoPath: REPO, closureRepos: [REPO],
 		repoLastIndexedAtMs: 1n, plan,
 	});
-	assert.equal(sawPath, undefined);
+	// Runner MUST NOT have been called -- the executor detected the
+	// unmet prerequisite and skipped straight to a failed output.
+	assert.equal(sawPath, 'unset');
+	assert.equal(executed.results.length, 1);
+	const out = executed.results[0]!.output;
+	assert.equal(out.type, 'failed');
+	if (out.type === 'failed') {
+		assert.equal(out.errorCode, 'prerequisite-empty');
+		assert.match(out.message, /\$e1\.hits\[0\]\.path/);
+	}
 });
 
-test('placeholder with out-of-range index resolves to undefined', async () => {
+test('placeholder with out-of-range index skips the runner cleanly', async () => {
 	_overrideRunnerForTest('concept.resolve', async () => ({
 		type: 'concept.resolve', query: 'foo',
 		hits: [{ kind: 'dir', path: '/a', name: 'a', score: 0.9,
@@ -208,11 +217,74 @@ test('placeholder with out-of-range index resolves to undefined', async () => {
 			}),
 		],
 	};
-	await executePlan({
+	const executed = await executePlan({
 		runId: 'r', repoPath: REPO, closureRepos: [REPO],
 		repoLastIndexedAtMs: 1n, plan,
 	});
-	assert.equal(sawPath, undefined);
+	assert.equal(sawPath, 'unset');
+	const profileResult = executed.results.find(r => r.exploration.type === 'module.profile');
+	assert.ok(profileResult !== undefined, 'module.profile result should be present');
+	assert.equal(profileResult.output.type, 'failed');
+	if (profileResult.output.type === 'failed') {
+		assert.equal(profileResult.output.errorCode, 'prerequisite-empty');
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Placeholder resolves to empty array (dependent output legitimately empty)
+// -> skip the runner cleanly.
+// The live-test motivation: capability-discovery recipe emits
+// `symbol.locate(names=$e3.profile.exports[0..3])` and when the winning
+// module's __init__.py has no top-level exports the array resolves
+// empty. Before this behavior we let symbol.locate throw "names is
+// required (non-empty string[])" and surfaced that as a `failed`
+// output with a runtime message -- confusing readers.
+// ---------------------------------------------------------------------------
+
+test('placeholder resolves to empty array -> runner is skipped, not called', async () => {
+	_overrideRunnerForTest('module.profile', async () => ({
+		type: 'module.profile',
+		profile: {
+			path: '/x', kind: 'dir',
+			subdirs: [], filesInDir: [], entrypoints: [],
+			exports: [],  // <- empty
+			entityCount: 4, totalBytes: 100,
+		},
+	}));
+	let sawNames: unknown = 'unset';
+	_overrideRunnerForTest('symbol.locate', async (exp) => {
+		sawNames = (exp.params as { names: unknown }).names;
+		return { type: 'symbol.locate', names: [], hits: [] };
+	});
+
+	const plan: ExplorationPlan = {
+		answerType: 'structural-map',
+		synthesisHint: 'test',
+		explorations: [
+			makeExp({ id: 'e1', type: 'module.profile', params: { path: '/x' } }),
+			makeExp({
+				id: 'e2', type: 'symbol.locate', dependsOn: ['e1'],
+				params: { names: '$e1.profile.exports[0..3]' },
+			}),
+		],
+	};
+	const executed = await executePlan({
+		runId: 'r', repoPath: REPO, closureRepos: [REPO],
+		repoLastIndexedAtMs: 1n, plan,
+	});
+
+	// The symbol.locate runner MUST NOT be invoked when the prerequisite
+	// resolves to an empty array. It should carry a failed output with
+	// errorCode='prerequisite-empty' so the synthesizer renders a
+	// clean diagnostic instead of a runtime error.
+	assert.equal(sawNames, 'unset');
+	const locateResult = executed.results.find(r => r.exploration.type === 'symbol.locate');
+	assert.ok(locateResult !== undefined, 'symbol.locate result should be present');
+	assert.equal(locateResult.output.type, 'failed');
+	if (locateResult.output.type === 'failed') {
+		assert.equal(locateResult.output.errorCode, 'prerequisite-empty');
+		assert.match(locateResult.output.message, /\$e1\.profile\.exports\[0\.\.3\]/);
+	}
 });
 
 // ---------------------------------------------------------------------------
