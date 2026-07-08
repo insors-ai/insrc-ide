@@ -409,6 +409,12 @@ function fileCandidatesFromEntities(entities: readonly Entity[]): Candidate[] {
 	const out: Candidate[] = [];
 	for (const e of entities) {
 		if (e.kind !== 'file') continue;
+		// Artefacts (markdown docs, YAML configs, etc.) are covered by
+		// the docs retrieval pipeline. Exclude them from concept.resolve
+		// candidates so a `.md` guide file named "messaging_module_
+		// guide.md" doesn't beat the actual `insors/core/messaging/`
+		// module on a code-target query.
+		if (e.artifact === true) continue;
 		out.push({
 			kind: 'file',
 			path: e.file,
@@ -485,6 +491,19 @@ export async function runConceptResolve(
 	}
 
 	const structuralBoost = tokens.some(t => STRUCTURAL_TOKENS.has(t));
+
+	// STRUCTURAL_TOKENS signal INTENT (this is a structural query,
+	// give dirs a bonus). They should NOT count as candidate matches
+	// themselves -- otherwise a file named `messaging_module_guide.md`
+	// gets a bogus "module" name-token hit that lets it beat the
+	// actual `insors/core/messaging/` directory. Filter them out of
+	// the matching set.
+	const matchTokens = tokens.filter(t => !STRUCTURAL_TOKENS.has(t));
+	if (matchTokens.length === 0) {
+		log.debug({ query: params.query, tokens }, 'concept.resolve: no non-structural tokens; empty result');
+		return { type: 'concept.resolve', query: params.query, hits: [] };
+	}
+
 	const includeKinds = params.includeKinds ?? ['dir', 'file', 'entity'];
 
 	const db = await getDb();
@@ -504,7 +523,7 @@ export async function runConceptResolve(
 	// Score every candidate. Drop zero-hit candidates inline.
 	const scored: ScoredCandidate[] = [];
 	for (const c of candidates) {
-		const s = scoreCandidate(c, tokens, ctx.repoPath, structuralBoost);
+		const s = scoreCandidate(c, matchTokens, ctx.repoPath, structuralBoost);
 		if (s !== null) scored.push(s);
 	}
 
