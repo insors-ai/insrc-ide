@@ -28,6 +28,9 @@ import { getCachedExploration, putCachedExploration } from '../../db/exploration
 import { getLogger } from '../../shared/logger.js';
 
 import { runConceptResolve } from './concept-resolve.js';
+import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
+import { runDocDecisionTrace } from './doc-decision-trace.js';
+import { runDocMention } from './doc-mention.js';
 import { runImportGraph } from './import-graph.js';
 import { runModuleProfile } from './module-profile.js';
 import { runSymbolLocate } from './symbol-locate.js';
@@ -52,10 +55,13 @@ const log = getLogger('analyze:explore:executor');
  *  not in this map produce an `unsupported` output that the
  *  synthesizer renders as a diagnostic. */
 const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
-	'concept.resolve': runConceptResolve,
-	'module.profile':  runModuleProfile,
-	'symbol.locate':   runSymbolLocate,
-	'import.graph':    runImportGraph,
+	'concept.resolve':          runConceptResolve,
+	'module.profile':           runModuleProfile,
+	'symbol.locate':            runSymbolLocate,
+	'import.graph':             runImportGraph,
+	'doc.mention':              runDocMention,
+	'doc.decision.trace':       runDocDecisionTrace,
+	'doc.constraint.enumerate': runDocConstraintEnumerate,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`

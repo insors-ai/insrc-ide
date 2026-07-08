@@ -32,7 +32,7 @@ import {
 import { PLANNER_PROMPT_PATH } from '../planner/index.js';
 import { DOC_SUMMARISER_PROMPT_PATH } from '../summariser/index.js';
 import { DECOMPOSE_PROMPT_PATH } from './decomposer.js';
-import { SYNTHESIZE_CODE_PROMPT_PATH } from './synthesizer.js';
+import { SYNTHESIZE_CODE_PROMPT_PATH, SYNTHESIZE_DOCS_PROMPT_PATH } from './synthesizer.js';
 import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
 import { DATA_AGGREGATE_PROMPT_PATH    } from '../runtimes/data/index.js';
 import { INFRA_AGGREGATE_PROMPT_PATH   } from '../runtimes/infra/index.js';
@@ -114,6 +114,7 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	out.push({ componentId: 'doc-summariser',    relPath: DOC_SUMMARISER_PROMPT_PATH });
 	out.push({ componentId: 'decomposer',            relPath: DECOMPOSE_PROMPT_PATH        });
 	out.push({ componentId: 'synthesize.code',       relPath: SYNTHESIZE_CODE_PROMPT_PATH  });
+	out.push({ componentId: 'synthesize.docs',       relPath: SYNTHESIZE_DOCS_PROMPT_PATH  });
 	out.push({ componentId: 'code.aggregate.report',    relPath: CODE_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'infra.aggregate.report',   relPath: INFRA_AGGREGATE_PROMPT_PATH   });

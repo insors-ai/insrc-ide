@@ -20,15 +20,32 @@
 export { executePlan } from './executor.js';
 export type { ExecutePlanArgs } from './executor.js';
 
-export { runConceptResolve } from './concept-resolve.js';
-export { runModuleProfile }  from './module-profile.js';
-export { runSymbolLocate }   from './symbol-locate.js';
-export { runImportGraph }    from './import-graph.js';
+export { runConceptResolve }          from './concept-resolve.js';
+export { runModuleProfile }           from './module-profile.js';
+export { runSymbolLocate }            from './symbol-locate.js';
+export { runImportGraph }             from './import-graph.js';
+export { runDocMention }              from './doc-mention.js';
+export {
+	runDocDecisionTrace,
+	runSharedDocDecisionTrace,
+	DOC_DECISION_TRACE_PROMPT_PATH,
+} from './doc-decision-trace.js';
+export {
+	runDocConstraintEnumerate,
+	runSharedDocConstraintEnumerate,
+	DOC_CONSTRAINT_ENUMERATE_PROMPT_PATH,
+} from './doc-constraint-enumerate.js';
 
 export type {
 	AnswerType,
 	ConceptHit,
 	ConceptResolveOutput,
+	DocConstraintEnumerateOutput,
+	DocConstraintRecord,
+	DocDecisionRecord,
+	DocDecisionTraceOutput,
+	DocMentionHit,
+	DocMentionOutput,
 	ExecutedExploration,
 	ExecutedPlan,
 	Exploration,

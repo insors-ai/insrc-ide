@@ -44,6 +44,7 @@ import type {
 const log = getLogger('analyze:context:synthesizer');
 
 const SYNTHESIZE_CODE_PROMPT_REL = 'prompts/analyze/synthesize.code.system.md';
+const SYNTHESIZE_DOCS_PROMPT_REL = 'prompts/analyze/synthesize.docs.system.md';
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -78,10 +79,11 @@ export interface SynthesizeArgs {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
 	readonly executed: ExecutedPlan;
-	/** Which target's synthesizer prompt to use. Phase 1 only ships
-	 *  'code'; other targets throw `SynthesizerPromptMissingError`
-	 *  so the driver knows to fall back. */
-	readonly target:   'code';
+	/** Which target's synthesizer prompt to use. Phase 1 shipped
+	 *  'code'; Phase 2 adds 'docs'. Other targets throw
+	 *  `SynthesizerPromptMissingError` so the driver knows to fall
+	 *  back to the legacy shaper. */
+	readonly target:   'code' | 'docs';
 	readonly provider?: LLMProvider;
 }
 
@@ -200,8 +202,9 @@ function stripMetaFromSchema(schema: Record<string, unknown>): Record<string, un
 // Prompt loading + provider construction
 // ---------------------------------------------------------------------------
 
-const PROMPT_PATHS: Readonly<Record<'code', string>> = {
+const PROMPT_PATHS: Readonly<Record<'code' | 'docs', string>> = {
 	code: SYNTHESIZE_CODE_PROMPT_REL,
+	docs: SYNTHESIZE_DOCS_PROMPT_REL,
 };
 
 function loadPromptFile(target: keyof typeof PROMPT_PATHS): string {
@@ -261,6 +264,7 @@ function classifyError(err: unknown): Error {
 // ---------------------------------------------------------------------------
 
 export const SYNTHESIZE_CODE_PROMPT_PATH = SYNTHESIZE_CODE_PROMPT_REL;
+export const SYNTHESIZE_DOCS_PROMPT_PATH = SYNTHESIZE_DOCS_PROMPT_REL;
 
 export function getSynthesizerPromptPathForBoot(): string {
 	return SYNTHESIZE_CODE_PROMPT_REL;

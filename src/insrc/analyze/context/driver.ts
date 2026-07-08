@@ -967,14 +967,14 @@ async function tryExplorationPipeline(args: {
 	runId:          string;
 }): Promise<ExplorationPipelineResult | null> {
 	if (args.invocationMode !== 'run') return null;
-	if (args.shaperId       !== 'code') return null;
+	if (args.shaperId       !== 'code' && args.shaperId !== 'docs') return null;
 	if (!('intent' in args.inputs))     return null;
 	const intent = (args.inputs as RunShapeInput).intent;
 	if (intent.focused !== true) return null;
 
-	// V1 requires a directory-shaped scope so concept.resolve has
-	// something to walk. `repo | module | file | workspace` all
-	// resolve to a filesystem path.
+	// V1/V2 requires a directory-shaped scope so concept.resolve /
+	// doc retrieval have something to walk. `repo | module | file |
+	// workspace` all resolve to a filesystem path.
 	const scopeKind = intent.scopeRef.kind;
 	if (scopeKind !== 'repo' && scopeKind !== 'module' && scopeKind !== 'workspace') {
 		return null;
@@ -1002,17 +1002,24 @@ async function tryExplorationPipeline(args: {
 		return null;
 	}
 
-	// V1 only supports the structural-map answer type. Other types
-	// return an empty explorations array (per prompt discipline) --
-	// fall through to the legacy shaper.
-	if (plan.answerType !== 'structural-map' || plan.explorations.length === 0) {
+	// Answer types by target:
+	//   code shaper -> structural-map
+	//   docs shaper -> decision-trace | prose-retrieval
+	// Any other combination (or empty explorations) falls through to
+	// the legacy shaper.
+	const codeAnswerTypes = new Set(['structural-map']);
+	const docsAnswerTypes = new Set(['decision-trace', 'prose-retrieval']);
+	const isCodeAnswer = args.shaperId === 'code' && codeAnswerTypes.has(plan.answerType);
+	const isDocsAnswer = args.shaperId === 'docs' && docsAnswerTypes.has(plan.answerType);
+	if ((!isCodeAnswer && !isDocsAnswer) || plan.explorations.length === 0) {
 		log.info(
 			{
 				runId:            args.runId,
+				shaperId:         args.shaperId,
 				answerType:       plan.answerType,
 				explorationCount: plan.explorations.length,
 			},
-			'exploration pipeline: answer type not supported in V1; falling through',
+			'exploration pipeline: answer type not supported for this target; falling through',
 		);
 		return null;
 	}
@@ -1029,13 +1036,18 @@ async function tryExplorationPipeline(args: {
 		plan,
 	});
 
-	// (c) Synthesize.
+	// (c) Synthesize. Pick the synthesizer prompt matching the shaper
+	// target — code shaper uses synthesize.code, docs shaper uses
+	// synthesize.docs. The synthesize() call throws
+	// SynthesizerPromptMissingError if the target prompt is not
+	// registered; the catch below rolls us back to the legacy shaper.
+	const synthesizeTarget: 'code' | 'docs' = args.shaperId === 'docs' ? 'docs' : 'code';
 	try {
 		const raw = await synthesize({
 			runId:    args.runId,
 			intent,
 			executed,
-			target:   'code',
+			target:   synthesizeTarget,
 		});
 		return {
 			raw,

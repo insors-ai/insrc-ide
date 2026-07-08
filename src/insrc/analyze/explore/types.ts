@@ -205,6 +205,63 @@ export interface ImportGraphOutput {
 	readonly summary: ImportGraphSummary;
 }
 
+// ---------------------------------------------------------------------------
+// Doc-side exploration output payloads (Phase 2)
+// ---------------------------------------------------------------------------
+
+/** One retrieved section from doc.mention. */
+export interface DocMentionHit {
+	readonly entityId:  string;
+	readonly file:      string;
+	readonly heading:   string;
+	readonly kind:      'document' | 'section' | 'config';
+	readonly score:     number;
+	readonly preview?:  string;
+}
+
+export interface DocMentionOutput {
+	readonly type:    'doc.mention';
+	readonly subject: string;
+	readonly hits:    readonly DocMentionHit[];
+}
+
+/** One decision recorded in a doc + its citation. Preserves
+ *  wording verbatim -- see prompts/analyze/docs.decision-trace.system.md. */
+export interface DocDecisionRecord {
+	readonly decision:       string;
+	readonly sourceEntityId: string;
+	readonly file:           string;
+	readonly heading:        string;
+	readonly rationale:      string;
+}
+
+export interface DocDecisionTraceOutput {
+	readonly type:                  'doc.decision.trace';
+	readonly topic:                 string;
+	readonly decisions:             readonly DocDecisionRecord[];
+	readonly notFoundNote:          string;
+	readonly retrievedSectionCount: number;
+}
+
+/** One constraint stated in a doc + its citation. Preserves MUST /
+ *  SHALL / HARD RULE language verbatim. */
+export interface DocConstraintRecord {
+	readonly constraint:     string;
+	readonly kind:           'must' | 'should' | 'may' | 'hard-rule' | 'forbidden' | 'invariant';
+	readonly sourceEntityId: string;
+	readonly file:           string;
+	readonly heading:        string;
+	readonly rationale:      string;
+}
+
+export interface DocConstraintEnumerateOutput {
+	readonly type:                  'doc.constraint.enumerate';
+	readonly subject:               string;
+	readonly constraints:           readonly DocConstraintRecord[];
+	readonly notFoundNote:          string;
+	readonly retrievedSectionCount: number;
+}
+
 /** Placeholder for the not-yet-implemented types. Executor writes
  *  this + an errorCode when a decomposer emits an unsupported
  *  exploration in Phase 1. Downstream (synthesizer) renders it as
@@ -227,6 +284,9 @@ export type ExplorationOutput =
 	| ModuleProfileOutput
 	| SymbolLocateOutput
 	| ImportGraphOutput
+	| DocMentionOutput
+	| DocDecisionTraceOutput
+	| DocConstraintEnumerateOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 
