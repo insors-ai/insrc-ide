@@ -98,6 +98,20 @@ const W_ENTITY_DENSITY = 0.15;
 /** Small additive bonuses. */
 const DIR_STRUCTURAL_BONUS = 0.10;
 
+/** Multiplicative penalty for test-only paths on structural queries.
+ *  "Map the X module" almost never means "point at the test file for
+ *  X". Halving the score keeps test files in the ranked list (for
+ *  fallback) but pushes them below real modules. */
+const TEST_PATH_PENALTY = 0.50;
+
+/** Regex matching test paths -- anywhere in the path OR basename
+ *  starting with `test_` / `spec_`. */
+const TEST_PATH_RX = /(^|\/)(tests?|__tests__|test|spec|specs)\/|(^|\/)(test_|spec_)/i;
+
+function isTestPath(path: string): boolean {
+	return TEST_PATH_RX.test(path);
+}
+
 /** Density thresholds. Bucket into 4 tiers so density adds a
  *  monotonic signal without dominating: 0 entities = 0, 1-9 = 0.25,
  *  10-49 = 0.5, 50-249 = 0.75, 250+ = 1.0. */
@@ -251,6 +265,14 @@ function scoreCandidate(
 
 	if (structuralBoost && c.kind === 'dir') {
 		score += DIR_STRUCTURAL_BONUS;
+	}
+
+	// Structural queries almost never want a test file as the top
+	// hit. Halve the score on test-path candidates so they can still
+	// appear in the ranked list (useful when the user IS asking about
+	// tests) but real modules float above them.
+	if (structuralBoost && isTestPath(c.path)) {
+		score *= TEST_PATH_PENALTY;
 	}
 
 	// Clamp to [0, 1] after bonuses.

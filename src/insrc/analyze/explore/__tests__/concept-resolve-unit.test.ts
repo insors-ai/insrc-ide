@@ -237,6 +237,55 @@ test('exact match still beats prefix match at same density', () => {
 	assert.ok(exactHit.score > prefixHit.score);
 });
 
+// ---------------------------------------------------------------------------
+// Test-path demotion (Test D on insors-extraction: `document classifier
+// module` resolved to a test file even after prefix match landed)
+// ---------------------------------------------------------------------------
+
+test('test file with exact matches loses to real module with prefix match', () => {
+	const tokens = _tokeniseForTest('document classifier module');
+	// Test file with EXACT name matches for `document` + `classifier`.
+	// Path is under test/ so gets the demotion.
+	const testFile = _scoreCandidateForTest(
+		{
+			kind: 'file',
+			path: `${REPO}/test/extraction/preprocessing/test_document_classifier_integration.py`,
+			name: 'test_document_classifier_integration.py',
+			entityCount: 11,
+		},
+		tokens, REPO, true,
+	);
+	// Real module with prefix match on `classifier`.
+	const realModule = _scoreCandidateForTest(
+		{
+			kind: 'dir',
+			path: `${REPO}/insors/classification`,
+			name: 'classification',
+			entityCount: 100,
+		},
+		tokens, REPO, true,
+	);
+	assert.ok(testFile !== null && realModule !== null);
+	assert.ok(
+		realModule.score > testFile.score,
+		`real module ${realModule.score} should beat test file ${testFile.score}`,
+	);
+});
+
+test('test path regex matches common test directory conventions', () => {
+	const tokens = _tokeniseForTest('classifier module');
+	const testDir = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/tests/classifier`, name: 'classifier', entityCount: 5 },
+		tokens, REPO, true,
+	);
+	const realDir = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/insors/classifier`, name: 'classifier', entityCount: 100 },
+		tokens, REPO, true,
+	);
+	assert.ok(testDir !== null && realDir !== null);
+	assert.ok(realDir.score > testDir.score);
+});
+
 test('short query token (<7 chars) does NOT prefix-match (no false hit)', () => {
 	// 'class' is < 7 chars; must not match `classroom` via prefix
 	const tokens = _tokeniseForTest('class');
