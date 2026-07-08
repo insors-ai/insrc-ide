@@ -41,6 +41,7 @@ export {
 	runCapabilityReuseCheck,
 	CAPABILITY_REUSE_CHECK_PROMPT_PATH,
 } from './capability-reuse-check.js';
+export { runSearchText }              from './search-text.js';
 
 export type {
 	AnswerType,
@@ -69,6 +70,8 @@ export type {
 	ImportGraphSummary,
 	ModuleProfile,
 	ModuleProfileOutput,
+	SearchTextHit,
+	SearchTextOutput,
 	SymbolHit,
 	SymbolLocateOutput,
 	UnsupportedExplorationOutput,

@@ -35,6 +35,7 @@ import { runDocDecisionTrace } from './doc-decision-trace.js';
 import { runDocMention } from './doc-mention.js';
 import { runImportGraph } from './import-graph.js';
 import { runModuleProfile } from './module-profile.js';
+import { runSearchText } from './search-text.js';
 import { runSymbolLocate } from './symbol-locate.js';
 import { runUsageExample } from './usage-example.js';
 import type {
@@ -68,6 +69,7 @@ const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
 	'usage.example':            runUsageExample,
 	'class.hierarchy':          runClassHierarchy,
 	'capability.reuse-check':   runCapabilityReuseCheck,
+	'search.text':              runSearchText,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`

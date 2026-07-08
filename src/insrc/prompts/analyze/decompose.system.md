@@ -86,6 +86,11 @@ The exploration types currently supported (Phases 1 + 2 + 3):
     ```json
     params: { "capability": "<natural-language capability>", "limit": 5 }
     ```
+- **`search.text`** — Regex grep over file contents. Uses ripgrep when installed (fast, .gitignore-aware) with a Node fallback. Returns `{ file, line, text }` hits ready to cite. Use when the rule / subject is a STRING LITERAL that will not surface as a symbol name — model ids (`claude-haiku-4-5`), config keys (`ENFORCE_2FA`), env-var names (`STRIPE_KEY`), URL fragments, forbidden import spellings. Do NOT use for identifier-shaped searches (a class or function name) — `symbol.locate` is faster + graph-aware.
+    ```json
+    params: { "pattern": "<regex>", "glob": "*.py", "caseInsensitive": false, "topK": 30 }
+    // Optional "path": "<subpath under repo>" restricts the search subtree.
+    ```
 
 Other types (`test.locate`, `convention.detect`, `config.trace`, `data-model.trace`, `freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
 
@@ -139,16 +144,19 @@ At most 3 explorations for prose-retrieval; the synthesizer stitches them into t
 
 For queries like "does the code follow rule X", "is the codebase respecting Y", "check whether Z is enforced":
 
-Adherence-check must retrieve BOTH the rule text (from docs) AND the code sites that could match or violate. Emit these explorations in order:
+Adherence-check must retrieve BOTH the rule text (from docs) AND the code sites that could match or violate. The KEY DECISION is whether the rule constrains an IDENTIFIER (class / function name) or a STRING LITERAL (model id, config key, env var, URL, hard-coded value). Pick the code-side exploration by that distinction; do NOT emit both blindly.
+
+Emit these explorations in order:
 
 1. `doc.constraint.enumerate(subject="<intent.focus>")` — the rule text verbatim + rule kind. Purpose: "Retrieve the stated rule from the docs corpus."
 2. `doc.decision.trace(topic="<intent.focus>")` — the recorded decision behind the rule. Purpose: "Preserve the rationale for the rule."
 3. `concept.resolve(query="<distinctive-term-from-focus>")` — depends on `e1`. Purpose: "Find code regions in the rule's domain."
-4. `symbol.locate(names=[...distinctive names lifted from the rule text...], kinds=["function","method","class","variable"])` — depends on `e1`. Purpose: "Locate the entities the rule constrains." Only emit when the rule text names at least one distinctive identifier that will match code (a config key, a class name, a model id, etc.).
-5. (Optional, when `e4` returns a class-like hit) `class.hierarchy(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Anchor inheritance chains against the rule."
-6. (Optional) `usage.example(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Cite representative real callsites."
+4. **Rule anchors an IDENTIFIER** (a class, function, method, or variable NAME appears verbatim in code) → `symbol.locate(names=[...distinctive names...], kinds=["function","method","class","variable"])` — depends on `e1`. Purpose: "Locate the entities the rule constrains."
+   **Rule anchors a STRING LITERAL** (model id, config key, env var, URL, forbidden import string — the rule's subject would appear in `"quoted"` form in source, not as a symbol name) → `search.text(pattern="<regex covering literal + forbidden alternatives>", glob="*.<primary-lang-ext>")` — depends on `e1`. Purpose: "Grep the code for the literal + its explicitly-forbidden alternatives." Concrete example: rule = "must use claude-haiku-4-5, never opus / sonnet" → `pattern: "claude-(opus|sonnet|haiku)-?[0-9]?[-]?[0-9]?"`, glob covering the repo's main language.
+5. (Optional, when `e4` is a symbol.locate that returned a class-like hit) `class.hierarchy(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Anchor inheritance chains against the rule."
+6. (Optional, when `e4` is a symbol.locate) `usage.example(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Cite representative real callsites."
 
-Keep it to 4-6 explorations. If the rule's focus does NOT yield a distinctive code identifier (pure prose rule), stop after step 3.
+Keep it to 4-6 explorations. If the rule's focus does NOT yield a distinctive identifier or string literal (pure prose rule), stop after step 3 -- the synthesizer will render an honest "no code sites inspected" bundle rather than fabricating one.
 
 ### Recipe: `capability-discovery`
 

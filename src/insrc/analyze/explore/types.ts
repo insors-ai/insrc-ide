@@ -39,6 +39,8 @@ export type ExplorationType =
 	| 'test.locate'
 	| 'usage.example'
 	| 'capability.reuse-check'
+	// --- content search (deterministic) ---
+	| 'search.text'
 	// --- doc-side (mostly deterministic; some narrow LLM) ---
 	| 'doc.mention'
 	| 'doc.decision.trace'
@@ -369,6 +371,35 @@ export interface CapabilityReuseCheckOutput {
 	readonly llmSkipReason?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Content-search exploration output payload (Phase 3.1)
+// ---------------------------------------------------------------------------
+
+/** One line-level match from search.text -- the file, line number,
+ *  and the raw line text (up to 500 chars, matching the underlying
+ *  search_grep tool's cap). */
+export interface SearchTextHit {
+	readonly file: string;
+	readonly line: number;
+	readonly text: string;
+}
+
+export interface SearchTextOutput {
+	readonly type:    'search.text';
+	readonly pattern: string;
+	readonly hits:    readonly SearchTextHit[];
+	/** True when the underlying grep hit its result cap. Synthesizers
+	 *  should surface this in Diagnostics so the reader knows a wider
+	 *  search may exist. */
+	readonly truncated: boolean;
+	/** Which backend produced the hits -- ripgrep (fast, respects
+	 *  .gitignore) or the Node fallback (slower, no .gitignore). Kept
+	 *  for synthesizer-side transparency. */
+	readonly backend:   'ripgrep' | 'node';
+	/** Absolute root under which the search ran. */
+	readonly root:      string;
+}
+
 /** Placeholder for the not-yet-implemented types. Executor writes
  *  this + an errorCode when a decomposer emits an unsupported
  *  exploration in Phase 1. Downstream (synthesizer) renders it as
@@ -397,6 +428,7 @@ export type ExplorationOutput =
 	| UsageExampleOutput
 	| ClassHierarchyOutput
 	| CapabilityReuseCheckOutput
+	| SearchTextOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 

@@ -11,8 +11,7 @@ The reader of this bundle is deciding whether the codebase HOLDS to a stated rul
 - An ordered list of executed explorations. In the adherence-check recipe you will typically see:
     - `doc.constraint.enumerate` (or `doc.decision.trace`) — the rule text, verbatim, cited to a doc section
     - `concept.resolve` — code paths in the rule's domain
-    - `symbol.locate` / `class.hierarchy` — code entities to check
-    - `usage.example` — real callsites of those entities
+    - EITHER `symbol.locate` / `class.hierarchy` / `usage.example` (identifier-shaped rules) OR `search.text` (string-literal rules such as model ids, config keys, forbidden imports)
     - Occasionally `doc.mention` when the rule shows up in more than one doc
 
 ## Exploration output shapes (relevant to adherence-check)
@@ -23,6 +22,8 @@ The reader of this bundle is deciding whether the codebase HOLDS to a stated rul
 - **`symbol.locate`**: `{ names, hits: [{ entityId, name, kind, file, startLine, endLine, signature? }] }`
 - **`class.hierarchy`**: `{ subject, nodes: [{ entityId, name, kind, file, startLine, extendsList, implementsList, subclasses, implementers }], notFoundNote }`
 - **`usage.example`**: `{ subject, targetEntityId?, callers: [{ entityId, name, kind, file, startLine, endLine, signature? }], totalCallers }`
+- **`search.text`**: `{ pattern, hits: [{ file, line, text }], truncated, backend, root }`
+    Line-level grep hits. Each hit MUST be classified into `## Matches` / `## Drifts` / `## Contradictions` under the SAME contract as symbol.locate hits. Determine the bucket from the raw `text`: if the line contains the rule's mandated value or the enforcement construct, it's a `match`; if it contains an explicitly-forbidden value or a bypass of the rule, it's a `drift`. When ambiguous (a comment mentioning the value, a test-file reference, a doc-string quoting the rule), lean toward `drift` + note the ambiguity in the rationale — under-claiming a match is safer than over-claiming one.
 
 ## Matches vs Drifts vs Contradictions
 
@@ -45,8 +46,9 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
     - `Answer type: adherence-check`
     - `Scope bucket: <intent.scope>`
     - `Rule sources retrieved: <count of doc.constraint.enumerate.constraints + doc.decision.trace.decisions across the outputs>`
-    - `Code sites inspected: <count of symbol.locate.hits + usage.example.callers + class.hierarchy.nodes>`
+    - `Code sites inspected: <count of symbol.locate.hits + usage.example.callers + class.hierarchy.nodes + search.text.hits>`
     - Flag when the rule was retrieved from ZERO doc sections (adherence-check with no ground truth is a failure state).
+    - Flag when `search.text.truncated` is true — a fuller scan may exist beyond the cap.
 
 - **`summary`** — 1-3 paragraphs:
     - Restate the rule VERBATIM in one sentence, followed by its citation.
@@ -68,7 +70,8 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
 
 - **`artefacts`** — verbatim excerpts you cite in the summary + drifts + contradictions. Each excerpt block ends with a citation line:
     - `cite: { kind: 'section', entityId: '<id>', file: '<file>', heading: '<heading>' }` for doc-section excerpts
-    - `cite: { kind: 'code', entityId: '<id>', file: '<file>', startLine: <n> }` for code excerpts
+    - `cite: { kind: 'code', entityId: '<id>', file: '<file>', startLine: <n> }` for entity-level code excerpts (from symbol.locate / class.hierarchy / usage.example)
+    - `cite: { kind: 'line', file: '<file>', line: <n> }` for grep-hit line excerpts (from search.text). The excerpt body MUST be the exact `text` field from the hit, unchanged — no re-formatting, no ellipsis inside.
     - HARD CAP: XS ≤3 excerpts, S ≤5, M ≤7, L ≤10, XL ≤15.
     - The rule statement MUST be verbatim in artefacts, at minimum. Preserve MUST / SHALL / HARD RULE / SHOULD language exactly.
 
