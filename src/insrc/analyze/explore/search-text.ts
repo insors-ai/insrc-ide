@@ -129,11 +129,16 @@ export async function runSearchText(
 
 	log.info(
 		{
-			runId:     ctx.runId,
-			pattern:   params.pattern,
-			backend:   data.usedRipgrep ? 'ripgrep' : 'node',
-			hits:      hits.length,
-			truncated: data.truncated,
+			runId:           ctx.runId,
+			pattern:         params.pattern,
+			patternLen:      params.pattern.length,
+			patternHex:      Buffer.from(params.pattern, 'utf8').toString('hex').slice(0, 200),
+			glob:            params.glob ?? '(none)',
+			caseInsensitive: params.caseInsensitive === true,
+			root,
+			backend:         data.usedRipgrep ? 'ripgrep' : 'node',
+			hits:            hits.length,
+			truncated:       data.truncated,
 		},
 		'search.text: complete',
 	);
