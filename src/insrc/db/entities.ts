@@ -543,6 +543,11 @@ export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promis
 	// whose primary entity_string_by_u64 mapping was lost.
 	const { deleteDocSummariesForRepo } = await import('./doc-summaries.js');
 	await deleteDocSummariesForRepo(null as unknown as DbClient, repo);
+
+	// Exploration-cache repo cascade: wipe every cached exploration
+	// output for this repo. See db/exploration-cache.ts.
+	const { deleteCachedExplorationsForRepo } = await import('./exploration-cache.js');
+	await deleteCachedExplorationsForRepo(repo);
 }
 
 export async function getEntity(_db: DbClient, id: string): Promise<Entity | null> {

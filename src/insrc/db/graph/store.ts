@@ -242,6 +242,13 @@ export interface GraphStore {
 	// summary rows; enables per-repo sweeps without scanning the whole
 	// docSummary sub-DB.
 	docSummaryByRepo:    AnyDb;
+
+	// Exploration cache -- one row per successful exploration
+	// invocation (concept.resolve / module.profile / etc.). Keyed by
+	// (repoId, repoLastIndexedAt, paramHash) so a re-index
+	// automatically invalidates every cached entry for that repo.
+	// See plans/exploration-based-context-build.md Section 7.
+	explorationCache:    AnyDb;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +365,11 @@ export async function getGraphStore(): Promise<GraphStore> {
 			// live-project-context assembly.
 			docSummary:         open_('doc_summary'),
 			docSummaryByRepo:   open_('doc_summary_by_repo', { dupSort: true }),
+
+			// Exploration cache -- 20-byte composite key
+			// (repoId u32 || lastIndexedAt u64 || paramHash u64). See
+			// db/exploration-cache.ts for the layout.
+			explorationCache:   open_('exploration_cache'),
 		};
 
 		// Schema-version pre-flight check. Wrapped in a write txn so the

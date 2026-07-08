@@ -1,0 +1,48 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/**
+ * Explorations -- barrel.
+ *
+ * plans/exploration-based-context-build.md Phase 1. Public surface:
+ *   - executePlan(args): runs an ExplorationPlan end-to-end
+ *   - Per-type runners for callers that want to fire a single
+ *     exploration directly (mostly tests)
+ *   - Typed shapes: Exploration, ExplorationPlan, ExplorationOutput,
+ *     ExecutedPlan, ExecutedExploration
+ *
+ * The decomposer emits plans of this shape; the shaper driver
+ * hands them to executePlan; the synthesizer reads the results.
+ */
+
+export { executePlan } from './executor.js';
+export type { ExecutePlanArgs } from './executor.js';
+
+export { runConceptResolve } from './concept-resolve.js';
+export { runModuleProfile }  from './module-profile.js';
+export { runSymbolLocate }   from './symbol-locate.js';
+export { runImportGraph }    from './import-graph.js';
+
+export type {
+	AnswerType,
+	ConceptHit,
+	ConceptResolveOutput,
+	ExecutedExploration,
+	ExecutedPlan,
+	Exploration,
+	ExplorationOutput,
+	ExplorationPlan,
+	ExplorationRunner,
+	ExplorationRunnerContext,
+	ExplorationType,
+	FailedExplorationOutput,
+	ImportGraphOutput,
+	ImportGraphSummary,
+	ModuleProfile,
+	ModuleProfileOutput,
+	SymbolHit,
+	SymbolLocateOutput,
+	UnsupportedExplorationOutput,
+} from './types.js';

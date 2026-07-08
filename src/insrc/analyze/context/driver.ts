@@ -80,6 +80,10 @@ import {
 	validateBundleWithErrors,
 } from './schema.js';
 import { getReadOnlyTools } from './tool-surface.js';
+import { decompose, DecomposerLlmUnavailableError, DecomposerPromptMissingError } from './decomposer.js';
+import { synthesize, SynthesizerLlmUnavailableError, SynthesizerPromptMissingError } from './synthesizer.js';
+import { executePlan } from '../explore/index.js';
+import type { ExplorationPlan } from '../explore/index.js';
 import type {
 	AnalyzeContextBundle,
 	BundleLayerName,
@@ -206,6 +210,56 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 	// the closure.
 	if (invocationMode === 'run' && shaperId === 'code') {
 		await ensureNonEmptyClosure((inputs as RunShapeInput).intent);
+	}
+
+	// (4.6) Exploration-based context build (plans/exploration-based-
+	// context-build.md Phase 1). If the intent qualifies (V1: code
+	// target + run mode + focused intent), run the new pipeline:
+	// decompose -> execute explorations -> synthesize bundle. On
+	// success, skip the legacy tool loop entirely + jump to meta
+	// stamping. On failure (decomposer LLM down, unsupported
+	// answer-type, exploration-only fallback disabled), fall through
+	// to the legacy tool loop below -- no regression risk.
+	const explorationBundle = await tryExplorationPipeline({
+		invocationMode,
+		shaperId,
+		inputs,
+		runId,
+	});
+	if (explorationBundle !== null) {
+		const bundle: AnalyzeContextBundle = {
+			...explorationBundle.raw,
+			meta: {
+				mode:          invocationMode,
+				shaper:        shaperId,
+				toolCalls:     explorationBundle.explorationCount,
+				modelId:       cfg.shaperModel,
+				emptyLayers:   deriveEmptyLayers(explorationBundle.raw),
+				schemaVersion: SCHEMA_VERSION,
+				...(currentLastIndexedAt !== undefined ? { repoLastIndexedAt: currentLastIndexedAt } : {}),
+			},
+		};
+		const v = validateBundleWithErrors(bundle);
+		if (!v.ok) {
+			log.warn(
+				{ runId, errors: v.errors },
+				'exploration-based bundle failed validation; falling through to legacy shaper',
+			);
+			// Fall through to legacy path below.
+		} else {
+			writeBundle(runId, cacheKey, bundle);
+			log.info(
+				{
+					runId,
+					mode:              invocationMode,
+					shaperId,
+					pipeline:          'exploration',
+					explorationCount:  explorationBundle.explorationCount,
+				},
+				'shaper invocation complete (exploration pipeline)',
+			);
+			return bundle;
+		}
 	}
 
 	// (4) Build the LLM message list.
@@ -873,6 +927,135 @@ async function resolveRepoLastIndexedAt(scopePath: string): Promise<number | und
 
 	const ms = Date.parse(best.lastIndexed);
 	return Number.isNaN(ms) ? undefined : ms;
+}
+
+// ---------------------------------------------------------------------------
+// Exploration-based pipeline (plans/exploration-based-context-build.md)
+// ---------------------------------------------------------------------------
+
+interface ExplorationPipelineResult {
+	readonly raw:              Omit<AnalyzeContextBundle, 'meta'>;
+	readonly explorationCount: number;
+}
+
+/**
+ * Try the exploration-based pipeline. Returns the composed bundle
+ * (minus meta) on success. Returns null when the pipeline should
+ * be skipped -- either the intent doesn't qualify for V1 (only
+ * run-mode + code target + focused=true) OR the decomposer /
+ * synthesizer LLM was unavailable / their prompts are missing.
+ *
+ * On null return, the caller falls through to the legacy shaper
+ * tool loop. On non-null return, the caller uses the bundle
+ * directly + skips the tool loop entirely.
+ *
+ * V1 qualification (plans/exploration-based-context-build.md
+ * Section 8 Phase 1):
+ *   - invocationMode === 'run'
+ *   - shaperId === 'code'
+ *   - inputs.intent.focused === true
+ *   - inputs.intent.scopeRef.value must be a directory path
+ *     (not a connection / manifest-dir / etc.)
+ *
+ * Later phases relax this: Phase 3 adds adherence-check for code,
+ * Phase 5 adds data + infra, etc.
+ */
+async function tryExplorationPipeline(args: {
+	invocationMode: ShaperMode;
+	shaperId:       ShaperId;
+	inputs:         RunShaperArgs['inputs'];
+	runId:          string;
+}): Promise<ExplorationPipelineResult | null> {
+	if (args.invocationMode !== 'run') return null;
+	if (args.shaperId       !== 'code') return null;
+	if (!('intent' in args.inputs))     return null;
+	const intent = (args.inputs as RunShapeInput).intent;
+	if (intent.focused !== true) return null;
+
+	// V1 requires a directory-shaped scope so concept.resolve has
+	// something to walk. `repo | module | file | workspace` all
+	// resolve to a filesystem path.
+	const scopeKind = intent.scopeRef.kind;
+	if (scopeKind !== 'repo' && scopeKind !== 'module' && scopeKind !== 'workspace') {
+		return null;
+	}
+
+	// (a) Decompose. LLM unavailable / prompt missing -> fall through.
+	let plan: ExplorationPlan;
+	try {
+		plan = await decompose({ intent, runId: args.runId });
+	} catch (err) {
+		if (err instanceof DecomposerLlmUnavailableError
+		 || err instanceof DecomposerPromptMissingError) {
+			log.info(
+				{ runId: args.runId, err: (err as Error).message },
+				'exploration pipeline: decomposer unavailable; falling through',
+			);
+			return null;
+		}
+		// Schema-unrecoverable = keep going with a null result so the
+		// legacy path catches. Log so we can iterate on the prompt.
+		log.warn(
+			{ runId: args.runId, err: (err as Error).message },
+			'exploration pipeline: decomposer failed; falling through',
+		);
+		return null;
+	}
+
+	// V1 only supports the structural-map answer type. Other types
+	// return an empty explorations array (per prompt discipline) --
+	// fall through to the legacy shaper.
+	if (plan.answerType !== 'structural-map' || plan.explorations.length === 0) {
+		log.info(
+			{
+				runId:            args.runId,
+				answerType:       plan.answerType,
+				explorationCount: plan.explorations.length,
+			},
+			'exploration pipeline: answer type not supported in V1; falling through',
+		);
+		return null;
+	}
+
+	// (b) Execute the plan.
+	const repoPath = resolveRepoPath(intent.scopeRef);
+	const lastIndexedMs = await resolveRepoLastIndexedAt(inferScopePath(args.inputs));
+	const lastIndexedBigInt = BigInt(lastIndexedMs ?? 0);
+	const executed = await executePlan({
+		runId:            args.runId,
+		repoPath,
+		closureRepos:     [repoPath],
+		repoLastIndexedAtMs: lastIndexedBigInt,
+		plan,
+	});
+
+	// (c) Synthesize.
+	try {
+		const raw = await synthesize({
+			runId:    args.runId,
+			intent,
+			executed,
+			target:   'code',
+		});
+		return {
+			raw,
+			explorationCount: executed.results.length,
+		};
+	} catch (err) {
+		if (err instanceof SynthesizerLlmUnavailableError
+		 || err instanceof SynthesizerPromptMissingError) {
+			log.info(
+				{ runId: args.runId, err: (err as Error).message },
+				'exploration pipeline: synthesizer unavailable; falling through',
+			);
+			return null;
+		}
+		log.warn(
+			{ runId: args.runId, err: (err as Error).message },
+			'exploration pipeline: synthesizer failed; falling through',
+		);
+		return null;
+	}
 }
 
 // ---------------------------------------------------------------------------
