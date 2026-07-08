@@ -27,6 +27,8 @@
 import { getCachedExploration, putCachedExploration } from '../../db/exploration-cache.js';
 import { getLogger } from '../../shared/logger.js';
 
+import { runCapabilityReuseCheck } from './capability-reuse-check.js';
+import { runClassHierarchy } from './class-hierarchy.js';
 import { runConceptResolve } from './concept-resolve.js';
 import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
 import { runDocDecisionTrace } from './doc-decision-trace.js';
@@ -34,6 +36,7 @@ import { runDocMention } from './doc-mention.js';
 import { runImportGraph } from './import-graph.js';
 import { runModuleProfile } from './module-profile.js';
 import { runSymbolLocate } from './symbol-locate.js';
+import { runUsageExample } from './usage-example.js';
 import type {
 	ExecutedExploration,
 	ExecutedPlan,
@@ -62,6 +65,9 @@ const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
 	'doc.mention':              runDocMention,
 	'doc.decision.trace':       runDocDecisionTrace,
 	'doc.constraint.enumerate': runDocConstraintEnumerate,
+	'usage.example':            runUsageExample,
+	'class.hierarchy':          runClassHierarchy,
+	'capability.reuse-check':   runCapabilityReuseCheck,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`

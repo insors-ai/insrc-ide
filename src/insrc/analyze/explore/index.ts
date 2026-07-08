@@ -35,9 +35,19 @@ export {
 	runSharedDocConstraintEnumerate,
 	DOC_CONSTRAINT_ENUMERATE_PROMPT_PATH,
 } from './doc-constraint-enumerate.js';
+export { runUsageExample }            from './usage-example.js';
+export { runClassHierarchy }          from './class-hierarchy.js';
+export {
+	runCapabilityReuseCheck,
+	CAPABILITY_REUSE_CHECK_PROMPT_PATH,
+} from './capability-reuse-check.js';
 
 export type {
 	AnswerType,
+	CapabilityReuseCandidate,
+	CapabilityReuseCheckOutput,
+	ClassHierarchyNode,
+	ClassHierarchyOutput,
 	ConceptHit,
 	ConceptResolveOutput,
 	DocConstraintEnumerateOutput,
@@ -62,4 +72,6 @@ export type {
 	SymbolHit,
 	SymbolLocateOutput,
 	UnsupportedExplorationOutput,
+	UsageExampleHit,
+	UsageExampleOutput,
 } from './types.js';

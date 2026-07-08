@@ -262,6 +262,113 @@ export interface DocConstraintEnumerateOutput {
 	readonly retrievedSectionCount: number;
 }
 
+// ---------------------------------------------------------------------------
+// Code-side exploration output payloads (Phase 3)
+// ---------------------------------------------------------------------------
+
+/** One caller of a symbol -- entity + file-position anchor. Preserves
+ *  the same shape as SymbolHit so the synthesizer can render callers
+ *  next to definitions uniformly. */
+export interface UsageExampleHit {
+	readonly entityId:  string;
+	readonly name:      string;
+	readonly kind:      string;
+	readonly file:      string;
+	readonly startLine: number;
+	readonly endLine:   number;
+	readonly signature?: string;
+}
+
+export interface UsageExampleOutput {
+	readonly type:       'usage.example';
+	/** The symbol whose callers we're enumerating. Populated from
+	 *  params (name OR entityId) so the synthesizer can label the
+	 *  section without re-reading params. */
+	readonly subject:    string;
+	/** entityId of the resolved target, when known. undefined when
+	 *  the runner couldn't uniquely resolve a name to an id. */
+	readonly targetEntityId?: string;
+	readonly callers:    readonly UsageExampleHit[];
+	/** Total 1-hop callers before topK truncation. */
+	readonly totalCallers: number;
+}
+
+/** Class-hierarchy record: one class + its supertypes / subtypes /
+ *  interfaces. */
+export interface ClassHierarchyNode {
+	readonly entityId:  string;
+	readonly name:      string;
+	readonly kind:      string;
+	readonly file:      string;
+	readonly startLine: number;
+	/** Direct supertypes (INHERITS out). */
+	readonly extendsList:    readonly {
+		readonly entityId?: string;
+		readonly name:      string;
+		readonly file?:     string;
+	}[];
+	/** Direct interfaces / mixins (IMPLEMENTS out). */
+	readonly implementsList: readonly {
+		readonly entityId?: string;
+		readonly name:      string;
+		readonly file?:     string;
+	}[];
+	/** Direct subclasses (INHERITS in). */
+	readonly subclasses:     readonly {
+		readonly entityId:  string;
+		readonly name:      string;
+		readonly file:      string;
+	}[];
+	/** Direct implementers (IMPLEMENTS in). */
+	readonly implementers:   readonly {
+		readonly entityId:  string;
+		readonly name:      string;
+		readonly file:      string;
+	}[];
+}
+
+export interface ClassHierarchyOutput {
+	readonly type:    'class.hierarchy';
+	readonly subject: string;
+	readonly nodes:   readonly ClassHierarchyNode[];
+	/** notFoundNote is populated when the runner could not resolve
+	 *  `subject` to any concrete class entity. */
+	readonly notFoundNote: string;
+}
+
+/** One candidate module that (per the reuse-check LLM) already
+ *  provides the queried capability. Each candidate carries a
+ *  verdict + a short excerpt so the synthesizer can cite it. */
+export interface CapabilityReuseCandidate {
+	readonly path:            string;
+	readonly moduleName:      string;
+	/** LLM's verdict on whether this module already delivers the
+	 *  requested capability. */
+	readonly verdict:         'clear-match' | 'partial-match' | 'unrelated';
+	/** 1-2 sentence rationale, verbatim from the LLM. */
+	readonly rationale:       string;
+	/** Representative entity names lifted from the module profile
+	 *  that support the verdict. Small (<=5). */
+	readonly evidenceEntities: readonly string[];
+	/** Score from the underlying concept.resolve, kept for the
+	 *  synthesizer's ranking display. */
+	readonly conceptScore:    number;
+}
+
+export interface CapabilityReuseCheckOutput {
+	readonly type:       'capability.reuse-check';
+	readonly capability: string;
+	readonly candidates: readonly CapabilityReuseCandidate[];
+	/** Populated when the underlying concept.resolve returned zero
+	 *  hits (nothing to check). */
+	readonly notFoundNote: string;
+	/** Populated when the LLM narrow pass could not be run (Ollama
+	 *  unavailable, prompt missing). Synthesizer renders a diagnostic
+	 *  but the candidates list still surfaces the concept.resolve
+	 *  hits as `unrelated` placeholders. */
+	readonly llmSkipReason?: string;
+}
+
 /** Placeholder for the not-yet-implemented types. Executor writes
  *  this + an errorCode when a decomposer emits an unsupported
  *  exploration in Phase 1. Downstream (synthesizer) renders it as
@@ -287,6 +394,9 @@ export type ExplorationOutput =
 	| DocMentionOutput
 	| DocDecisionTraceOutput
 	| DocConstraintEnumerateOutput
+	| UsageExampleOutput
+	| ClassHierarchyOutput
+	| CapabilityReuseCheckOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 

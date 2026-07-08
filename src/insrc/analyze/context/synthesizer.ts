@@ -43,8 +43,10 @@ import type {
 
 const log = getLogger('analyze:context:synthesizer');
 
-const SYNTHESIZE_CODE_PROMPT_REL = 'prompts/analyze/synthesize.code.system.md';
-const SYNTHESIZE_DOCS_PROMPT_REL = 'prompts/analyze/synthesize.docs.system.md';
+const SYNTHESIZE_CODE_PROMPT_REL       = 'prompts/analyze/synthesize.code.system.md';
+const SYNTHESIZE_DOCS_PROMPT_REL       = 'prompts/analyze/synthesize.docs.system.md';
+const SYNTHESIZE_ADHERENCE_PROMPT_REL  = 'prompts/analyze/synthesize.adherence.system.md';
+const SYNTHESIZE_CAPABILITY_PROMPT_REL = 'prompts/analyze/synthesize.capability.system.md';
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -75,15 +77,21 @@ export class SynthesizerPromptMissingError extends Error {
 // Public entry
 // ---------------------------------------------------------------------------
 
+/** Which synthesizer prompt to load. Distinct from `intent.target`
+ *  because the same target can use different bundle emphases (e.g.
+ *  `target=code` picks 'code' for structural-map and 'adherence' for
+ *  adherence-check). The driver derives this key from (target,
+ *  answerType). */
+export type SynthesizerPromptKey = 'code' | 'docs' | 'adherence' | 'capability';
+
 export interface SynthesizeArgs {
 	readonly runId:    string;
 	readonly intent:   ClassifiedIntent;
 	readonly executed: ExecutedPlan;
-	/** Which target's synthesizer prompt to use. Phase 1 shipped
-	 *  'code'; Phase 2 adds 'docs'. Other targets throw
+	/** Which synthesizer prompt to load. Unknown keys throw
 	 *  `SynthesizerPromptMissingError` so the driver knows to fall
 	 *  back to the legacy shaper. */
-	readonly target:   'code' | 'docs';
+	readonly target:   SynthesizerPromptKey;
 	readonly provider?: LLMProvider;
 }
 
@@ -202,9 +210,11 @@ function stripMetaFromSchema(schema: Record<string, unknown>): Record<string, un
 // Prompt loading + provider construction
 // ---------------------------------------------------------------------------
 
-const PROMPT_PATHS: Readonly<Record<'code' | 'docs', string>> = {
-	code: SYNTHESIZE_CODE_PROMPT_REL,
-	docs: SYNTHESIZE_DOCS_PROMPT_REL,
+const PROMPT_PATHS: Readonly<Record<SynthesizerPromptKey, string>> = {
+	code:       SYNTHESIZE_CODE_PROMPT_REL,
+	docs:       SYNTHESIZE_DOCS_PROMPT_REL,
+	adherence:  SYNTHESIZE_ADHERENCE_PROMPT_REL,
+	capability: SYNTHESIZE_CAPABILITY_PROMPT_REL,
 };
 
 function loadPromptFile(target: keyof typeof PROMPT_PATHS): string {
@@ -263,8 +273,10 @@ function classifyError(err: unknown): Error {
 // Boot validator hook
 // ---------------------------------------------------------------------------
 
-export const SYNTHESIZE_CODE_PROMPT_PATH = SYNTHESIZE_CODE_PROMPT_REL;
-export const SYNTHESIZE_DOCS_PROMPT_PATH = SYNTHESIZE_DOCS_PROMPT_REL;
+export const SYNTHESIZE_CODE_PROMPT_PATH       = SYNTHESIZE_CODE_PROMPT_REL;
+export const SYNTHESIZE_DOCS_PROMPT_PATH       = SYNTHESIZE_DOCS_PROMPT_REL;
+export const SYNTHESIZE_ADHERENCE_PROMPT_PATH  = SYNTHESIZE_ADHERENCE_PROMPT_REL;
+export const SYNTHESIZE_CAPABILITY_PROMPT_PATH = SYNTHESIZE_CAPABILITY_PROMPT_REL;
 
 export function getSynthesizerPromptPathForBoot(): string {
 	return SYNTHESIZE_CODE_PROMPT_REL;

@@ -1002,12 +1002,12 @@ async function tryExplorationPipeline(args: {
 		return null;
 	}
 
-	// Answer types by target:
-	//   code shaper -> structural-map
+	// Answer types by target (Phases 1-3):
+	//   code shaper -> structural-map | adherence-check | capability-discovery
 	//   docs shaper -> decision-trace | prose-retrieval
 	// Any other combination (or empty explorations) falls through to
 	// the legacy shaper.
-	const codeAnswerTypes = new Set(['structural-map']);
+	const codeAnswerTypes = new Set(['structural-map', 'adherence-check', 'capability-discovery']);
 	const docsAnswerTypes = new Set(['decision-trace', 'prose-retrieval']);
 	const isCodeAnswer = args.shaperId === 'code' && codeAnswerTypes.has(plan.answerType);
 	const isDocsAnswer = args.shaperId === 'docs' && docsAnswerTypes.has(plan.answerType);
@@ -1036,12 +1036,23 @@ async function tryExplorationPipeline(args: {
 		plan,
 	});
 
-	// (c) Synthesize. Pick the synthesizer prompt matching the shaper
-	// target — code shaper uses synthesize.code, docs shaper uses
-	// synthesize.docs. The synthesize() call throws
-	// SynthesizerPromptMissingError if the target prompt is not
-	// registered; the catch below rolls us back to the legacy shaper.
-	const synthesizeTarget: 'code' | 'docs' = args.shaperId === 'docs' ? 'docs' : 'code';
+	// (c) Synthesize. Pick the synthesizer prompt keyed by
+	// (shaperId, answerType):
+	//   docs shaper                            -> 'docs'
+	//   code shaper + adherence-check          -> 'adherence'
+	//   code shaper + capability-discovery     -> 'capability'
+	//   code shaper + <anything else>          -> 'code'
+	// The synthesize() call throws SynthesizerPromptMissingError if
+	// the key is unregistered; the catch below rolls us back to the
+	// legacy shaper.
+	const synthesizeTarget: 'code' | 'docs' | 'adherence' | 'capability' =
+		args.shaperId === 'docs'
+			? 'docs'
+			: plan.answerType === 'adherence-check'
+				? 'adherence'
+				: plan.answerType === 'capability-discovery'
+					? 'capability'
+					: 'code';
 	try {
 		const raw = await synthesize({
 			runId:    args.runId,

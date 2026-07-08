@@ -42,7 +42,7 @@ Pick exactly one:
 
 ## Exploration catalog (V1)
 
-The exploration types currently supported (Phases 1 + 2):
+The exploration types currently supported (Phases 1 + 2 + 3):
 
 - **`concept.resolve`** — Ranked entity/file/module matches for a query.
     ```json
@@ -72,8 +72,22 @@ The exploration types currently supported (Phases 1 + 2):
     ```json
     params: { "subject": "<text>", "maxSources": 15 }
     ```
+- **`usage.example`** — Enumerate real callers of a symbol via the CALLS graph (1-hop predecessors). Deterministic; no LLM.
+    ```json
+    params: { "symbolName": "<name>", "kinds": ["function","method","class"], "topK": 12 }
+    // OR: pass `entityId` when the caller already knows the id (e.g. from symbol.locate).
+    ```
+- **`class.hierarchy`** — Walk INHERITS + IMPLEMENTS edges in both directions for a class/interface. Deterministic.
+    ```json
+    params: { "symbolName": "<ClassName>" }
+    // OR: params: { "entityId": "<entityId>" }
+    ```
+- **`capability.reuse-check`** — Ask: does the codebase already deliver this capability? Hybrid: concept.resolve → module.profile per candidate → narrow LLM verdict (clear-match / partial-match / unrelated) with rationale. Use for capability-discovery answer types.
+    ```json
+    params: { "capability": "<natural-language capability>", "limit": 5 }
+    ```
 
-Other types (`class.hierarchy`, `test.locate`, `usage.example`, `capability.reuse-check`, `convention.detect`, `config.trace`, `data-model.trace`, `freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
+Other types (`test.locate`, `convention.detect`, `config.trace`, `data-model.trace`, `freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
 
 ## dependsOn conventions
 
@@ -121,7 +135,33 @@ For queries like "what does the doc say about X", "find the section about Y", "s
 
 At most 3 explorations for prose-retrieval; the synthesizer stitches them into the bundle.
 
-### Recipe: `adherence-check` / `capability-discovery` / `how-does-it-work` / `data-inventory` / `infra-inventory`
+### Recipe: `adherence-check`
+
+For queries like "does the code follow rule X", "is the codebase respecting Y", "check whether Z is enforced":
+
+Adherence-check must retrieve BOTH the rule text (from docs) AND the code sites that could match or violate. Emit these explorations in order:
+
+1. `doc.constraint.enumerate(subject="<intent.focus>")` — the rule text verbatim + rule kind. Purpose: "Retrieve the stated rule from the docs corpus."
+2. `doc.decision.trace(topic="<intent.focus>")` — the recorded decision behind the rule. Purpose: "Preserve the rationale for the rule."
+3. `concept.resolve(query="<distinctive-term-from-focus>")` — depends on `e1`. Purpose: "Find code regions in the rule's domain."
+4. `symbol.locate(names=[...distinctive names lifted from the rule text...], kinds=["function","method","class","variable"])` — depends on `e1`. Purpose: "Locate the entities the rule constrains." Only emit when the rule text names at least one distinctive identifier that will match code (a config key, a class name, a model id, etc.).
+5. (Optional, when `e4` returns a class-like hit) `class.hierarchy(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Anchor inheritance chains against the rule."
+6. (Optional) `usage.example(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Cite representative real callsites."
+
+Keep it to 4-6 explorations. If the rule's focus does NOT yield a distinctive code identifier (pure prose rule), stop after step 3.
+
+### Recipe: `capability-discovery`
+
+For queries like "does the codebase already do X", "is there existing support for Y", "what module handles Z":
+
+1. `capability.reuse-check(capability="<intent.focus>", limit=5)` — the primary retrieval + verdict pass. Purpose: "Rank candidate modules by whether they already deliver the capability."
+2. `concept.resolve(query="<intent.focus>")` — parallel-recall check so the synthesizer can show retrieval candidates that did NOT make it into the reuse-check verdicts. Purpose: "Reveal near-miss modules for transparency."
+3. (Optional, only when `$e1.candidates[0].verdict === 'clear-match'`) `module.profile(path=$e1.candidates[0].path)` — depends on `e1`. Purpose: "Profile the winning candidate for the synthesizer to cite."
+4. (Optional, only when a clear-match anchor exists) `symbol.locate(names=$e3.profile.exports[0..3])` — depends on `e3`. Purpose: "Name representative entities inside the winning candidate."
+
+At most 4 explorations. When `capability.reuse-check` returns zero candidates (empty `candidates` + populated `notFoundNote`), STOP after step 1.
+
+### Recipe: `how-does-it-work` / `data-inventory` / `infra-inventory`
 
 Not yet implemented. Classify the answerType correctly but emit an EMPTY `explorations` array + a synthesisHint naming the answer type. The driver falls through to the legacy shaper.
 
