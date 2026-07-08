@@ -109,6 +109,30 @@ function densityScore(entityCount: number): number {
 	return 1.0;
 }
 
+/** Minimum shared-prefix length for prefix matching. Below this,
+ *  we require exact match to avoid `class` -> `classroom` false
+ *  hits. Empirically tuned so `classifier` matches `classification`
+ *  (shared "classifi" = 8 chars) but `class` does not match
+ *  `classroom` (only "class" = 5 chars shared). */
+const MIN_PREFIX_LEN = 7;
+
+/**
+ * Is there any token in `bag` that shares a >= MIN_PREFIX_LEN
+ * prefix with `q` (in either direction)? Both `q` and the
+ * candidate must be at least MIN_PREFIX_LEN chars for the check
+ * to fire.
+ */
+function hasPrefixMatch(q: string, bag: ReadonlySet<string>): boolean {
+	if (q.length < MIN_PREFIX_LEN) return false;
+	const qPrefix = q.slice(0, MIN_PREFIX_LEN);
+	for (const t of bag) {
+		if (t.length < MIN_PREFIX_LEN) continue;
+		if (t.startsWith(qPrefix))                    return true;
+		if (q.startsWith(t.slice(0, MIN_PREFIX_LEN))) return true;
+	}
+	return false;
+}
+
 // ---------------------------------------------------------------------------
 // Tokenisation
 // ---------------------------------------------------------------------------
@@ -182,12 +206,21 @@ function scoreCandidate(
 	}
 	const nameTokens = new Set(splitIdentifier(c.name));
 
-	// Count query tokens that appear in path / name.
+	// Count query tokens that appear in path / name. Exact match
+	// scores 1; prefix match (>=7-char shared prefix in both
+	// directions) scores 0.7 -- lets `classifier` still hit
+	// `classification/` (share "classifi" = 8 chars), `extract` hit
+	// `extraction/`, `payable` hit `payables/`, etc. Short tokens
+	// (<7 chars) fall back to exact match only so we don't false-
+	// match `class` -> `classroom`.
 	let pathHits = 0;
 	let nameHits = 0;
 	for (const t of tokens) {
-		if (pathTokens.has(t)) pathHits += 1;
-		if (nameTokens.has(t)) nameHits += 1;
+		if (pathTokens.has(t))       pathHits += 1;
+		else if (hasPrefixMatch(t, pathTokens)) pathHits += 0.7;
+
+		if (nameTokens.has(t))       nameHits += 1;
+		else if (hasPrefixMatch(t, nameTokens)) nameHits += 0.7;
 	}
 
 	// No hits at all -> drop.

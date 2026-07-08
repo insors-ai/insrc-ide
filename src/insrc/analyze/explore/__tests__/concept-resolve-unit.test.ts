@@ -198,3 +198,59 @@ test('entity density buckets are monotonic', () => {
 	assert.ok(many.score <= lots.score);
 	assert.ok(lots.score <= huge.score);
 });
+
+// ---------------------------------------------------------------------------
+// Prefix matching (classifier -> classification, extract -> extraction, ...)
+// ---------------------------------------------------------------------------
+
+test('classifier query matches classification/ via prefix (shared 8 chars)', () => {
+	const tokens = _tokeniseForTest('classifier');
+	const hit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/insors/classification`, name: 'classification', entityCount: 100 },
+		tokens, REPO, true,
+	);
+	assert.ok(hit !== null);
+	assert.ok(hit.score > 0, 'classifier should hit classification via prefix');
+});
+
+test('extract query matches extraction/ via prefix', () => {
+	const tokens = _tokeniseForTest('extract');
+	const hit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/insors/extraction`, name: 'extraction', entityCount: 500 },
+		tokens, REPO, true,
+	);
+	assert.ok(hit !== null);
+	assert.ok(hit.score > 0);
+});
+
+test('exact match still beats prefix match at same density', () => {
+	const tokens = _tokeniseForTest('classification');
+	const exactHit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/classification`, name: 'classification', entityCount: 100 },
+		tokens, REPO, true,
+	);
+	const prefixHit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/classifier`, name: 'classifier', entityCount: 100 },
+		tokens, REPO, true,
+	);
+	assert.ok(exactHit !== null && prefixHit !== null);
+	assert.ok(exactHit.score > prefixHit.score);
+});
+
+test('short query token (<7 chars) does NOT prefix-match (no false hit)', () => {
+	// 'class' is < 7 chars; must not match `classroom` via prefix
+	const tokens = _tokeniseForTest('class');
+	const hit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/classroom`, name: 'classroom', entityCount: 50 },
+		tokens, REPO, false,
+	);
+	// class -> classroom would only work if we allowed <7 char
+	// prefix matches. We don't, so this hit should be a straight
+	// exact miss.
+	// But wait: `class` is only 5 chars, drops below tokenise's
+	// STOPWORD/length filter? Let me check: length >= 2 is the only
+	// filter, so 'class' survives. Then it exact-matches nothing in
+	// classroom's tokens (`classroom`). Prefix matching bails
+	// because len<7. So hit is null (no path token, no name token).
+	assert.equal(hit, null);
+});
