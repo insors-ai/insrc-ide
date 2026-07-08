@@ -84,12 +84,30 @@ const STRUCTURAL_TOKENS = new Set([
 ]);
 
 /** Score weights (sum to ~1.0 before bonuses). */
-const W_PATH_TOKENS = 0.55;
-const W_NAME_TOKENS = 0.35;
-const W_DEPTH       = 0.10;
+const W_PATH_TOKENS   = 0.45;
+const W_NAME_TOKENS   = 0.30;
+const W_DEPTH         = 0.10;
+/** Entity density -- how much INDEXED code lives under this
+ *  candidate. Discriminates real code modules from
+ *  documentation-only directories that share a name (Test A on
+ *  insors-extraction: `docs/extraction/payable/` had 0 code
+ *  entities but was tied with `insors/extraction/payable/` on
+ *  path tokens). */
+const W_ENTITY_DENSITY = 0.15;
 
 /** Small additive bonuses. */
 const DIR_STRUCTURAL_BONUS = 0.10;
+
+/** Density thresholds. Bucket into 4 tiers so density adds a
+ *  monotonic signal without dominating: 0 entities = 0, 1-9 = 0.25,
+ *  10-49 = 0.5, 50-249 = 0.75, 250+ = 1.0. */
+function densityScore(entityCount: number): number {
+	if (entityCount <= 0)   return 0;
+	if (entityCount < 10)   return 0.25;
+	if (entityCount < 50)   return 0.5;
+	if (entityCount < 250)  return 0.75;
+	return 1.0;
+}
 
 // ---------------------------------------------------------------------------
 // Tokenisation
@@ -131,13 +149,19 @@ interface Candidate {
 	readonly path:  string;
 	readonly name:  string;
 	readonly entityId?: string;
+	/** Number of non-artefact entities under this candidate's path.
+	 *  Directories: entities whose file lives under the directory.
+	 *  Files: entities defined in the file. Entities themselves:
+	 *  entity_count = 1 (or 0 for module stubs). */
+	readonly entityCount?: number;
 }
 
 interface ScoredCandidate extends Candidate {
 	readonly score: number;
 	readonly diagnostics: {
-		tokenMatch?: number;
-		pathDepth?:  number;
+		tokenMatch?:    number;
+		pathDepth?:     number;
+		entityDensity?: number;
 	};
 }
 
@@ -178,10 +202,19 @@ function scoreCandidate(
 	const depthSegments = relPath.split(/[\\/]+/g).filter(x => x.length > 0).length;
 	const depthScore = Math.max(0, 1 - depthSegments / 6);
 
+	// Entity-density score: how much INDEXED code lives under this
+	// candidate. For directories, this is the count of non-artefact
+	// entities whose file path lives under the dir. For files, the
+	// entity count IN the file. For entity hits, just 1. Density
+	// discriminates real code modules from documentation-only dirs
+	// that share a name.
+	const density = densityScore(c.entityCount ?? 0);
+
 	let score =
-		W_PATH_TOKENS * pathMatchNorm +
-		W_NAME_TOKENS * nameMatchNorm +
-		W_DEPTH       * depthScore;
+		W_PATH_TOKENS    * pathMatchNorm +
+		W_NAME_TOKENS    * nameMatchNorm +
+		W_DEPTH          * depthScore    +
+		W_ENTITY_DENSITY * density;
 
 	if (structuralBoost && c.kind === 'dir') {
 		score += DIR_STRUCTURAL_BONUS;
@@ -195,8 +228,9 @@ function scoreCandidate(
 		...c,
 		score,
 		diagnostics: {
-			tokenMatch: (pathMatchNorm + nameMatchNorm) / 2,
-			pathDepth:  depthSegments,
+			tokenMatch:    (pathMatchNorm + nameMatchNorm) / 2,
+			pathDepth:     depthSegments,
+			entityDensity: density,
 		},
 	};
 }
@@ -248,6 +282,68 @@ function enumerateDirs(repoPath: string): Candidate[] {
 	}
 	walk(repoPath, 0);
 	return out;
+}
+
+/**
+ * Populate `entityCount` on every candidate by counting non-artefact
+ * structural entities whose file path lives under the candidate's
+ * path. Single O(N * K) scan where N = entities and K = candidates.
+ * For 100k entities and 5k candidates the wall-clock is ~500ms --
+ * paid once per concept.resolve call.
+ */
+function annotateEntityCounts(
+	candidates: readonly Candidate[],
+	entities:   readonly Entity[],
+): Candidate[] {
+	// Build a prefix index of directory paths -> counter for O(N +
+	// K) instead of O(N * K). Every entity file walks up to the root
+	// counting each ancestor dir.
+	const dirCount = new Map<string, number>();
+	const fileCount = new Map<string, number>();
+	for (const e of entities) {
+		if (e.artifact === true) continue;
+		if (!STRUCTURAL_ENTITY_KINDS.has(e.kind) && e.kind !== 'file') continue;
+		const file = e.file;
+		if (e.kind === 'file') {
+			// File entities contribute to dir counts up the chain but
+			// not to their own file's structural count (only functions
+			// / classes / etc do).
+		} else {
+			fileCount.set(file, (fileCount.get(file) ?? 0) + 1);
+		}
+		// Walk parent dirs.
+		let cursor = parentDir(file);
+		while (cursor.length > 0) {
+			dirCount.set(cursor, (dirCount.get(cursor) ?? 0) + 1);
+			const next = parentDir(cursor);
+			if (next === cursor) break;
+			cursor = next;
+		}
+	}
+	// Only structural (non-file) entities get counted in the dir
+	// aggregates above -- files that hold structural entities were
+	// already contributing via their child structurals. But we also
+	// want files themselves to contribute a small signal for
+	// entity-count-oriented dirs, so top up each dir by the number
+	// of files with kind='file' underneath it.
+	// (Simplification: for V1 the structural-only count is
+	// meaningful enough; skip the file top-up. Revisit when Phase 4
+	// convention.detect wants finer signal.)
+	const out: Candidate[] = [];
+	for (const c of candidates) {
+		let count = 0;
+		if (c.kind === 'dir')    count = dirCount.get(c.path)  ?? 0;
+		else if (c.kind === 'file') count = fileCount.get(c.path) ?? 0;
+		else                    count = 1;  // entity itself
+		out.push({ ...c, entityCount: count });
+	}
+	return out;
+}
+
+function parentDir(path: string): string {
+	const idx = path.lastIndexOf('/');
+	if (idx <= 0) return '';
+	return path.slice(0, idx);
 }
 
 /**
@@ -340,10 +436,15 @@ export async function runConceptResolve(
 	const entities = await listEntitiesForRepo(db, ctx.repoPath);
 
 	// Assemble the candidate pool.
-	const candidates: Candidate[] = [];
-	if (includeKinds.includes('dir'))    candidates.push(...enumerateDirs(ctx.repoPath));
-	if (includeKinds.includes('file'))   candidates.push(...fileCandidatesFromEntities(entities));
-	if (includeKinds.includes('entity')) candidates.push(...structuralEntityCandidates(entities));
+	const rawCandidates: Candidate[] = [];
+	if (includeKinds.includes('dir'))    rawCandidates.push(...enumerateDirs(ctx.repoPath));
+	if (includeKinds.includes('file'))   rawCandidates.push(...fileCandidatesFromEntities(entities));
+	if (includeKinds.includes('entity')) rawCandidates.push(...structuralEntityCandidates(entities));
+
+	// Annotate every candidate with an entityCount so the density
+	// signal can discriminate real code modules from empty docs
+	// dirs that share a name.
+	const candidates = annotateEntityCounts(rawCandidates, entities);
 
 	// Score every candidate. Drop zero-hit candidates inline.
 	const scored: ScoredCandidate[] = [];
@@ -375,6 +476,7 @@ export async function runConceptResolve(
 		diagnostics: {
 			...(r.diagnostics.tokenMatch !== undefined ? { tokenMatch: Math.round(r.diagnostics.tokenMatch * 1000) / 1000 } : {}),
 			...(r.diagnostics.pathDepth !== undefined ? { pathDepth:  r.diagnostics.pathDepth } : {}),
+			...(r.diagnostics.entityDensity !== undefined ? { graphInDegree: Math.round(r.diagnostics.entityDensity * 1000) / 1000 } : {}),
 		},
 	}));
 

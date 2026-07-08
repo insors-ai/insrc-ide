@@ -156,3 +156,45 @@ test('name-token match contributes to score', () => {
 	assert.ok(pathOnlyMatch.score > 0);
 	assert.ok(nameOnlyMatch.score > 0);
 });
+
+// ---------------------------------------------------------------------------
+// Entity-density signal (Test A on insors-extraction: docs/extraction/payable
+// tied insors/extraction/payable on tokens; entity-density is the breaker)
+// ---------------------------------------------------------------------------
+
+test('code dir with real entities beats docs dir with zero entities on same tokens', () => {
+	const tokens = _tokeniseForTest('payable extraction');
+	// docs/extraction/payable/ -- same tokens but ZERO code entities
+	const docsHit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/docs/extraction/payable`, name: 'payable', entityCount: 0 },
+		tokens, REPO, true,
+	);
+	// insors/extraction/payable/ -- same tokens but MANY code entities
+	const codeHit = _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/insors/extraction/payable`, name: 'payable', entityCount: 300 },
+		tokens, REPO, true,
+	);
+	assert.ok(docsHit !== null && codeHit !== null);
+	assert.ok(
+		codeHit.score > docsHit.score,
+		`code dir score ${codeHit.score} should beat docs dir ${docsHit.score}`,
+	);
+});
+
+test('entity density buckets are monotonic', () => {
+	const tokens = _tokeniseForTest('payable');
+	const cand = (n: number) => _scoreCandidateForTest(
+		{ kind: 'dir', path: `${REPO}/payable`, name: 'payable', entityCount: n },
+		tokens, REPO, true,
+	);
+	const zero  = cand(0);
+	const few   = cand(5);
+	const many  = cand(20);
+	const lots  = cand(100);
+	const huge  = cand(500);
+	assert.ok(zero !== null && few !== null && many !== null && lots !== null && huge !== null);
+	assert.ok(zero.score <= few.score);
+	assert.ok(few.score  <= many.score);
+	assert.ok(many.score <= lots.score);
+	assert.ok(lots.score <= huge.score);
+});
