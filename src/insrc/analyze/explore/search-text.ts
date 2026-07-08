@@ -131,8 +131,6 @@ export async function runSearchText(
 		{
 			runId:           ctx.runId,
 			pattern:         params.pattern,
-			patternLen:      params.pattern.length,
-			patternHex:      Buffer.from(params.pattern, 'utf8').toString('hex').slice(0, 200),
 			glob:            params.glob ?? '(none)',
 			caseInsensitive: params.caseInsensitive === true,
 			root,
