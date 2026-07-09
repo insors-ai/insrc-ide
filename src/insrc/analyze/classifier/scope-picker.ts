@@ -37,9 +37,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../agent/providers/ollama.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../config/local.js';
+import { buildShaperProvider } from '../context/shaper-provider.js';
 import { listRepos } from '../../db/repos.js';
 import { listEntitiesForRepo } from '../../db/entities.js';
 import { getLogger } from '../../shared/logger.js';
@@ -123,7 +122,7 @@ export async function pickScope(args: PickScopeArgs): Promise<PickScopeResult> {
 	const cfg = loadAnalyzeConfig();
 
 	const promptContent = loadPromptFile();
-	const provider = args.provider ?? buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const provider = args.provider ?? buildShaperProvider(cfg);
 
 	// Gather cheap workspace signals -- no LLM tool loop involved. The
 	// registry + entity counts are the only inputs beyond the user's
@@ -291,11 +290,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	// .../analyze/classifier/scope-picker.js -> .../classifier -> .../analyze -> .../insrc
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
 	return resolve(insrcRoot, relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------

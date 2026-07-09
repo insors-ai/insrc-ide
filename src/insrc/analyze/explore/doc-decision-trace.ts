@@ -22,9 +22,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../agent/providers/ollama.js';
+import { buildShaperProvider } from '../context/shaper-provider.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../config/local.js';
 import { getDb } from '../../db/client.js';
 import { getEntity } from '../../db/entities.js';
 import { getLogger } from '../../shared/logger.js';
@@ -150,7 +149,7 @@ export async function runSharedDocDecisionTrace(
 
 	// (3) LLM extraction.
 	const cfg = loadAnalyzeConfig();
-	const provider = buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const provider = buildShaperProvider(cfg);
 	const promptContent = loadPromptFile();
 	const messages = buildMessages(promptContent, topic, hydrated);
 
@@ -295,11 +294,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	// .../analyze/explore/doc-decision-trace.js -> ... -> .../insrc
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
 	return resolve(insrcRoot, relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------

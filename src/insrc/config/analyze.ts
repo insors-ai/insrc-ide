@@ -69,10 +69,29 @@ export interface MaxPlanDepthMap {
 	readonly XL: number;
 }
 
+/**
+ * Which LLM backend powers the shaper's structured-output calls
+ * (decomposer + synthesizer + narrow-LLM explorations + classifier
+ * + planner + summariser). Introduced for the MCP-integration
+ * scenario: when the analyze framework is invoked from Claude Code
+ * or Codex as an MCP tool, the outer LLM is the reasoning engine
+ * so the daemon routes its own LLM calls to the same family via
+ * `CliProvider`. Ollama remains the default for standalone (CLI +
+ * IDE) usage.
+ *
+ * NOTE: the tool-loop path in `analyze/context/driver.ts`
+ * (freeform.probe + classification + task modes) still requires an
+ * Ollama-family provider because `CliProvider.supportsTools ===
+ * false`. Those code paths continue to build their own Ollama
+ * provider regardless of this setting.
+ */
+export type AnalyzeShaperProviderKind = 'ollama' | 'cli-claude' | 'cli-codex';
+
 export interface AnalyzeConfig {
-	readonly shaperModel:   string;
-	readonly shaper:        AnalyzeShaperConfig;
-	readonly maxPlanDepth:  MaxPlanDepthMap;
+	readonly shaperProvider: AnalyzeShaperProviderKind;
+	readonly shaperModel:    string;
+	readonly shaper:         AnalyzeShaperConfig;
+	readonly maxPlanDepth:   MaxPlanDepthMap;
 }
 
 /**
@@ -133,9 +152,10 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 
 	if (!existsSync(PATHS.config)) {
 		cached = {
-			shaperModel:  fallbackModel,
-			shaper:       DEFAULT_SHAPER,
-			maxPlanDepth: DEFAULT_MAX_PLAN_DEPTH,
+			shaperProvider: 'ollama',
+			shaperModel:    fallbackModel,
+			shaper:         DEFAULT_SHAPER,
+			maxPlanDepth:   DEFAULT_MAX_PLAN_DEPTH,
 		};
 		return cached;
 	}
@@ -154,6 +174,7 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 			: {};
 
 		cached = {
+			shaperProvider: parseShaperProvider(analyze['shaperProvider']),
 			shaperModel:
 				typeof analyze['shaperModel'] === 'string'
 					? (analyze['shaperModel'] as string)
@@ -191,12 +212,24 @@ export function loadAnalyzeConfig(): AnalyzeConfig {
 			'failed to parse config.json; using analyze defaults',
 		);
 		cached = {
-			shaperModel:  fallbackModel,
-			shaper:       DEFAULT_SHAPER,
-			maxPlanDepth: DEFAULT_MAX_PLAN_DEPTH,
+			shaperProvider: 'ollama',
+			shaperModel:    fallbackModel,
+			shaper:         DEFAULT_SHAPER,
+			maxPlanDepth:   DEFAULT_MAX_PLAN_DEPTH,
 		};
 		return cached;
 	}
+}
+
+function parseShaperProvider(raw: unknown): AnalyzeShaperProviderKind {
+	if (raw === 'ollama' || raw === 'cli-claude' || raw === 'cli-codex') return raw;
+	if (raw !== undefined) {
+		log.warn(
+			{ raw },
+			`unknown models.analyze.shaperProvider; falling back to 'ollama'`,
+		);
+	}
+	return 'ollama';
 }
 
 function isObject(x: unknown): x is Record<string, unknown> {

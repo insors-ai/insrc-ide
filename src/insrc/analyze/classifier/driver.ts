@@ -36,9 +36,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../agent/providers/ollama.js';
+import { buildShaperProvider } from '../context/shaper-provider.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../config/local.js';
 import { getLogger } from '../../shared/logger.js';
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import { CONTRACT_FOOTER_MD } from '../contract.js';
@@ -126,7 +125,7 @@ export async function classify(args: ClassifyDriverArgs): Promise<ClassifiedInte
 
 	// (2) Load classifier prompt + build messages.
 	const promptContent = loadPromptFile();
-	const provider = args.provider ?? buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const provider = args.provider ?? buildShaperProvider(cfg);
 
 	let messages = buildInitialMessages(promptContent, bundleMd, input);
 
@@ -279,11 +278,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	// .../analyze/classifier/driver.js -> .../classifier -> .../analyze -> .../insrc
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
 	return resolve(insrcRoot, relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------

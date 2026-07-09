@@ -25,9 +25,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../agent/providers/ollama.js';
+import { buildShaperProvider } from './shaper-provider.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../config/local.js';
 import { getLogger } from '../../shared/logger.js';
 import type {
 	LLMMessage,
@@ -112,7 +111,7 @@ export interface SynthesizeArgs {
 export async function synthesize(args: SynthesizeArgs): Promise<Omit<AnalyzeContextBundle, 'meta'>> {
 	const cfg = loadAnalyzeConfig();
 	const promptContent = loadPromptFile(args.target);
-	const provider = args.provider ?? buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const provider = args.provider ?? buildShaperProvider(cfg);
 
 	const messages = buildMessages(promptContent, args.intent, args.executed);
 
@@ -268,11 +267,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	const thisFile = fileURLToPath(import.meta.url);
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
 	return resolve(insrcRoot, relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------

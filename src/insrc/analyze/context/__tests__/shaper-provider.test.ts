@@ -1,0 +1,86 @@
+/**
+ * Unit tests for `buildShaperProvider` -- the single dispatch point
+ * that swaps the analyze framework's LLM backend from Ollama to
+ * `CliProvider('claude' | 'codex')` in the MCP-integration path.
+ *
+ * The factory is called from ~11 sites (decomposer, synthesizer,
+ * doc-decision-trace, doc-constraint-enumerate, capability-reuse-
+ * check, classifier, scope-picker, planner, summariser, adherence,
+ * aggregator). Changing its dispatch quietly ripples everywhere, so
+ * this test pins the exact provider class returned per config kind.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { CliProvider } from '../../../agent/providers/cli-provider.js';
+import { OllamaProvider } from '../../../agent/providers/ollama.js';
+import type { AnalyzeConfig } from '../../../config/analyze.js';
+import { buildShaperProvider } from '../shaper-provider.js';
+
+function makeCfg(overrides: Partial<AnalyzeConfig>): AnalyzeConfig {
+	return {
+		shaperProvider: 'ollama',
+		shaperModel:    'qwen3.6:35b-a3b',
+		shaper: {
+			maxToolTurns:            40,
+			structuredOutputRetries: 3,
+			ollamaNumCtx:            32_768,
+			ollamaNumPredict:        20_480,
+		},
+		maxPlanDepth: { XS: 2, S: 3, M: 4, L: 5, XL: 6 },
+		...overrides,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+test('shaperProvider=ollama returns an OllamaProvider', () => {
+	const p = buildShaperProvider(makeCfg({ shaperProvider: 'ollama' }));
+	assert.ok(p instanceof OllamaProvider);
+});
+
+test('shaperProvider=cli-claude returns a CliProvider (claude kind)', () => {
+	const p = buildShaperProvider(makeCfg({ shaperProvider: 'cli-claude' }));
+	assert.ok(p instanceof CliProvider);
+	// CliProvider's kind is private; assert via the public capability
+	// surface. `supportsTools === false` is the CLI-wrapper signature.
+	assert.equal(p.supportsTools, false);
+});
+
+test('shaperProvider=cli-codex returns a CliProvider', () => {
+	const p = buildShaperProvider(makeCfg({ shaperProvider: 'cli-codex' }));
+	assert.ok(p instanceof CliProvider);
+	assert.equal(p.supportsTools, false);
+});
+
+// ---------------------------------------------------------------------------
+// Model plumbing
+// ---------------------------------------------------------------------------
+
+test('shaperProvider=ollama honours cfg.shaperModel + cfg.shaper.ollamaNumCtx', () => {
+	// The Ollama constructor keeps these on the instance, but they're
+	// private. We can at least confirm construction did not throw for
+	// a non-default combination.
+	const p = buildShaperProvider(makeCfg({
+		shaperProvider: 'ollama',
+		shaperModel:    'llama3:70b',
+		shaper: {
+			maxToolTurns:            40,
+			structuredOutputRetries: 3,
+			ollamaNumCtx:            8_000,
+			ollamaNumPredict:        4_096,
+		},
+	}));
+	assert.ok(p instanceof OllamaProvider);
+});
+
+test('shaperProvider=cli-* is idempotent -- repeated calls return distinct instances', () => {
+	// Not strictly a factory contract (fresh instance is fine), but
+	// pins that the factory never leaks a shared singleton by accident.
+	const a = buildShaperProvider(makeCfg({ shaperProvider: 'cli-claude' }));
+	const b = buildShaperProvider(makeCfg({ shaperProvider: 'cli-claude' }));
+	assert.notStrictEqual(a, b);
+});

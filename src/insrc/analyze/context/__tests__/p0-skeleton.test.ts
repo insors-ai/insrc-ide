@@ -49,9 +49,12 @@ test('CONTRACT_FOOTER_MD is non-empty and references the three citation kinds', 
 // PROMPT_PATHS catalog
 // ---------------------------------------------------------------------------
 
-test('PROMPT_PATHS has exactly the five expected shapers', () => {
+test('PROMPT_PATHS has exactly the six expected shapers', () => {
+	// docs was added when the docs-target shaper landed (Phase 2 of
+	// plans/exploration-based-context-build.md); the six-key expectation
+	// includes it alongside the five originals.
 	const keys = Object.keys(PROMPT_PATHS).sort();
-	assert.deepEqual(keys, ['classification', 'code', 'data', 'generic', 'infra']);
+	assert.deepEqual(keys, ['classification', 'code', 'data', 'docs', 'generic', 'infra']);
 });
 
 test('PROMPT_PATHS values point at prompts/analyze/<shaper>.system.md', () => {

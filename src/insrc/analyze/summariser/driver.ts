@@ -25,9 +25,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../agent/providers/ollama.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../config/local.js';
+import { buildShaperProvider } from '../context/shaper-provider.js';
 import type { DbClient } from '../../db/client.js';
 import {
 	getDocSummary,
@@ -197,7 +196,7 @@ export async function summariseDoc(args: SummariseDocArgs): Promise<SummariseDoc
 
 	const family = inferDocFamily(entity.file);
 	const promptContent = loadPromptFile();
-	const provider = args.provider ?? buildProvider(modelId, cfg.shaper.ollamaNumCtx);
+	const provider = args.provider ?? buildShaperProvider(cfg);
 
 	const messages = buildMessages({
 		promptContent,
@@ -403,11 +402,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	// .../analyze/summariser/driver.js -> .../summariser -> .../analyze -> .../insrc
 	const insrcRoot = resolve(thisFile, '..', '..', '..');
 	return resolve(insrcRoot, relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------

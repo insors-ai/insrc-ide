@@ -882,6 +882,18 @@ function deriveEmptyLayers(bundle: AnalyzeContextBundle): BundleLayerName[] {
 // Provider + tool-deps construction
 // ---------------------------------------------------------------------------
 
+/**
+ * Tool-loop provider is intentionally Ollama-only. The classifier /
+ * task-mode legacy tail + `runShaperToolLoop` (freeform.probe)
+ * dispatch through this function; both drive multi-turn tool loops,
+ * which `CliProvider.supportsTools === false` cannot power. The
+ * MCP-integration shaperProvider config only routes the structured-
+ * output call sites (decomposer, synthesizer, doc.decision.trace,
+ * doc.constraint.enumerate, capability.reuse-check, classifier,
+ * scope-picker, planner, summariser, adherence, aggregator) --
+ * everything reachable via `buildShaperProvider(cfg)`. Tool-loop
+ * callers stay on Ollama regardless of shaperProvider.
+ */
 function buildProvider(modelId: string, numCtx: number): LLMProvider {
 	const local = loadLocalProviderConfig();
 	return new OllamaProvider(modelId, local.host, numCtx);

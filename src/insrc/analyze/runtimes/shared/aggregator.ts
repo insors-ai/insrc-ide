@@ -25,9 +25,8 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { OllamaProvider } from '../../../agent/providers/ollama.js';
 import { loadAnalyzeConfig } from '../../../config/analyze.js';
-import { loadLocalProviderConfig } from '../../../config/local.js';
+import { buildShaperProvider } from '../../context/shaper-provider.js';
 import { getLogger } from '../../../shared/logger.js';
 import type {
 	AnalyzeScope,
@@ -73,7 +72,7 @@ export async function runAggregator(args: RunAggregatorArgs): Promise<AggregateR
 	const cfg = loadAnalyzeConfig();
 
 	const promptContent = loadPromptFile(args.promptRelPath);
-	const provider = args.provider ?? buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const provider = args.provider ?? buildShaperProvider(cfg);
 
 	const messages = buildMessages({
 		promptContent,
@@ -223,11 +222,6 @@ function resolveRelativeToInsrcRoot(relativePath: string): string {
 	const thisFile = fileURLToPath(import.meta.url);
 	// .../analyze/runtimes/shared/aggregator.js -> ... -> .../insrc
 	return resolve(thisFile, '..', '..', '..', '..', relativePath);
-}
-
-function buildProvider(modelId: string, numCtx: number): LLMProvider {
-	const local = loadLocalProviderConfig();
-	return new OllamaProvider(modelId, local.host, numCtx);
 }
 
 // ---------------------------------------------------------------------------
