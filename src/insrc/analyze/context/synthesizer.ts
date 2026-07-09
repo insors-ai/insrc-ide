@@ -202,7 +202,22 @@ function buildMessages(
 // Schema: bundle schema minus the meta requirement
 // ---------------------------------------------------------------------------
 
+/**
+ * Cache the stripped-and-$id-cleared schema at module load. Two
+ * motivations:
+ *   1. ajv keys compiled validators by `$id`. Calling this on every
+ *      synthesize() invocation and letting the strip pass keep the
+ *      original $id means the second run in a process throws
+ *      "schema with key or id ... already exists" -- surfaced on
+ *      T7b during Phase 5 live validation.
+ *   2. We were re-allocating a large clone per call for no reason;
+ *      the strip is deterministic given the input schema, so one
+ *      cached value is enough.
+ */
+let cachedStrippedSchema: Record<string, unknown> | null = null;
+
 function stripMetaFromSchema(schema: Record<string, unknown>): Record<string, unknown> {
+	if (cachedStrippedSchema !== null) return cachedStrippedSchema;
 	const cloned = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
 	if (Array.isArray(cloned['required'])) {
 		cloned['required'] = (cloned['required'] as string[]).filter(k => k !== 'meta');
@@ -211,6 +226,12 @@ function stripMetaFromSchema(schema: Record<string, unknown>): Record<string, un
 		const props = cloned['properties'] as Record<string, unknown>;
 		delete props['meta'];
 	}
+	// Drop the schema's $id so ajv doesn't keep the compiled
+	// validator keyed by the original id -- otherwise the second
+	// synthesize() in the same process fails with "schema with key
+	// or id ... already exists".
+	delete cloned['$id'];
+	cachedStrippedSchema = cloned;
 	return cloned;
 }
 
@@ -282,6 +303,9 @@ function classifyError(err: unknown): Error {
 // ---------------------------------------------------------------------------
 // Boot validator hook
 // ---------------------------------------------------------------------------
+
+export const _stripMetaFromSchemaForTest = stripMetaFromSchema;
+export function _resetStrippedSchemaCacheForTest(): void { cachedStrippedSchema = null; }
 
 export const SYNTHESIZE_CODE_PROMPT_PATH       = SYNTHESIZE_CODE_PROMPT_REL;
 export const SYNTHESIZE_DOCS_PROMPT_PATH       = SYNTHESIZE_DOCS_PROMPT_REL;
