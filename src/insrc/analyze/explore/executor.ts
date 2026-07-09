@@ -30,6 +30,9 @@ import { getLogger } from '../../shared/logger.js';
 import { runCapabilityReuseCheck } from './capability-reuse-check.js';
 import { runClassHierarchy } from './class-hierarchy.js';
 import { runConceptResolve } from './concept-resolve.js';
+import { runConfigTrace } from './config-trace.js';
+import { runConventionDetect } from './convention-detect.js';
+import { runDataModelTrace } from './data-model-trace.js';
 import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
 import { runDocDecisionTrace } from './doc-decision-trace.js';
 import { runDocMention } from './doc-mention.js';
@@ -37,6 +40,7 @@ import { runImportGraph } from './import-graph.js';
 import { runModuleProfile } from './module-profile.js';
 import { runSearchText } from './search-text.js';
 import { runSymbolLocate } from './symbol-locate.js';
+import { runTestLocate } from './test-locate.js';
 import { runUsageExample } from './usage-example.js';
 import type {
 	ExecutedExploration,
@@ -70,6 +74,10 @@ const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
 	'class.hierarchy':          runClassHierarchy,
 	'capability.reuse-check':   runCapabilityReuseCheck,
 	'search.text':              runSearchText,
+	'convention.detect':        runConventionDetect,
+	'config.trace':             runConfigTrace,
+	'test.locate':              runTestLocate,
+	'data-model.trace':         runDataModelTrace,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`

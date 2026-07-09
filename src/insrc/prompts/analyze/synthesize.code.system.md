@@ -35,6 +35,45 @@ You do NOT decide what to look at, run tools, or explore the repo. You do ONE th
     { names, hits: [{ entityId, name, kind, file, startLine, endLine, signature? }] }
     ```
 
+- **`class.hierarchy`** (Phase 3):
+    ```
+    { subject, nodes: [{ entityId, name, kind, file, startLine, extendsList, implementsList, subclasses, implementers }], notFoundNote }
+    ```
+    Emitted mostly for `how-does-it-work` recipes; render inheritance under `structure` as a class-graph sub-section.
+
+- **`usage.example`** (Phase 3):
+    ```
+    { subject, targetEntityId?, callers: [{ entityId, name, kind, file, startLine, endLine, signature? }], totalCallers }
+    ```
+    Emitted for `how-does-it-work` recipes; each caller is a real callsite you can cite as a `code` artefact.
+
+- **`convention.detect`** (Phase 4):
+    ```
+    { path,
+      namingSchema: { functions, functionsBreakdown, classes, classesBreakdown, files, filesBreakdown, testFiles, sampleSizes },
+      baseClassIdioms: [{ baseName, baseEntityId?, subclassCount, representativeSubclasses[] }],
+      privatePrefixCount, dunderMethodCount, totalEntities, notFoundNote }
+    ```
+    `namingSchema.functions | .classes | .files` each carry a single label (`snake_case | camelCase | PascalCase | kebab-case | mixed | unknown`); `namingSchema.testFiles` carries the test-file convention (`test_* | *_test | *.spec | *.test | inline | none | mixed`).
+
+- **`test.locate`** (Phase 4):
+    ```
+    { subject, hits: [{ file, entityId?, name, startLine?, kind }], notFoundNote }
+    ```
+    Emitted for `how-does-it-work`; render under a `## Tests` sub-section listing files + representative test entities so the reader sees how the subject is exercised.
+
+- **`data-model.trace`** (Phase 4):
+    ```
+    { subject, nodes: [{ entityId, name, kind, file, startLine, fields, extendsList, subclasses, topCallers }], notFoundNote }
+    ```
+    Emitted for `how-does-it-work` when the subject reads as a domain entity; render a compact model view (fields + extends chain + top callers).
+
+- **`config.trace`** (Phase 4):
+    ```
+    { key, hits: [{ file, line, text, role }], truncated, backend, root }
+    ```
+    Same shape as `search.text` with a per-hit `role` (`definition | usage | default | unknown`). Group hits by role in the `structure` layer when emitted.
+
 - **`unsupported`** / **`failed`**: emit the exploration's `purpose` in the bundle's `structure` layer under a `## Diagnostics` sub-section. Do NOT let a failed exploration take down the whole bundle.
 
 ## Bundle layers
@@ -59,6 +98,13 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
     - Top-level directory tree (immediate subdirs + files)
     - For each subdir, one line naming it (deeper enumeration is not in scope for XS/S; can go 2 levels for M; 3 levels for L)
     - File annotations: language + kind + rough size (e.g. `foo.py (python, class, 12 KB)`)
+    - `## Conventions` sub-section (when `convention.detect` output is present) with:
+        - `Function naming: <namingSchema.functions>` — if `mixed`, list the top-2 buckets from `functionsBreakdown` with counts
+        - `Class naming: <namingSchema.classes>` — same shape
+        - `File naming: <namingSchema.files>` — same shape
+        - `Test files: <namingSchema.testFiles>` (skip when `none`)
+        - `Base-class idioms:` bulleted list of every `baseClassIdioms[].baseName` (subclassCount + first 3 `representativeSubclasses` inline); skip the section entirely when the list is empty
+        - Suppress signals whose `sampleSizes.<axis> < 5` -- too few entities to draw a conclusion; note the sample size instead
     - If any explorations returned `unsupported` or `failed`, add a `## Diagnostics` section listing them.
 
 - **`surface`** — the module's PUBLIC surface. Draw from `module.profile.exports` + `symbol.locate.hits`:
@@ -78,7 +124,7 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
 
 - **No claim without an exploration output.** If a fact isn't present in any `output.*` field, it doesn't go in the bundle. This is what makes the bundle verifiable.
 - **No hallucinated paths.** Every file path in the bundle MUST appear in some exploration output (`hits[].path`, `filesInDir[].file`, `entrypoints[]`, `topImporters[].file`, `topImportees[].file`, or `symbol.locate.hits[].file`).
-- **No paraphrased class hierarchies.** If a hierarchy isn't in the outputs (V1 doesn't ship `class.hierarchy` yet), leave it out. Do NOT infer relationships.
+- **No paraphrased class hierarchies.** If a hierarchy isn't in an exploration output, leave it out. Do NOT infer relationships.
 - **Preserve verbatim exports.** Copy names from `module.profile.exports` exactly.
 - **Trust the resolver's ranking.** If `concept.resolve.hits[0]` names path X, center the bundle on X. Do NOT override the resolver based on your priors -- that's the entire point of the pipeline.
 

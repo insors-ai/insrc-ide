@@ -103,12 +103,13 @@ test('executor dispatches to the registered runner', async () => {
 // ---------------------------------------------------------------------------
 
 test('unsupported exploration type produces a diagnostic output', async () => {
-	// convention.detect is declared in the type union but not
-	// implemented in V1.
+	// `freeform.probe` is declared in the type union as the intended
+	// Phase 6 fallback but not registered in RUNNERS -- exercising the
+	// executor's unsupported-type diagnostic path.
 	const plan: ExplorationPlan = {
 		answerType:    'structural-map',
 		synthesisHint: 'test',
-		explorations:  [makeExp({ type: 'convention.detect' })],
+		explorations:  [makeExp({ type: 'freeform.probe' })],
 	};
 	const executed = await executePlan({
 		runId: 'test', repoPath: REPO, closureRepos: [REPO],
@@ -117,7 +118,7 @@ test('unsupported exploration type produces a diagnostic output', async () => {
 	const out = executed.results[0]!.output;
 	assert.equal(out.type, 'unsupported');
 	if (out.type === 'unsupported') {
-		assert.equal(out.requested, 'convention.detect');
+		assert.equal(out.requested, 'freeform.probe');
 	}
 });
 

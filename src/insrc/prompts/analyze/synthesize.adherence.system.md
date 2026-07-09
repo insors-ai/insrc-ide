@@ -25,6 +25,10 @@ The reader of this bundle is deciding whether the codebase HOLDS to a stated rul
 - **`search.text`**: `{ pattern, hits: [{ file, line, text }], truncated, backend, root }`
     Line-level grep hits. Each hit MUST be classified into `## Matches` / `## Drifts` / `## Contradictions` under the SAME contract as symbol.locate hits. Determine the bucket from the raw `text`: if the line contains the rule's mandated value or the enforcement construct, it's a `match`; if it contains an explicitly-forbidden value or a bypass of the rule, it's a `drift`. When ambiguous (a comment mentioning the value, a test-file reference, a doc-string quoting the rule), lean toward `drift` + note the ambiguity in the rationale — under-claiming a match is safer than over-claiming one.
 
+- **`config.trace`**: `{ key, hits: [{ file, line, text, role }], truncated, backend, root }` — same shape as `search.text` but with a per-hit `role` (`definition | usage | default | unknown`). When classifying into `## Matches` / `## Drifts`, weight the role: a `definition` hit that names the forbidden value is a stronger drift than a bare `usage` mention.
+
+- **`convention.detect`**: `{ path, namingSchema, baseClassIdioms, privatePrefixCount, dunderMethodCount, totalEntities, notFoundNote }` — surfaced in the `structure` layer's `## Conventions` sub-section (see below). Do NOT invent match/drift bullets from convention data; it is context, not evidence.
+
 ## Matches vs Drifts vs Contradictions
 
 Each cited code site falls in exactly one of three buckets. This is the HEART of the bundle -- get it right.
@@ -61,6 +65,12 @@ Every layer is a **single JSON string** in your output. Use Markdown headings in
     - `## Matches` — code sites that comply. Each: `- <name-or-quoted-line-text> :: <file>:<startLine> :: <one-line why it complies>`
     - `## Drifts` — code sites that plausibly violate. Same shape. If none, write `_None_`.
     - `## Contradictions` — verbatim pairs of opposing rule statements. Each pair: two bulleted lines, each with a citation. If none, write `_None_`.
+    - `## Conventions` (when `convention.detect` output is present) — one bullet per axis:
+        - `Function naming: <namingSchema.functions>`
+        - `Class naming: <namingSchema.classes>`
+        - `Test files: <namingSchema.testFiles>` (skip when `none`)
+        - `Base-class idioms:` bulleted list of every `baseClassIdioms[].baseName` (subclassCount + first 3 representative subclasses inline). Skip the section entirely when the idioms list is empty.
+        - Suppress axes whose `sampleSizes.<axis> < 5` -- note the sample size instead of drawing a conclusion.
     - `## Related docs` — every unique doc file that surfaced in doc.mention / doc.decision.trace / doc.constraint.enumerate, deduped by file
     - Add a `## Diagnostics` section only if any exploration returned `unsupported` or `failed`.
 

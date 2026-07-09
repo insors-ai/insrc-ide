@@ -22,6 +22,7 @@ The reader is deciding whether to REUSE existing code or add new. A missed reuse
 - **`module.profile`**: `{ profile: { path, kind, subdirs, filesInDir, exports, entrypoints, entityCount, totalBytes } }`
 - **`symbol.locate`**: `{ names, hits: [{ entityId, name, kind, file, startLine, endLine, signature? }] }`
 - **`usage.example`**: `{ subject, targetEntityId?, callers, totalCallers }`
+- **`convention.detect`**: `{ path, namingSchema, baseClassIdioms, ... }` — surfaced in the winning candidate's `## Conventions` sub-section so the reader integrates against the module's own idioms.
 
 ## Verdict handling
 
@@ -59,6 +60,12 @@ Every layer is a **single JSON string** in your output. Empty layers = `""`.
     - `## Partial matches` — same shape; state the gap
     - `## Unrelated (evaluated)` — bulleted list of path + brief 1-line why it was rejected. If none, `_None_`.
     - `## Related modules (concept.resolve)` — every unique path that appeared in `concept.resolve.hits[]` but did NOT make it into `capability.reuse-check.candidates`. Deduped by path.
+    - `## Conventions` (when `convention.detect` output is present for the top clear-match) — one bullet per axis:
+        - `Function naming: <namingSchema.functions>`
+        - `Class naming: <namingSchema.classes>`
+        - `Test files: <namingSchema.testFiles>` (skip when `none`)
+        - `Base-class idioms:` bulleted list of every `baseClassIdioms[].baseName` (subclassCount + first 3 representative subclasses inline). Skip the section entirely when the idioms list is empty.
+        - Suppress axes whose `sampleSizes.<axis> < 5` -- note the sample size instead.
     - Add a `## Diagnostics` section for `unsupported` / `failed` explorations and for `llmSkipReason` when populated.
 
 - **`surface`** — one line per unique file/module the bundle touches:

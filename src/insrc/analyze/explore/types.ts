@@ -372,6 +372,134 @@ export interface CapabilityReuseCheckOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Convention / config / data-model / test-locate output payloads (Phase 4)
+// ---------------------------------------------------------------------------
+
+/** Naming-case buckets used across every naming axis. `mixed` fires
+ *  when no single bucket dominates -- the synthesizer surfaces the
+ *  breakdown so the reader can make a judgement call. */
+export type NamingCase = 'snake_case' | 'camelCase' | 'PascalCase' | 'kebab-case' | 'mixed' | 'unknown';
+
+/** Test-file naming convention. `none` fires when the module carries
+ *  no discernible test files at all. */
+export type TestFileConvention = 'test_*' | '*_test' | '*.spec' | '*.test' | 'inline' | 'none' | 'mixed';
+
+export interface ConventionNamingSchema {
+	readonly functions:      NamingCase;
+	readonly functionsBreakdown: Readonly<Record<string, number>>;
+	readonly classes:        NamingCase;
+	readonly classesBreakdown:   Readonly<Record<string, number>>;
+	readonly files:          NamingCase;
+	readonly filesBreakdown:     Readonly<Record<string, number>>;
+	readonly testFiles:      TestFileConvention;
+	/** How many entities each axis was computed from -- helps the
+	 *  synthesizer decide whether a call is confident or a coin
+	 *  flip. */
+	readonly sampleSizes: {
+		readonly functions: number;
+		readonly classes:   number;
+		readonly files:     number;
+	};
+}
+
+/** One base-class idiom the module leans on: a supertype + its
+ *  in-module subclasses. Ranked by subclass count. */
+export interface ConventionBaseClassIdiom {
+	readonly baseName:                  string;
+	readonly baseEntityId?:             string;
+	readonly subclassCount:             number;
+	readonly representativeSubclasses:  readonly string[];
+}
+
+export interface ConventionDetectOutput {
+	readonly type:              'convention.detect';
+	readonly path:              string;
+	readonly namingSchema:      ConventionNamingSchema;
+	readonly baseClassIdioms:   readonly ConventionBaseClassIdiom[];
+	/** Count of names starting with `_` but NOT `__` (single-underscore
+	 *  private convention). Zero-signal on projects that don't lean on
+	 *  the underscore convention -- surfaced as-is; the synthesizer
+	 *  can suppress. */
+	readonly privatePrefixCount: number;
+	/** Count of names bracketed by `__` (dunder / magic-method
+	 *  convention -- common in Python). */
+	readonly dunderMethodCount:  number;
+	/** Total non-artefact entities considered under `path`. Helps the
+	 *  reader gauge confidence. */
+	readonly totalEntities:      number;
+	/** Populated when the runner could not resolve `path` to a
+	 *  registered file/directory. Empty when the run succeeded. */
+	readonly notFoundNote:       string;
+}
+
+/** How a config-key hit was classified by the runner. Deterministic
+ *  file-extension heuristic; `unknown` is legitimate. */
+export type ConfigTraceRole = 'definition' | 'usage' | 'default' | 'unknown';
+
+export interface ConfigTraceHit {
+	readonly file: string;
+	readonly line: number;
+	readonly text: string;
+	readonly role: ConfigTraceRole;
+}
+
+export interface ConfigTraceOutput {
+	readonly type:      'config.trace';
+	readonly key:       string;
+	readonly hits:      readonly ConfigTraceHit[];
+	readonly truncated: boolean;
+	readonly backend:   'ripgrep' | 'node';
+	readonly root:      string;
+}
+
+/** One test file or test entity that likely covers the subject. */
+export interface TestLocateHit {
+	readonly file:      string;
+	/** entityId when the hit is an entity (a test function or class);
+	 *  undefined when the hit is a bare file whose path matched. */
+	readonly entityId?: string;
+	readonly name:      string;
+	readonly startLine?: number;
+	readonly kind:      'file' | 'function' | 'class' | 'method';
+}
+
+export interface TestLocateOutput {
+	readonly type:    'test.locate';
+	readonly subject: string;
+	readonly hits:    readonly TestLocateHit[];
+	readonly notFoundNote: string;
+}
+
+/** A field / attribute / typed property of a data-model entity.
+ *  Emitted per-node in DataModelTrace so the synthesizer can list
+ *  the shape without re-running a per-entity probe. */
+export interface DataModelField {
+	readonly name:  string;
+	readonly type?: string;
+}
+
+/** One node in the traced data model -- the class + its supers +
+ *  subs + top usage sites. */
+export interface DataModelNode {
+	readonly entityId:   string;
+	readonly name:       string;
+	readonly kind:       string;
+	readonly file:       string;
+	readonly startLine:  number;
+	readonly fields:     readonly DataModelField[];
+	readonly extendsList:    readonly { entityId?: string; name: string; file?: string }[];
+	readonly subclasses:     readonly { entityId: string; name: string; file: string }[];
+	readonly topCallers:     readonly { entityId: string; name: string; file: string; line: number }[];
+}
+
+export interface DataModelTraceOutput {
+	readonly type:         'data-model.trace';
+	readonly subject:      string;
+	readonly nodes:        readonly DataModelNode[];
+	readonly notFoundNote: string;
+}
+
+// ---------------------------------------------------------------------------
 // Content-search exploration output payload (Phase 3.1)
 // ---------------------------------------------------------------------------
 
@@ -429,6 +557,10 @@ export type ExplorationOutput =
 	| ClassHierarchyOutput
 	| CapabilityReuseCheckOutput
 	| SearchTextOutput
+	| ConventionDetectOutput
+	| ConfigTraceOutput
+	| TestLocateOutput
+	| DataModelTraceOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 

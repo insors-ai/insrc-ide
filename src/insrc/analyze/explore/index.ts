@@ -42,6 +42,10 @@ export {
 	CAPABILITY_REUSE_CHECK_PROMPT_PATH,
 } from './capability-reuse-check.js';
 export { runSearchText }              from './search-text.js';
+export { runConventionDetect }        from './convention-detect.js';
+export { runConfigTrace }             from './config-trace.js';
+export { runTestLocate }              from './test-locate.js';
+export { runDataModelTrace }          from './data-model-trace.js';
 
 export type {
 	AnswerType,
@@ -51,6 +55,15 @@ export type {
 	ClassHierarchyOutput,
 	ConceptHit,
 	ConceptResolveOutput,
+	ConfigTraceHit,
+	ConfigTraceOutput,
+	ConfigTraceRole,
+	ConventionBaseClassIdiom,
+	ConventionDetectOutput,
+	ConventionNamingSchema,
+	DataModelField,
+	DataModelNode,
+	DataModelTraceOutput,
 	DocConstraintEnumerateOutput,
 	DocConstraintRecord,
 	DocDecisionRecord,
@@ -70,10 +83,14 @@ export type {
 	ImportGraphSummary,
 	ModuleProfile,
 	ModuleProfileOutput,
+	NamingCase,
 	SearchTextHit,
 	SearchTextOutput,
 	SymbolHit,
 	SymbolLocateOutput,
+	TestFileConvention,
+	TestLocateHit,
+	TestLocateOutput,
 	UnsupportedExplorationOutput,
 	UsageExampleHit,
 	UsageExampleOutput,

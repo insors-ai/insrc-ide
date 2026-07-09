@@ -98,12 +98,12 @@ const EXPLORATION_TYPES: readonly ExplorationType[] = [
 	'usage.example',
 	'capability.reuse-check',
 	'search.text',
-	'doc.mention',
-	'doc.decision.trace',
-	'doc.constraint.enumerate',
 	'convention.detect',
 	'config.trace',
 	'data-model.trace',
+	'doc.mention',
+	'doc.decision.trace',
+	'doc.constraint.enumerate',
 	'freeform.probe',
 ];
 

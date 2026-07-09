@@ -91,8 +91,25 @@ The exploration types currently supported (Phases 1 + 2 + 3):
     params: { "pattern": "<regex>", "glob": "*.py", "caseInsensitive": false, "topK": 30 }
     // Optional "path": "<subpath under repo>" restricts the search subtree.
     ```
+- **`convention.detect`** — Naming schema (functions / classes / files) + base-class idioms + test-file convention for a directory. Deterministic entity-graph walk. Use in structural-map, adherence-check, capability-discovery, how-does-it-work recipes so the synthesizer's `## Conventions` sub-section can render.
+    ```json
+    params: { "path": "<absolute directory path>" }
+    ```
+- **`config.trace`** — Grep for a config key literal + classify each hit as `definition` / `usage` / `default` / `unknown` by file extension + line shape. Deterministic. Use for adherence-check / how-does-it-work when the rule or subject names a config key (env var, service-config field, tunable).
+    ```json
+    params: { "key": "<literal>", "topK": 40 }
+    // Optional "path": "<subpath under repo>" restricts the scan subtree.
+    ```
+- **`test.locate`** — Given a subject (module name / class name / function name), enumerate matching test entities + test files. Deterministic, path-filtered by canonical test paths (`tests/`, `__tests__/`, `test_*`, `*_test`, `*.spec`, `*.test`). Use in adherence-check + how-does-it-work when the reader needs to see how the subject is tested.
+    ```json
+    params: { "subject": "<name>", "topK": 20 }
+    ```
+- **`data-model.trace`** — Given a domain entity name (e.g. `Invoice`, `GRN`, `PurchaseOrder`), enumerate the class definition, its supers + subs (INHERITS edges), its DEFINES-out fields, and the top callers (CALLS-in). Deterministic. Use in how-does-it-work when the subject is a data model.
+    ```json
+    params: { "entityName": "<ClassName>" }
+    ```
 
-Other types (`test.locate`, `convention.detect`, `config.trace`, `data-model.trace`, `freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
+Other types (`freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
 
 ## dependsOn conventions
 
@@ -120,7 +137,8 @@ For queries like "map the X module", "how is Y organized", "what's the layout of
 1. `concept.resolve(query="<intent.focus>")` — get the ranked module candidates. Purpose: "Resolve the user's target to a concrete module path."
 2. `module.profile(path=$e1.hits[0].path)` — depends on `e1`. Purpose: "Profile the resolved module: exports, subdirs, entrypoints."
 3. `import.graph(path=$e1.hits[0].path)` — depends on `e1`. Purpose: "Summarise how the module is used + what it depends on."
-4. (Optional, only when `$e2.profile.exports` is non-empty) `symbol.locate(names=$e2.profile.exports[0..2], kinds=["class","function"])` — depends on `e2`. Purpose: "Anchor the top-level classes/functions the module exposes."
+4. `convention.detect(path=$e1.hits[0].path)` — depends on `e1`. Purpose: "Detect the module's naming schema + base-class idioms + test-file convention so the synthesizer can render `## Conventions`."
+5. (Optional, only when `$e2.profile.exports` is non-empty) `symbol.locate(names=$e2.profile.exports[0..2], kinds=["class","function"])` — depends on `e2`. Purpose: "Anchor the top-level classes/functions the module exposes."
 
 ### Recipe: `decision-trace`
 
@@ -153,10 +171,12 @@ Emit these explorations in order:
 3. `concept.resolve(query="<distinctive-term-from-focus>")` — depends on `e1`. Purpose: "Find code regions in the rule's domain."
 4. **Rule anchors an IDENTIFIER** (a class, function, method, or variable NAME appears verbatim in code) → `symbol.locate(names=[...distinctive names...], kinds=["function","method","class","variable"])` — depends on `e1`. Purpose: "Locate the entities the rule constrains."
    **Rule anchors a STRING LITERAL** (model id, config key, env var, URL, forbidden import string — the rule's subject would appear in `"quoted"` form in source, not as a symbol name) → `search.text(pattern="<regex covering literal + forbidden alternatives>", glob="*.<primary-lang-ext>")` — depends on `e1`. Purpose: "Grep the code for the literal + its explicitly-forbidden alternatives." Concrete example: rule = "must use claude-haiku-4-5, never opus / sonnet" → `pattern: "claude-(opus|sonnet|haiku)-?[0-9]?[-]?[0-9]?"`, glob covering the repo's main language.
+   **Rule anchors a CONFIG KEY** (env var name, TOML/YAML field, feature flag name — matches definitions in `*.yaml` / `*.json` / `*.env` too) → `config.trace(key="<exact-key>")` — depends on `e1`. Purpose: "Enumerate every definition, usage, default of the config key." Prefer this over `search.text` when you want role-classified hits.
 5. (Optional, when `e4` is a symbol.locate that returned a class-like hit) `class.hierarchy(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Anchor inheritance chains against the rule."
 6. (Optional, when `e4` is a symbol.locate) `usage.example(entityId=$e4.hits[0].entityId)` — depends on `e4`. Purpose: "Cite representative real callsites."
+7. (Optional, when the module identified by `$e3` is well-defined) `convention.detect(path=$e3.hits[0].path)` — depends on `e3`. Purpose: "Give the reader the naming schema so drifts vs. matches read against the module's own idioms."
 
-Keep it to 4-6 explorations. If the rule's focus does NOT yield a distinctive identifier or string literal (pure prose rule), stop after step 3 -- the synthesizer will render an honest "no code sites inspected" bundle rather than fabricating one.
+Keep it to 4-7 explorations. If the rule's focus does NOT yield a distinctive identifier, string literal, or config key (pure prose rule), stop after step 3 -- the synthesizer will render an honest "no code sites inspected" bundle rather than fabricating one.
 
 ### Recipe: `capability-discovery`
 
@@ -165,11 +185,29 @@ For queries like "does the codebase already do X", "is there existing support fo
 1. `capability.reuse-check(capability="<intent.focus>", limit=5)` — the primary retrieval + verdict pass. Purpose: "Rank candidate modules by whether they already deliver the capability."
 2. `concept.resolve(query="<intent.focus>")` — parallel-recall check so the synthesizer can show retrieval candidates that did NOT make it into the reuse-check verdicts. Purpose: "Reveal near-miss modules for transparency."
 3. (Optional, only when `$e1.candidates[0].verdict === 'clear-match'`) `module.profile(path=$e1.candidates[0].path)` — depends on `e1`. Purpose: "Profile the winning candidate for the synthesizer to cite."
-4. (Optional, only when a clear-match anchor exists) `symbol.locate(names=$e3.profile.exports[0..3])` — depends on `e3`. Purpose: "Name representative entities inside the winning candidate."
+4. (Optional, only when a clear-match anchor exists) `convention.detect(path=$e1.candidates[0].path)` — depends on `e1`. Purpose: "Surface the winning module's naming schema so the reader integrates against its idioms."
+5. (Optional, only when a clear-match anchor exists) `symbol.locate(names=$e3.profile.exports[0..3])` — depends on `e3`. Purpose: "Name representative entities inside the winning candidate."
 
-At most 4 explorations. When `capability.reuse-check` returns zero candidates (empty `candidates` + populated `notFoundNote`), STOP after step 1.
+At most 5 explorations. When `capability.reuse-check` returns zero candidates (empty `candidates` + populated `notFoundNote`), STOP after step 1.
 
-### Recipe: `how-does-it-work` / `data-inventory` / `infra-inventory`
+### Recipe: `how-does-it-work`
+
+For queries like "how does X work", "walk me through Y", "explain the Z pipeline":
+
+Compose a structural + behavioural view. The reader wants to understand: what the module IS, how it EXTENDS via inheritance, how it's TESTED, and what its IDIOMS are. Fan out and let the synthesizer stitch.
+
+1. `concept.resolve(query="<intent.focus>")` — resolve the subject to a concrete module / class / function. Purpose: "Anchor `how-does-it-work` on a concrete symbol or module path."
+2. `module.profile(path=$e1.hits[0].path)` — depends on `e1`. Purpose: "Give the reader the structural view: subdirs, files, entrypoints."
+3. `convention.detect(path=$e1.hits[0].path)` — depends on `e1`. Purpose: "Surface the module's naming schema + base-class idioms so `how-it-works` reads in the module's own vocabulary."
+4. `test.locate(subject="<intent.focus>")` — Purpose: "Show the reader how the subject is exercised in tests -- the fastest read of behaviour."
+5. (Optional, when `$e2.profile.exports` is non-empty) `symbol.locate(names=$e2.profile.exports[0..2], kinds=["class","function"])` — depends on `e2`. Purpose: "Name the top-level classes/functions the module exposes."
+6. (Optional, when `$e5.hits[0].kind === 'class'`) `class.hierarchy(entityId=$e5.hits[0].entityId)` — depends on `e5`. Purpose: "Show the inheritance chain."
+7. (Optional, when the subject reads as a domain entity) `data-model.trace(entityName="<intent.focus>")` — Purpose: "Trace the model's supers, subs, fields, and callers."
+8. (Optional, when the subject reads as a class or method) `usage.example(symbolName="<subject>")` — Purpose: "Cite representative real callsites so the reader sees the module in use."
+
+Emit 4-6 explorations from this list. Skip optional steps whose prerequisite is empty. `data-model.trace` is worth emitting when the intent.focus reads as a noun / class name; `usage.example` when it reads as a verb / method / function.
+
+### Recipe: `data-inventory` / `infra-inventory`
 
 Not yet implemented. Classify the answerType correctly but emit an EMPTY `explorations` array + a synthesisHint naming the answer type. The driver falls through to the legacy shaper.
 
