@@ -967,14 +967,18 @@ async function tryExplorationPipeline(args: {
 	runId:          string;
 }): Promise<ExplorationPipelineResult | null> {
 	if (args.invocationMode !== 'run') return null;
-	if (args.shaperId       !== 'code' && args.shaperId !== 'docs') return null;
+	if (args.shaperId       !== 'code'
+	 && args.shaperId       !== 'docs'
+	 && args.shaperId       !== 'data'
+	 && args.shaperId       !== 'infra') return null;
 	if (!('intent' in args.inputs))     return null;
 	const intent = (args.inputs as RunShapeInput).intent;
 	if (intent.focused !== true) return null;
 
-	// V1/V2 requires a directory-shaped scope so concept.resolve /
-	// doc retrieval have something to walk. `repo | module | file |
-	// workspace` all resolve to a filesystem path.
+	// V1..V5 requires a directory-shaped scope so concept.resolve /
+	// doc retrieval / manifests walk / pool acquisition all have a
+	// repo path. `repo | module | file | workspace` all resolve to
+	// a filesystem path.
 	const scopeKind = intent.scopeRef.kind;
 	if (scopeKind !== 'repo' && scopeKind !== 'module' && scopeKind !== 'workspace') {
 		return null;
@@ -1002,16 +1006,22 @@ async function tryExplorationPipeline(args: {
 		return null;
 	}
 
-	// Answer types by target (Phases 1-3):
-	//   code shaper -> structural-map | adherence-check | capability-discovery
-	//   docs shaper -> decision-trace | prose-retrieval
+	// Answer types by target (Phases 1-5):
+	//   code shaper  -> structural-map | adherence-check | capability-discovery | how-does-it-work
+	//   docs shaper  -> decision-trace | prose-retrieval
+	//   data shaper  -> data-inventory
+	//   infra shaper -> infra-inventory
 	// Any other combination (or empty explorations) falls through to
 	// the legacy shaper.
-	const codeAnswerTypes = new Set(['structural-map', 'adherence-check', 'capability-discovery']);
-	const docsAnswerTypes = new Set(['decision-trace', 'prose-retrieval']);
-	const isCodeAnswer = args.shaperId === 'code' && codeAnswerTypes.has(plan.answerType);
-	const isDocsAnswer = args.shaperId === 'docs' && docsAnswerTypes.has(plan.answerType);
-	if ((!isCodeAnswer && !isDocsAnswer) || plan.explorations.length === 0) {
+	const codeAnswerTypes  = new Set(['structural-map', 'adherence-check', 'capability-discovery', 'how-does-it-work']);
+	const docsAnswerTypes  = new Set(['decision-trace', 'prose-retrieval']);
+	const dataAnswerTypes  = new Set(['data-inventory']);
+	const infraAnswerTypes = new Set(['infra-inventory']);
+	const isCodeAnswer  = args.shaperId === 'code'  && codeAnswerTypes.has(plan.answerType);
+	const isDocsAnswer  = args.shaperId === 'docs'  && docsAnswerTypes.has(plan.answerType);
+	const isDataAnswer  = args.shaperId === 'data'  && dataAnswerTypes.has(plan.answerType);
+	const isInfraAnswer = args.shaperId === 'infra' && infraAnswerTypes.has(plan.answerType);
+	if ((!isCodeAnswer && !isDocsAnswer && !isDataAnswer && !isInfraAnswer) || plan.explorations.length === 0) {
 		log.info(
 			{
 				runId:            args.runId,
@@ -1039,20 +1049,26 @@ async function tryExplorationPipeline(args: {
 	// (c) Synthesize. Pick the synthesizer prompt keyed by
 	// (shaperId, answerType):
 	//   docs shaper                            -> 'docs'
+	//   data shaper                            -> 'data'
+	//   infra shaper                           -> 'infra'
 	//   code shaper + adherence-check          -> 'adherence'
 	//   code shaper + capability-discovery     -> 'capability'
 	//   code shaper + <anything else>          -> 'code'
 	// The synthesize() call throws SynthesizerPromptMissingError if
 	// the key is unregistered; the catch below rolls us back to the
 	// legacy shaper.
-	const synthesizeTarget: 'code' | 'docs' | 'adherence' | 'capability' =
+	const synthesizeTarget: 'code' | 'docs' | 'adherence' | 'capability' | 'data' | 'infra' =
 		args.shaperId === 'docs'
 			? 'docs'
-			: plan.answerType === 'adherence-check'
-				? 'adherence'
-				: plan.answerType === 'capability-discovery'
-					? 'capability'
-					: 'code';
+			: args.shaperId === 'data'
+				? 'data'
+				: args.shaperId === 'infra'
+					? 'infra'
+					: plan.answerType === 'adherence-check'
+						? 'adherence'
+						: plan.answerType === 'capability-discovery'
+							? 'capability'
+							: 'code';
 	try {
 		const raw = await synthesize({
 			runId:    args.runId,

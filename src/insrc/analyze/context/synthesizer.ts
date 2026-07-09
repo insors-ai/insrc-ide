@@ -47,6 +47,8 @@ const SYNTHESIZE_CODE_PROMPT_REL       = 'prompts/analyze/synthesize.code.system
 const SYNTHESIZE_DOCS_PROMPT_REL       = 'prompts/analyze/synthesize.docs.system.md';
 const SYNTHESIZE_ADHERENCE_PROMPT_REL  = 'prompts/analyze/synthesize.adherence.system.md';
 const SYNTHESIZE_CAPABILITY_PROMPT_REL = 'prompts/analyze/synthesize.capability.system.md';
+const SYNTHESIZE_DATA_PROMPT_REL       = 'prompts/analyze/synthesize.data.system.md';
+const SYNTHESIZE_INFRA_PROMPT_REL      = 'prompts/analyze/synthesize.infra.system.md';
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -82,7 +84,13 @@ export class SynthesizerPromptMissingError extends Error {
  *  `target=code` picks 'code' for structural-map and 'adherence' for
  *  adherence-check). The driver derives this key from (target,
  *  answerType). */
-export type SynthesizerPromptKey = 'code' | 'docs' | 'adherence' | 'capability';
+export type SynthesizerPromptKey =
+	| 'code'
+	| 'docs'
+	| 'adherence'
+	| 'capability'
+	| 'data'
+	| 'infra';
 
 export interface SynthesizeArgs {
 	readonly runId:    string;
@@ -215,6 +223,8 @@ const PROMPT_PATHS: Readonly<Record<SynthesizerPromptKey, string>> = {
 	docs:       SYNTHESIZE_DOCS_PROMPT_REL,
 	adherence:  SYNTHESIZE_ADHERENCE_PROMPT_REL,
 	capability: SYNTHESIZE_CAPABILITY_PROMPT_REL,
+	data:       SYNTHESIZE_DATA_PROMPT_REL,
+	infra:      SYNTHESIZE_INFRA_PROMPT_REL,
 };
 
 function loadPromptFile(target: keyof typeof PROMPT_PATHS): string {
@@ -277,6 +287,8 @@ export const SYNTHESIZE_CODE_PROMPT_PATH       = SYNTHESIZE_CODE_PROMPT_REL;
 export const SYNTHESIZE_DOCS_PROMPT_PATH       = SYNTHESIZE_DOCS_PROMPT_REL;
 export const SYNTHESIZE_ADHERENCE_PROMPT_PATH  = SYNTHESIZE_ADHERENCE_PROMPT_REL;
 export const SYNTHESIZE_CAPABILITY_PROMPT_PATH = SYNTHESIZE_CAPABILITY_PROMPT_REL;
+export const SYNTHESIZE_DATA_PROMPT_PATH       = SYNTHESIZE_DATA_PROMPT_REL;
+export const SYNTHESIZE_INFRA_PROMPT_PATH      = SYNTHESIZE_INFRA_PROMPT_REL;
 
 export function getSynthesizerPromptPathForBoot(): string {
 	return SYNTHESIZE_CODE_PROMPT_REL;

@@ -104,6 +104,10 @@ const EXPLORATION_TYPES: readonly ExplorationType[] = [
 	'doc.mention',
 	'doc.decision.trace',
 	'doc.constraint.enumerate',
+	'db.connections.list',
+	'db.tables.list',
+	'db.table.describe',
+	'manifests.locate',
 	'freeform.probe',
 ];
 

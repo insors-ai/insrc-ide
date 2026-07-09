@@ -33,10 +33,14 @@ import { runConceptResolve } from './concept-resolve.js';
 import { runConfigTrace } from './config-trace.js';
 import { runConventionDetect } from './convention-detect.js';
 import { runDataModelTrace } from './data-model-trace.js';
+import { runDbConnectionsList } from './db-connections-list.js';
+import { runDbTableDescribe } from './db-table-describe.js';
+import { runDbTablesList } from './db-tables-list.js';
 import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
 import { runDocDecisionTrace } from './doc-decision-trace.js';
 import { runDocMention } from './doc-mention.js';
 import { runImportGraph } from './import-graph.js';
+import { runManifestsLocate } from './manifests-locate.js';
 import { runModuleProfile } from './module-profile.js';
 import { runSearchText } from './search-text.js';
 import { runSymbolLocate } from './symbol-locate.js';
@@ -78,6 +82,10 @@ const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
 	'config.trace':             runConfigTrace,
 	'test.locate':              runTestLocate,
 	'data-model.trace':         runDataModelTrace,
+	'db.connections.list':      runDbConnectionsList,
+	'db.tables.list':           runDbTablesList,
+	'db.table.describe':        runDbTableDescribe,
+	'manifests.locate':         runManifestsLocate,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`

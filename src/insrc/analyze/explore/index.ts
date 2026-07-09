@@ -46,6 +46,10 @@ export { runConventionDetect }        from './convention-detect.js';
 export { runConfigTrace }             from './config-trace.js';
 export { runTestLocate }              from './test-locate.js';
 export { runDataModelTrace }          from './data-model-trace.js';
+export { runDbConnectionsList }       from './db-connections-list.js';
+export { runDbTablesList }            from './db-tables-list.js';
+export { runDbTableDescribe }         from './db-table-describe.js';
+export { runManifestsLocate }         from './manifests-locate.js';
 
 export type {
 	AnswerType,
@@ -64,6 +68,15 @@ export type {
 	DataModelField,
 	DataModelNode,
 	DataModelTraceOutput,
+	DbColumnSummary,
+	DbConnectionSummary,
+	DbConnectionsListOutput,
+	DbTableDescribeOutput,
+	DbTableSummary,
+	DbTablesListOutput,
+	ManifestFamily,
+	ManifestHit,
+	ManifestsLocateOutput,
 	DocConstraintEnumerateOutput,
 	DocConstraintRecord,
 	DocDecisionRecord,

@@ -36,7 +36,9 @@ import {
 	SYNTHESIZE_ADHERENCE_PROMPT_PATH,
 	SYNTHESIZE_CAPABILITY_PROMPT_PATH,
 	SYNTHESIZE_CODE_PROMPT_PATH,
+	SYNTHESIZE_DATA_PROMPT_PATH,
 	SYNTHESIZE_DOCS_PROMPT_PATH,
+	SYNTHESIZE_INFRA_PROMPT_PATH,
 } from './synthesizer.js';
 import { CAPABILITY_REUSE_CHECK_PROMPT_PATH } from '../explore/index.js';
 import { CODE_AGGREGATE_PROMPT_PATH    } from '../runtimes/code/index.js';
@@ -123,6 +125,8 @@ function collectComponentPrompts(): ReadonlyArray<{ componentId: string; relPath
 	out.push({ componentId: 'synthesize.docs',       relPath: SYNTHESIZE_DOCS_PROMPT_PATH       });
 	out.push({ componentId: 'synthesize.adherence',  relPath: SYNTHESIZE_ADHERENCE_PROMPT_PATH  });
 	out.push({ componentId: 'synthesize.capability', relPath: SYNTHESIZE_CAPABILITY_PROMPT_PATH });
+	out.push({ componentId: 'synthesize.data',       relPath: SYNTHESIZE_DATA_PROMPT_PATH       });
+	out.push({ componentId: 'synthesize.infra',      relPath: SYNTHESIZE_INFRA_PROMPT_PATH      });
 	out.push({ componentId: 'capability.reuse-check', relPath: CAPABILITY_REUSE_CHECK_PROMPT_PATH });
 	out.push({ componentId: 'code.aggregate.report',    relPath: CODE_AGGREGATE_PROMPT_PATH    });
 	out.push({ componentId: 'data.aggregate.report',    relPath: DATA_AGGREGATE_PROMPT_PATH    });

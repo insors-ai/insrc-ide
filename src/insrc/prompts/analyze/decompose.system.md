@@ -108,6 +108,23 @@ The exploration types currently supported (Phases 1 + 2 + 3):
     ```json
     params: { "entityName": "<ClassName>" }
     ```
+- **`db.connections.list`** — Enumerate every data-driver connection registered for the active repo (rdbms + kv + file families). Deterministic wrapper over the DriverPool. Use FIRST for any `data-inventory` recipe so downstream steps can reference `$e1.connections[i].id`.
+    ```json
+    params: {}
+    ```
+- **`db.tables.list`** — Given a `connectionId`, enumerate the connection's tables (rdbms) / namespaces (kv). Deterministic. Use after `db.connections.list` to walk each surfaced connection.
+    ```json
+    params: { "connectionId": "<id>", "schema": "<optional>", "limit": 40 }
+    ```
+- **`db.table.describe`** — Given a `connectionId` + `target` (table / namespace / file target), return columns + types. Deterministic. Use for the top-signal tables the reader will care about.
+    ```json
+    params: { "connectionId": "<id>", "target": "<schema.table | namespace>" }
+    ```
+- **`manifests.locate`** — Enumerate indexed infra manifests already in the repo: Kubernetes / Helm / Terraform / Docker / CI. Deterministic, graph-backed. Use FIRST for any `infra-inventory` recipe; no cluster access required.
+    ```json
+    params: { "families": ["kubernetes","terraform"], "topK": 200 }
+    // both fields optional -- omit for the full inventory across every family.
+    ```
 
 Other types (`freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
 
@@ -207,9 +224,24 @@ Compose a structural + behavioural view. The reader wants to understand: what th
 
 Emit 4-6 explorations from this list. Skip optional steps whose prerequisite is empty. `data-model.trace` is worth emitting when the intent.focus reads as a noun / class name; `usage.example` when it reads as a verb / method / function.
 
-### Recipe: `data-inventory` / `infra-inventory`
+### Recipe: `data-inventory`
 
-Not yet implemented. Classify the answerType correctly but emit an EMPTY `explorations` array + a synthesisHint naming the answer type. The driver falls through to the legacy shaper.
+For queries like "what tables do we have", "what data sources are wired", "list every database connection registered here":
+
+1. `db.connections.list` — Purpose: "Enumerate registered data-driver connections."
+2. `db.tables.list(connectionId=$e1.connections[0].id)` — depends on `e1`. Purpose: "List tables / namespaces on the top-ranked connection." When the recipe wants to fan across connections, emit one `db.tables.list` per connection using `$e1.connections[N].id` (bound the fan-out to ≤5 connections so the bundle stays terse).
+3. (Optional, only when `$e2.tables` is non-empty) `db.table.describe(connectionId=$e1.connections[0].id, target=$e2.tables[0].name)` — depends on `e2`. Purpose: "Cite the shape of at least one representative table."
+
+At most 5 explorations. When `db.connections.list` returns 0 connections (empty `connections` + populated `notFoundNote`), STOP after step 1 -- the synthesizer will render an honest "no data sources registered" bundle.
+
+### Recipe: `infra-inventory`
+
+For queries like "what k8s manifests exist", "what infrastructure is defined here", "list every deployment / service":
+
+1. `manifests.locate` — Purpose: "Enumerate indexed infra manifests across families."
+2. (Optional, when the intent focuses on a single family) re-emit `manifests.locate(families=[<focused-family>])` — Purpose: "Narrow to the family the reader asked about." Skip if the intent is truly workspace-wide.
+
+At most 2 explorations. When `manifests.locate` returns 0 hits, STOP after step 1 -- the synthesizer will render an honest "no infra manifests indexed" bundle. **Do NOT emit `k8s_*` cluster-live probes from the decomposer** -- those require kubectl context that the exploration runtime does not carry. If the intent asks about live cluster state, the driver will fall through to the legacy infra shaper.
 
 ## Synthesis hint
 

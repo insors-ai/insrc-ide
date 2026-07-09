@@ -49,6 +49,12 @@ export type ExplorationType =
 	| 'convention.detect'
 	| 'config.trace'
 	| 'data-model.trace'
+	// --- data-driver (deterministic; wraps registered DriverPool) ---
+	| 'db.connections.list'
+	| 'db.tables.list'
+	| 'db.table.describe'
+	// --- infra (deterministic; graph-backed manifest scan) ---
+	| 'manifests.locate'
 	// --- fallback ---
 	| 'freeform.probe';
 
@@ -500,6 +506,106 @@ export interface DataModelTraceOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Data-driver output payloads (Phase 5)
+// ---------------------------------------------------------------------------
+
+/** One registered data-driver connection surfaced from the pool. */
+export interface DbConnectionSummary {
+	readonly id:     string;
+	readonly kind:   string;
+	readonly family: 'rdbms' | 'kv' | 'file';
+	readonly label:  string;
+	/** Populated for file-family connections (single file or
+	 *  directory-as-table); omitted for rdbms + kv. */
+	readonly path?:  string;
+}
+
+export interface DbConnectionsListOutput {
+	readonly type:        'db.connections.list';
+	readonly connections: readonly DbConnectionSummary[];
+	/** Populated when no connections are registered for the active
+	 *  repo. Synthesizer renders this as an honest "0 sources"
+	 *  bundle instead of fabricating one. */
+	readonly notFoundNote: string;
+}
+
+/** One entry in a connection's tables / namespaces listing. `schema`
+ *  is optional so KV namespaces (no schema concept) fit the same
+ *  wire shape. */
+export interface DbTableSummary {
+	readonly name:   string;
+	readonly schema?: string;
+	/** rdbms: 'table' / 'view'; kv: 'namespace'; file: 'file'. Kept
+	 *  broad so future driver families slot in. */
+	readonly kind:   string;
+	/** Optional row-count / key-count reported by the driver when
+	 *  cheap to obtain. Undefined otherwise. */
+	readonly rowEstimate?: number;
+}
+
+export interface DbTablesListOutput {
+	readonly type:         'db.tables.list';
+	readonly connectionId: string;
+	readonly family:       'rdbms' | 'kv' | 'file';
+	readonly tables:       readonly DbTableSummary[];
+	readonly truncated:    boolean;
+	readonly notFoundNote: string;
+}
+
+/** One column / field of a described target. */
+export interface DbColumnSummary {
+	readonly name:        string;
+	readonly type:        string;
+	readonly nullable?:   boolean;
+	readonly primaryKey?: boolean;
+	readonly foreignKey?: { table: string; column: string };
+}
+
+export interface DbTableDescribeOutput {
+	readonly type:         'db.table.describe';
+	readonly connectionId: string;
+	readonly target:       string;
+	readonly family:       'rdbms' | 'kv' | 'file';
+	readonly columns:      readonly DbColumnSummary[];
+	/** For kv namespaces: sample keys / value-shape metadata is not
+	 *  described column-wise; we carry a short human-facing
+	 *  descriptor here. Empty for rdbms. */
+	readonly shapeSummary: string;
+	readonly notFoundNote: string;
+}
+
+// ---------------------------------------------------------------------------
+// Infra output payload (Phase 5)
+// ---------------------------------------------------------------------------
+
+/** Broad infra-artefact family recognised in the indexed graph. */
+export type ManifestFamily =
+	| 'kubernetes'
+	| 'helm'
+	| 'terraform'
+	| 'docker'
+	| 'ci'
+	| 'other';
+
+export interface ManifestHit {
+	readonly file:       string;
+	readonly family:     ManifestFamily;
+	/** For kubernetes / helm: the `kind:` field extracted from the
+	 *  entity metadata (Deployment / Service / ConfigMap / ...).
+	 *  Undefined when the family doesn't declare a kind. */
+	readonly resourceKind?: string;
+	readonly name?:      string;
+	readonly entityId?:  string;
+}
+
+export interface ManifestsLocateOutput {
+	readonly type:      'manifests.locate';
+	readonly hits:      readonly ManifestHit[];
+	readonly families:  Readonly<Record<ManifestFamily, number>>;
+	readonly notFoundNote: string;
+}
+
+// ---------------------------------------------------------------------------
 // Content-search exploration output payload (Phase 3.1)
 // ---------------------------------------------------------------------------
 
@@ -561,6 +667,10 @@ export type ExplorationOutput =
 	| ConfigTraceOutput
 	| TestLocateOutput
 	| DataModelTraceOutput
+	| DbConnectionsListOutput
+	| DbTablesListOutput
+	| DbTableDescribeOutput
+	| ManifestsLocateOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 
