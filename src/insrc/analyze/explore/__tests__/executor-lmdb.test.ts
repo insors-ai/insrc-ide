@@ -103,13 +103,16 @@ test('executor dispatches to the registered runner', async () => {
 // ---------------------------------------------------------------------------
 
 test('unsupported exploration type produces a diagnostic output', async () => {
-	// `freeform.probe` is declared in the type union as the intended
-	// Phase 6 fallback but not registered in RUNNERS -- exercising the
-	// executor's unsupported-type diagnostic path.
+	// Phase 6 filled the last catalog gap (`freeform.probe` is now
+	// registered). Every declared ExplorationType has a runner. This
+	// test exercises the executor's diagnostic path for a type that
+	// is NOT in the type union at all -- cast through `unknown` so
+	// TypeScript doesn't reject the fake. The RUNNERS lookup returns
+	// undefined for it -> `unsupported` output surfaces.
 	const plan: ExplorationPlan = {
 		answerType:    'structural-map',
 		synthesisHint: 'test',
-		explorations:  [makeExp({ type: 'freeform.probe' })],
+		explorations:  [makeExp({ type: 'never.registered' as unknown as Exploration['type'] })],
 	};
 	const executed = await executePlan({
 		runId: 'test', repoPath: REPO, closureRepos: [REPO],
@@ -118,7 +121,7 @@ test('unsupported exploration type produces a diagnostic output', async () => {
 	const out = executed.results[0]!.output;
 	assert.equal(out.type, 'unsupported');
 	if (out.type === 'unsupported') {
-		assert.equal(out.requested, 'freeform.probe');
+		assert.equal(out.requested, 'never.registered');
 	}
 });
 

@@ -57,6 +57,19 @@ const PROMPT_PATHS: Readonly<Record<ShaperId, string>> = {
 	docs:           'prompts/analyze/docs.system.md',
 };
 
+/**
+ * Per-shaper legacy prompt paths -- used by the Phase 6 freeform.probe
+ * runner so an out-of-catalog intent can still fire the target's
+ * existing tool-loop prompt as an escape hatch. Excludes 'classification'
+ * because freeform.probe is a run-mode primitive; the classifier has
+ * its own bundle-build path.
+ */
+export function legacyShaperPromptPathFor(
+	shaperId: 'code' | 'docs' | 'data' | 'infra' | 'generic',
+): string {
+	return PROMPT_PATHS[shaperId];
+}
+
 function shaperIdForRun(target: RunTarget): ShaperId {
 	return target;
 }

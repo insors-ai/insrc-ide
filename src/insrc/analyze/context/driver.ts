@@ -84,6 +84,7 @@ import { decompose, DecomposerLlmUnavailableError, DecomposerPromptMissingError 
 import { synthesize, SynthesizerLlmUnavailableError, SynthesizerPromptMissingError } from './synthesizer.js';
 import { executePlan } from '../explore/index.js';
 import type { ExplorationPlan } from '../explore/index.js';
+import type { ClassifiedIntent } from '../../shared/analyze-types.js';
 import type {
 	AnalyzeContextBundle,
 	BundleLayerName,
@@ -262,7 +263,27 @@ export async function runShaper(args: RunShaperArgs): Promise<AnalyzeContextBund
 		}
 	}
 
-	// (4) Build the LLM message list.
+	// (4.7) Retire the legacy tool loop from the shaper's happy path
+	// for run mode (plans/exploration-based-context-build.md Phase 6).
+	// The exploration pipeline emits a `freeform.probe` fallback plan
+	// for any run-mode intent that no deterministic recipe covered,
+	// which reuses the same tool-loop primitive `runShaperToolLoop`
+	// exposes -- so a run-mode null here means the pipeline itself
+	// short-circuited (decomposer LLM down, synthesizer LLM down).
+	// Falling through to re-run the same LLM tool loop would only
+	// fail again with a less-specific error. Surface the honest
+	// LLM-unavailable state instead.
+	if (invocationMode === 'run') {
+		throw new ShaperLlmUnavailableError(
+			`Run-mode exploration pipeline returned no bundle. ` +
+			`See prior log lines for the specific failure (decomposer / ` +
+			`synthesizer / freeform.probe tool loop).`,
+		);
+	}
+
+	// (4) Build the LLM message list. Classification + task modes
+	// still run the legacy tool loop here -- those flows are out of
+	// scope for Phase 6.
 	const messages = buildMessages(promptContent, inputs, invocationMode, shaperId);
 
 	// (5) Resolve provider + tool deps.
@@ -487,6 +508,81 @@ function renderUpstreamSection(inputs: RunShaperArgs['inputs']): string {
 		}
 	}
 	return blocks.join('\n\n');
+}
+
+// ---------------------------------------------------------------------------
+// Public: tool-loop primitive shared by the driver's classification / task
+// tail AND the freeform.probe exploration runner (Phase 6).
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of a raw tool-loop invocation. `rawBundle` is the bundle
+ * WITHOUT `meta` (the caller stamps meta from framework-side info);
+ * `toolCallCount` is the exact number of tool executions the loop
+ * performed so the caller can carry it forward into `meta.toolCalls`.
+ */
+export interface ShaperToolLoopResult {
+	readonly rawBundle:     Omit<AnalyzeContextBundle, 'meta'>;
+	readonly toolCallCount: number;
+}
+
+export interface RunShaperToolLoopArgs {
+	readonly runId:          string;
+	readonly shaperId:       ShaperId;
+	readonly invocationMode: ShaperMode;
+	readonly inputs:         RunShaperArgs['inputs'];
+	readonly promptPath:     string;
+	readonly provider?:      LLMProvider;
+	readonly onTrace?:       (event: ShaperTraceEvent) => void;
+}
+
+/**
+ * plans/exploration-based-context-build.md Phase 6. Run the target's
+ * legacy tool loop bounded by `cfg.shaper.maxToolTurns` + the final
+ * structured emit; return the raw bundle content.
+ *
+ * This is the same primitive that ran inside runShaper's tail for
+ * un-recipe'd intents. Phase 6 extracts it as the freeform.probe
+ * escape hatch -- only fires when the decomposer explicitly emits a
+ * `freeform.probe` exploration. Un-recipe'd intents used to fall
+ * into this path silently; now they surface a `freeform.probe`
+ * exploration in the plan so the reader can see the pipeline made
+ * the escape-hatch call.
+ *
+ * Does NOT stamp `meta` or write the run's bundle cache -- both are
+ * the caller's responsibility. Does NOT run the exploration
+ * pipeline check either -- the caller decides whether to route
+ * through this primitive.
+ */
+export async function runShaperToolLoop(
+	args: RunShaperToolLoopArgs,
+): Promise<ShaperToolLoopResult> {
+	const cfg = loadAnalyzeConfig();
+	const promptContent = loadPromptFile(args.promptPath);
+	const messages = buildMessages(promptContent, args.inputs, args.invocationMode, args.shaperId);
+	const provider = args.provider ?? buildProvider(cfg.shaperModel, cfg.shaper.ollamaNumCtx);
+	const toolDeps = buildToolDeps({
+		runId:          args.runId,
+		shaperId:       args.shaperId,
+		invocationMode: args.invocationMode,
+		inputs:         args.inputs,
+		provider,
+	});
+	const { messages: finalMessages, toolCallCount } = await runToolLoop(
+		provider,
+		messages,
+		toolDeps,
+		cfg.shaper.maxToolTurns,
+		args.onTrace,
+	);
+	const rawBundle = await runFinalStructuredEmit(
+		provider,
+		finalMessages,
+		cfg.shaper.structuredOutputRetries,
+		cfg.shaper.ollamaNumPredict,
+		args.onTrace,
+	);
+	return { rawBundle, toolCallCount };
 }
 
 interface ToolLoopResult {
@@ -984,8 +1080,14 @@ async function tryExplorationPipeline(args: {
 		return null;
 	}
 
-	// (a) Decompose. LLM unavailable / prompt missing -> fall through.
+	// (a) Decompose. LLM unavailable / prompt missing -> fall through
+	// (there is no LLM to run anyway). Schema-unrecoverable OR an
+	// out-of-recipe answer type gets converted into a
+	// `freeform.probe`-only fallback plan so the target's legacy tool
+	// loop still answers the intent (plans/exploration-based-context-
+	// build.md Phase 6 escape hatch).
 	let plan: ExplorationPlan;
+	let usedFallback = false;
 	try {
 		plan = await decompose({ intent, runId: args.runId });
 	} catch (err) {
@@ -997,13 +1099,12 @@ async function tryExplorationPipeline(args: {
 			);
 			return null;
 		}
-		// Schema-unrecoverable = keep going with a null result so the
-		// legacy path catches. Log so we can iterate on the prompt.
 		log.warn(
 			{ runId: args.runId, err: (err as Error).message },
-			'exploration pipeline: decomposer failed; falling through',
+			'exploration pipeline: decomposer failed; using freeform.probe fallback',
 		);
-		return null;
+		plan = fallbackFreeformPlan(intent, args.shaperId);
+		usedFallback = true;
 	}
 
 	// Answer types by target (Phases 1-5):
@@ -1011,8 +1112,11 @@ async function tryExplorationPipeline(args: {
 	//   docs shaper  -> decision-trace | prose-retrieval
 	//   data shaper  -> data-inventory
 	//   infra shaper -> infra-inventory
-	// Any other combination (or empty explorations) falls through to
-	// the legacy shaper.
+	// Any other combination (or empty explorations) triggers the
+	// Phase 6 freeform.probe fallback rather than dropping to the
+	// legacy tail. Plans that already emit `freeform.probe` (as a
+	// standalone or as the sole exploration) are accepted here so the
+	// decomposer's own escape-hatch signal isn't second-guessed.
 	const codeAnswerTypes  = new Set(['structural-map', 'adherence-check', 'capability-discovery', 'how-does-it-work']);
 	const docsAnswerTypes  = new Set(['decision-trace', 'prose-retrieval']);
 	const dataAnswerTypes  = new Set(['data-inventory']);
@@ -1021,7 +1125,10 @@ async function tryExplorationPipeline(args: {
 	const isDocsAnswer  = args.shaperId === 'docs'  && docsAnswerTypes.has(plan.answerType);
 	const isDataAnswer  = args.shaperId === 'data'  && dataAnswerTypes.has(plan.answerType);
 	const isInfraAnswer = args.shaperId === 'infra' && infraAnswerTypes.has(plan.answerType);
-	if ((!isCodeAnswer && !isDocsAnswer && !isDataAnswer && !isInfraAnswer) || plan.explorations.length === 0) {
+	const isRecipedAnswer = isCodeAnswer || isDocsAnswer || isDataAnswer || isInfraAnswer;
+	const hasExplorations = plan.explorations.length > 0;
+	const hasFreeformProbe = plan.explorations.some(e => e.type === 'freeform.probe');
+	if ((!isRecipedAnswer && !hasFreeformProbe) || !hasExplorations) {
 		log.info(
 			{
 				runId:            args.runId,
@@ -1029,9 +1136,10 @@ async function tryExplorationPipeline(args: {
 				answerType:       plan.answerType,
 				explorationCount: plan.explorations.length,
 			},
-			'exploration pipeline: answer type not supported for this target; falling through',
+			'exploration pipeline: answer type not covered by any recipe; using freeform.probe fallback',
 		);
-		return null;
+		plan = fallbackFreeformPlan(intent, args.shaperId);
+		usedFallback = true;
 	}
 
 	// (b) Execute the plan.
@@ -1046,7 +1154,31 @@ async function tryExplorationPipeline(args: {
 		plan,
 	});
 
-	// (c) Synthesize. Pick the synthesizer prompt keyed by
+	// (c.1) Freeform.probe short-circuit: when a plan's SOLE
+	// exploration is `freeform.probe`, the runner already emitted a
+	// complete 7-layer bundle via the target's legacy tool loop. There
+	// is nothing to synthesize -- an extra LLM pass would only risk
+	// paraphrasing the tool loop's honest output. Return the runner's
+	// rawBundle directly + carry its actual toolCallCount so the meta
+	// stamp reflects the real work done.
+	const freeformOnly = extractSoleFreeformResult(executed);
+	if (freeformOnly !== null) {
+		log.info(
+			{
+				runId:         args.runId,
+				shaperId:      args.shaperId,
+				usedFallback,
+				toolCallCount: freeformOnly.toolCallCount,
+			},
+			'exploration pipeline: freeform.probe short-circuit',
+		);
+		return {
+			raw:              freeformOnly.rawBundle,
+			explorationCount: freeformOnly.toolCallCount,
+		};
+	}
+
+	// (c.2) Synthesize. Pick the synthesizer prompt keyed by
 	// (shaperId, answerType):
 	//   docs shaper                            -> 'docs'
 	//   data shaper                            -> 'data'
@@ -1097,6 +1229,84 @@ async function tryExplorationPipeline(args: {
 	}
 }
 
+/**
+ * Emit a freeform.probe-only plan for intents that don't map to any
+ * deterministic recipe (plans/exploration-based-context-build.md
+ * Phase 6). The plan's `answerType` is stamped as the intent's
+ * target-natural default so downstream logs stay readable; the
+ * runner reads only `params.purpose` + `params.shaperId`.
+ */
+function fallbackFreeformPlan(
+	intent:   ClassifiedIntent,
+	shaperId: ShaperId,
+): ExplorationPlan {
+	const fallbackShaperId: 'code' | 'docs' | 'data' | 'infra' | 'generic' =
+		shaperId === 'code'  || shaperId === 'docs'
+	 || shaperId === 'data'  || shaperId === 'infra'
+	 || shaperId === 'generic' ? shaperId : 'generic';
+	return {
+		answerType:    inferAnswerTypeForFallback(shaperId),
+		synthesisHint:
+			'Escape-hatch: no deterministic recipe matched this intent, so ' +
+			'freeform.probe drives the target\'s legacy tool loop for a bounded ' +
+			'number of turns. The runner returns the bundle layers verbatim.',
+		explorations: [
+			{
+				id:      'e1',
+				type:    'freeform.probe',
+				purpose:
+					`Answer the intent via the ${fallbackShaperId} shaper's ` +
+					`legacy tool loop: ${intent.focus ?? intent.reasoning}`,
+				params: {
+					purpose:  intent.focus ?? intent.reasoning,
+					shaperId: fallbackShaperId,
+				},
+			},
+		],
+	};
+}
+
+function inferAnswerTypeForFallback(shaperId: ShaperId): ExplorationPlan['answerType'] {
+	if (shaperId === 'docs')  return 'prose-retrieval';
+	if (shaperId === 'data')  return 'data-inventory';
+	if (shaperId === 'infra') return 'infra-inventory';
+	return 'how-does-it-work';
+}
+
+/**
+ * If the executed plan's SOLE exploration is a successful
+ * freeform.probe, return its bundle + actual tool call count so the
+ * driver can short-circuit synthesis. Any other shape (mixed plan,
+ * failed freeform, etc.) returns null.
+ */
+function extractSoleFreeformResult(
+	executed: Awaited<ReturnType<typeof executePlan>>,
+): { rawBundle: Omit<AnalyzeContextBundle, 'meta'>; toolCallCount: number } | null {
+	if (executed.results.length !== 1) return null;
+	const sole = executed.results[0]!.output;
+	if (sole.type !== 'freeform.probe') return null;
+	// The raw bundle is only meaningful when the tool loop settled.
+	// Exhausted / failed runs still emit the empty-layers bundle; the
+	// synthesizer path is a better place to surface those.
+	const layers = sole.rawBundle;
+	const allEmpty = layers.system.length === 0
+		&& layers.summary.length === 0
+		&& layers.structure.length === 0;
+	if (allEmpty) return null;
+	return {
+		rawBundle: {
+			system:    layers.system,
+			focus:     layers.focus,
+			summary:   layers.summary,
+			structure: layers.structure,
+			surface:   layers.surface,
+			artefacts: layers.artefacts,
+			upstream:  layers.upstream,
+		},
+		toolCallCount: sole.toolCallCount,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Test hooks
 // ---------------------------------------------------------------------------
@@ -1111,3 +1321,5 @@ export const _deriveEmptyLayersForTest = deriveEmptyLayers;
 export const _resolveRepoLastIndexedAtForTest = resolveRepoLastIndexedAt;
 export const _inferScopePathForTest = inferScopePath;
 export const _renderUpstreamSectionForTest = renderUpstreamSection;
+export const _fallbackFreeformPlanForTest = fallbackFreeformPlan;
+export const _extractSoleFreeformResultForTest = extractSoleFreeformResult;

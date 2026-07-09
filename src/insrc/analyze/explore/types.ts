@@ -606,6 +606,49 @@ export interface ManifestsLocateOutput {
 }
 
 // ---------------------------------------------------------------------------
+// freeform.probe output payload (Phase 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * The freeform.probe exploration wraps the legacy tool-loop primitive
+ * (`runShaperToolLoop`) so the target's existing 40-turn shaper prompt
+ * runs as ONE exploration inside an otherwise-deterministic plan.
+ * Phase 6 uses this as the escape hatch when an intent falls outside
+ * every deterministic recipe. Because the tool loop already produces
+ * a complete `AnalyzeContextBundle` shape, the runner returns the
+ * raw layers verbatim -- the synthesizer treats them as-is (no
+ * further stitching) when `freeform.probe` is the ONLY exploration
+ * in a plan, and merges them selectively when it isn't.
+ */
+export interface FreeformProbeOutput {
+	readonly type:    'freeform.probe';
+	readonly purpose: string;
+	/** Which target's legacy prompt drove the tool loop -- carried so
+	 *  the synthesizer knows which existing prompt shaped the layers. */
+	readonly shaperId: 'code' | 'docs' | 'data' | 'infra' | 'generic';
+	/** The bundle content the tool loop emitted. `meta` is stamped by
+	 *  the pipeline caller from framework-side info; the runner emits
+	 *  the seven layer strings verbatim. */
+	readonly rawBundle: {
+		readonly system:    string;
+		readonly focus:     string;
+		readonly summary:   string;
+		readonly structure: string;
+		readonly surface:   string;
+		readonly artefacts: string;
+		readonly upstream:  string;
+	};
+	/** Actual tool-call count the loop performed -- carried into
+	 *  `meta.toolCalls` when this exploration drives the whole
+	 *  bundle. */
+	readonly toolCallCount: number;
+	/** Non-empty when the tool loop hit its `maxToolTurns` cap
+	 *  without the model settling; the synthesizer surfaces this as
+	 *  a Diagnostics note. */
+	readonly exhaustedNote: string;
+}
+
+// ---------------------------------------------------------------------------
 // Content-search exploration output payload (Phase 3.1)
 // ---------------------------------------------------------------------------
 
@@ -671,6 +714,7 @@ export type ExplorationOutput =
 	| DbTablesListOutput
 	| DbTableDescribeOutput
 	| ManifestsLocateOutput
+	| FreeformProbeOutput
 	| UnsupportedExplorationOutput
 	| FailedExplorationOutput;
 

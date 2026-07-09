@@ -76,6 +76,8 @@ You do NOT decide what to look at, run tools, or explore the repo. You do ONE th
 
 - **`unsupported`** / **`failed`**: emit the exploration's `purpose` in the bundle's `structure` layer under a `## Diagnostics` sub-section. Do NOT let a failed exploration take down the whole bundle.
 
+- **`freeform.probe`** (Phase 6, mixed-plan fallback): `{ purpose, shaperId, rawBundle: {system, focus, summary, structure, surface, artefacts, upstream}, toolCallCount, exhaustedNote }` — the escape-hatch tool loop ran alongside deterministic explorations. When present, append `rawBundle.summary` under a `## Freeform findings` sub-section in `structure` and cite `rawBundle.artefacts` in the bundle's `artefacts` layer. If `exhaustedNote` is populated, list it under `## Diagnostics`. Do NOT paraphrase the tool loop's output; it already produced a full 7-layer bundle. A freeform.probe-only plan bypasses this synthesizer entirely; you only see freeform.probe here when it's mixed with recipe steps.
+
 ## Bundle layers
 
 Every layer is a **single JSON string** in your output. Use Markdown headings inside strings to organise sub-sections. Empty layers = `""` -- never null, never nested objects.

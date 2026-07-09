@@ -125,8 +125,25 @@ The exploration types currently supported (Phases 1 + 2 + 3):
     params: { "families": ["kubernetes","terraform"], "topK": 200 }
     // both fields optional -- omit for the full inventory across every family.
     ```
+- **`freeform.probe`** — **Escape hatch.** Fires the target's legacy tool loop with the full read-only tool surface for `cfg.shaper.maxToolTurns` turns. Use ONLY when no deterministic recipe fits the intent -- it is slower + carries the same failure modes the recipes were designed to escape. When it's the sole exploration in a plan, the pipeline returns the tool loop's bundle verbatim (no synthesizer pass). The scope-boundary HARD RULE stays in force via the target's legacy prompt.
+    ```json
+    params: {
+      "purpose":  "<the intent's focus, verbatim>",
+      "shaperId": "code | docs | data | infra | generic"
+    }
+    ```
+    Emit ONE freeform.probe step. Never mix it with recipe steps in the same plan -- the pipeline treats mixed plans as recipe-driven and synthesizes over the freeform output rather than returning it verbatim.
 
-Other types (`freeform.probe`) will be added in later phases. Do NOT emit them for now -- your output would be marked `unsupported` by the executor and the synthesizer would render a diagnostic.
+## When to reach for `freeform.probe`
+
+Prefer a deterministic recipe whenever any of them fits. Reach for `freeform.probe` only when:
+- The intent doesn't fit ANY of the recipes above (rare -- structural-map, decision-trace, prose-retrieval, adherence-check, capability-discovery, how-does-it-work, data-inventory, infra-inventory cover most cases).
+- The intent explicitly asks for live tool exploration ("look through the codebase", "explore whatever you need").
+- The intent's target is `generic`.
+
+Do NOT reach for `freeform.probe` when:
+- A recipe fits but the recipe's optional steps look thin -- the bundle will still be honest, and shorter is fine.
+- You are unsure which recipe fits -- pick the closest recipe, don't paper over the ambiguity with the escape hatch.
 
 ## dependsOn conventions
 

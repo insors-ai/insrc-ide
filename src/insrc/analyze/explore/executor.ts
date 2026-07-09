@@ -39,6 +39,7 @@ import { runDbTablesList } from './db-tables-list.js';
 import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
 import { runDocDecisionTrace } from './doc-decision-trace.js';
 import { runDocMention } from './doc-mention.js';
+import { runFreeformProbe } from './freeform-probe.js';
 import { runImportGraph } from './import-graph.js';
 import { runManifestsLocate } from './manifests-locate.js';
 import { runModuleProfile } from './module-profile.js';
@@ -86,6 +87,7 @@ const RUNNERS: Partial<Record<ExplorationType, ExplorationRunner>> = {
 	'db.tables.list':           runDbTablesList,
 	'db.table.describe':        runDbTableDescribe,
 	'manifests.locate':         runManifestsLocate,
+	'freeform.probe':           runFreeformProbe,
 };
 
 /** Types that should skip the cache. `unsupported` + `failed`
