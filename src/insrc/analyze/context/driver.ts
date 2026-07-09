@@ -1063,10 +1063,16 @@ async function tryExplorationPipeline(args: {
 	runId:          string;
 }): Promise<ExplorationPipelineResult | null> {
 	if (args.invocationMode !== 'run') return null;
+	// Every run-mode shaper flows through the exploration pipeline
+	// (plans/exploration-based-context-build.md Phase 6). Recipe-less
+	// shapers (generic) or recipe-less intents land in the
+	// freeform.probe fallback below rather than dropping to the
+	// retired legacy tool-loop tail.
 	if (args.shaperId       !== 'code'
 	 && args.shaperId       !== 'docs'
 	 && args.shaperId       !== 'data'
-	 && args.shaperId       !== 'infra') return null;
+	 && args.shaperId       !== 'infra'
+	 && args.shaperId       !== 'generic') return null;
 	if (!('intent' in args.inputs))     return null;
 	const intent = (args.inputs as RunShapeInput).intent;
 	if (intent.focused !== true) return null;
