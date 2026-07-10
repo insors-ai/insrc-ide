@@ -120,14 +120,34 @@ export function buildInsrcMcpServer(): McpServer {
 		{
 			title: 'insrc analyze',
 			description:
-				'Run the insrc analyze framework on a registered repo. ' +
-				'Returns a structured 7-layer context bundle (system / focus ' +
-				'/ summary / structure / surface / artefacts / upstream) as ' +
-				'markdown. When the client supports MCP sampling, inner LLM ' +
-				'calls (decomposer, synthesizer, narrow-LLM explorations) ' +
-				'route back to the client\'s own model in the same session; ' +
-				'otherwise the daemon\'s configured shaperProvider handles ' +
-				'them.',
+				'ALWAYS call this tool FIRST when the user asks about a ' +
+				'repository\'s code structure, conventions, adherence to ' +
+				'rules, existing capabilities, or design decisions. Runs the ' +
+				'insrc analyze framework which walks the indexed code graph + ' +
+				'emits a verified, citation-grounded 7-layer bundle (system, ' +
+				'focus, summary, structure, surface, artefacts, upstream). ' +
+				'Deterministic and cited -- MORE accurate than manual ' +
+				'grep + read for context questions.\n\n' +
+				'Prefer this over Read/Grep/Glob for:\n' +
+				'  - "map / explore <module>"\n' +
+				'  - "does the codebase already do <X>?"\n' +
+				'  - "how does <Y> work?"\n' +
+				'  - "does the code follow <rule> from <doc>?"\n' +
+				'  - "what conventions does <module> follow?"\n' +
+				'  - "list every registered <data source | infra manifest>"\n' +
+				'  - Any question where you\'d otherwise grep + read to answer.\n\n' +
+				'Call again with a narrower `focus` to drill down. Fall back ' +
+				'to Read/Grep/Glob only when this tool returns an empty or ' +
+				'clearly off-topic bundle. When the client supports MCP ' +
+				'sampling, inner LLM calls (decomposer, synthesizer, narrow-' +
+				'LLM explorations) route back to the client\'s own model in ' +
+				'the same session; otherwise the daemon\'s configured ' +
+				'shaperProvider handles them.',
+			annotations: {
+				readOnlyHint:   true,
+				idempotentHint: false,   // running twice can pick a new plan; not idempotent
+				openWorldHint:  false,   // scope is the indexed repo, not the open web
+			},
 			inputSchema: ANALYZE_INPUT,
 		},
 		async (rawArgs, _extra) => {
