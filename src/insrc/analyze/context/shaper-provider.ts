@@ -33,6 +33,8 @@
  * provider constructors are cheap.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import type { AnalyzeConfig } from '../../config/analyze.js';
 import { loadLocalProviderConfig } from '../../config/local.js';
 import { CliProvider } from '../../agent/providers/cli-provider.js';
@@ -62,13 +64,59 @@ export interface ShaperProviderOverrides {
 }
 
 /**
+ * Request-scoped storage for the sampler. The MCP server wraps each
+ * incoming tool call in `runWithSamplerContext(...)` so every LLM
+ * call site downstream automatically picks up the sampler without
+ * every runner having to accept + thread an `overrides` argument.
+ *
+ * This is the SAME mechanism the factory uses when an explicit
+ * `overrides` arg is passed -- `buildShaperProvider` prefers the
+ * explicit arg but falls back to the ALS-stored context so the
+ * common case (MCP handler enters `runWithSamplerContext`, downstream
+ * code just calls `buildShaperProvider(cfg)`) works without further
+ * plumbing.
+ */
+interface SamplerContext {
+	readonly sampler:    SamplingCallback;
+	readonly modelHints: readonly string[];
+}
+
+const samplerContextStorage = new AsyncLocalStorage<SamplerContext>();
+
+/**
+ * Run `fn` with a sampler installed on the ambient async context.
+ * Any `buildShaperProvider(cfg)` call inside the callback (or in any
+ * async task spawned from it) picks up the sampler automatically.
+ * The context is torn down when `fn` returns / throws.
+ */
+export function runWithSamplerContext<T>(
+	sampler:    SamplingCallback,
+	modelHints: readonly string[],
+	fn:         () => Promise<T>,
+): Promise<T> {
+	return samplerContextStorage.run({ sampler, modelHints }, fn);
+}
+
+/**
+ * Peek at the current sampler context (undefined when we're outside
+ * a `runWithSamplerContext` scope). Exported for tests + the MCP
+ * server's logging.
+ */
+export function currentSamplerContext(): SamplerContext | undefined {
+	return samplerContextStorage.getStore();
+}
+
+/**
  * Return the `LLMProvider` implementation the analyze framework
  * should use for its structured-output calls.
  *
  * Priority order:
- *   1. `overrides.sampler` -> `McpSamplingProvider` (MCP integration path)
- *   2. `cfg.shaperProvider === 'cli-claude' | 'cli-codex'` -> `CliProvider`
- *   3. `cfg.shaperProvider === 'ollama'` (default) -> `OllamaProvider`
+ *   1. `overrides.sampler` -> `McpSamplingProvider` (explicit MCP override)
+ *   2. ambient `runWithSamplerContext` sampler -> `McpSamplingProvider`
+ *      (implicit MCP override; how the server threads the sampler
+ *      through the analyze pipeline without touching every runner)
+ *   3. `cfg.shaperProvider === 'cli-claude' | 'cli-codex'` -> `CliProvider`
+ *   4. `cfg.shaperProvider === 'ollama'` (default) -> `OllamaProvider`
  *
  * Cheap; call per invocation rather than caching because config
  * edits + per-request overrides are the common shape.
@@ -80,11 +128,22 @@ export function buildShaperProvider(
 	if (overrides?.sampler !== undefined) {
 		log.debug(
 			{ modelHints: overrides.modelHints ?? [] },
-			'shaper provider: routing through McpSamplingProvider (per-request override)',
+			'shaper provider: routing through McpSamplingProvider (explicit override)',
 		);
 		return new McpSamplingProvider({
 			sampler: overrides.sampler,
 			...(overrides.modelHints !== undefined ? { modelHints: overrides.modelHints } : {}),
+		});
+	}
+	const ambient = samplerContextStorage.getStore();
+	if (ambient !== undefined) {
+		log.debug(
+			{ modelHints: ambient.modelHints },
+			'shaper provider: routing through McpSamplingProvider (ambient context)',
+		);
+		return new McpSamplingProvider({
+			sampler:    ambient.sampler,
+			modelHints: ambient.modelHints,
 		});
 	}
 	if (cfg.shaperProvider === 'cli-claude' || cfg.shaperProvider === 'cli-codex') {

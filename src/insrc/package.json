@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "insrc backend — daemon, agent, indexer, graph/vector DB",
+  "bin": {
+    "insrc-mcp": "./bin/insrc-mcp.js"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@aws-sdk/client-dynamodb": "^3.1037.0",

@@ -14,7 +14,7 @@ try { mkdirSync(PATHS.logDir, { recursive: true }); } catch { /* ok */ }
 // Mode detection
 // ---------------------------------------------------------------------------
 
-export type LogMode = 'daemon' | 'cli';
+export type LogMode = 'daemon' | 'cli' | 'mcp';
 
 let _mode: LogMode = 'cli';
 
@@ -77,6 +77,41 @@ function buildDaemonTransport(): pino.TransportMultiOptions {
   };
 }
 
+/**
+ * MCP transport -- like the CLI transport, but pretty-print destination
+ * is stderr (fd 2) so stdout stays clean for the MCP protocol stream.
+ * The rotating file sink still writes to `PATHS.agentLog` so operator
+ * inspection matches the daemon + CLI paths.
+ */
+function buildMcpTransport(): pino.TransportMultiOptions {
+  return {
+    targets: [
+      {
+        target: 'pino-pretty',
+        options: {
+          destination: 2, // stderr -- MCP protocol owns stdout
+          colorize: false,
+          translateTime: 'HH:MM:ss',
+          ignore: 'pid,hostname',
+          messageFormat: '{if module}[{module}] {end}{msg}',
+        },
+        level: resolveLevel(),
+      },
+      {
+        target: 'pino-roll',
+        options: {
+          file: PATHS.agentLog,
+          frequency: 'daily',
+          limit: { count: 7 },
+          size: '10m',
+          mkdir: true,
+        },
+        level: resolveLevel(),
+      },
+    ],
+  };
+}
+
 function buildCliTransport(): pino.TransportMultiOptions {
   return {
     targets: [
@@ -118,7 +153,9 @@ function getRoot(): pino.Logger {
   const mode = getLogMode();
   const transport = mode === 'daemon'
     ? buildDaemonTransport()
-    : buildCliTransport();
+    : mode === 'mcp'
+      ? buildMcpTransport()
+      : buildCliTransport();
 
   _root = pino({
     level: resolveLevel(),
