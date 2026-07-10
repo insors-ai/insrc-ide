@@ -36,6 +36,10 @@
 import type { AnalyzeConfig } from '../../config/analyze.js';
 import { loadLocalProviderConfig } from '../../config/local.js';
 import { CliProvider } from '../../agent/providers/cli-provider.js';
+import {
+	McpSamplingProvider,
+	type SamplingCallback,
+} from '../../agent/providers/mcp-sampling-provider.js';
 import { OllamaProvider } from '../../agent/providers/ollama.js';
 import { getLogger } from '../../shared/logger.js';
 import type { LLMProvider } from '../../shared/types.js';
@@ -43,13 +47,46 @@ import type { LLMProvider } from '../../shared/types.js';
 const log = getLogger('analyze:context:shaper-provider');
 
 /**
- * Return the `LLMProvider` implementation the analyze framework
- * should use for its structured-output calls under the currently-
- * loaded config. Cheap; call per invocation rather than caching
- * because config edits are rare + a stale cache is worse than an
- * extra constructor call.
+ * Optional per-request overrides. The MCP server layer sets
+ * `sampler` when it wants the daemon's inner LLM calls to route back
+ * to the calling client via `sampling/createMessage`. When present,
+ * the sampler always wins over `cfg.shaperProvider` -- MCP-integrated
+ * requests should never subprocess-spawn a CLI or hit local Ollama.
+ * Callers who want the config default explicitly can pass `undefined`.
  */
-export function buildShaperProvider(cfg: AnalyzeConfig): LLMProvider {
+export interface ShaperProviderOverrides {
+	readonly sampler?: SamplingCallback | undefined;
+	/** Optional model-preference hints forwarded on every sampling
+	 *  request. Ignored when `sampler` is undefined. */
+	readonly modelHints?: readonly string[] | undefined;
+}
+
+/**
+ * Return the `LLMProvider` implementation the analyze framework
+ * should use for its structured-output calls.
+ *
+ * Priority order:
+ *   1. `overrides.sampler` -> `McpSamplingProvider` (MCP integration path)
+ *   2. `cfg.shaperProvider === 'cli-claude' | 'cli-codex'` -> `CliProvider`
+ *   3. `cfg.shaperProvider === 'ollama'` (default) -> `OllamaProvider`
+ *
+ * Cheap; call per invocation rather than caching because config
+ * edits + per-request overrides are the common shape.
+ */
+export function buildShaperProvider(
+	cfg:       AnalyzeConfig,
+	overrides?: ShaperProviderOverrides,
+): LLMProvider {
+	if (overrides?.sampler !== undefined) {
+		log.debug(
+			{ modelHints: overrides.modelHints ?? [] },
+			'shaper provider: routing through McpSamplingProvider (per-request override)',
+		);
+		return new McpSamplingProvider({
+			sampler: overrides.sampler,
+			...(overrides.modelHints !== undefined ? { modelHints: overrides.modelHints } : {}),
+		});
+	}
 	if (cfg.shaperProvider === 'cli-claude' || cfg.shaperProvider === 'cli-codex') {
 		const kind = cfg.shaperProvider === 'cli-claude' ? 'claude' : 'codex';
 		log.debug(
