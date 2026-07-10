@@ -126,7 +126,7 @@ export function buildShaperProvider(
 	overrides?: ShaperProviderOverrides,
 ): LLMProvider {
 	if (overrides?.sampler !== undefined) {
-		log.debug(
+		log.info(
 			{ modelHints: overrides.modelHints ?? [] },
 			'shaper provider: routing through McpSamplingProvider (explicit override)',
 		);
@@ -137,7 +137,7 @@ export function buildShaperProvider(
 	}
 	const ambient = samplerContextStorage.getStore();
 	if (ambient !== undefined) {
-		log.debug(
+		log.info(
 			{ modelHints: ambient.modelHints },
 			'shaper provider: routing through McpSamplingProvider (ambient context)',
 		);
@@ -148,7 +148,7 @@ export function buildShaperProvider(
 	}
 	if (cfg.shaperProvider === 'cli-claude' || cfg.shaperProvider === 'cli-codex') {
 		const kind = cfg.shaperProvider === 'cli-claude' ? 'claude' : 'codex';
-		log.debug(
+		log.info(
 			{ kind, model: cfg.shaperModel },
 			'shaper provider: routing through CliProvider',
 		);
@@ -162,7 +162,7 @@ export function buildShaperProvider(
 		});
 	}
 	// Default + explicit 'ollama'.
-	log.debug(
+	log.info(
 		{ model: cfg.shaperModel, numCtx: cfg.shaper.ollamaNumCtx },
 		'shaper provider: routing through OllamaProvider',
 	);
