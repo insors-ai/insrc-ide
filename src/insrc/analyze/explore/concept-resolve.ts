@@ -83,10 +83,18 @@ const STRUCTURAL_TOKENS = new Set([
 	'service', 'layer', 'pipeline', 'infrastructure',
 ]);
 
-/** Score weights (sum to ~1.0 before bonuses). */
+/** Score weights (sum to ~1.0 before bonuses).
+ *
+ *  Depth is DELIBERATELY not a score signal. `depthSegments` is still
+ *  computed + surfaced in `diagnostics.pathDepth` for observability,
+ *  but it's not weighted -- in a real codebase docs cluster near the
+ *  root and code sinks into modules, so encoding "shallower is
+ *  better" as a global bonus is a systematic tax on code retrieval.
+ *  The former W_DEPTH weight (0.10) was redistributed into
+ *  W_NAME_TOKENS: the reader named the thing, so name-token match is
+ *  the closer proxy for what they want than path depth. */
 const W_PATH_TOKENS   = 0.45;
-const W_NAME_TOKENS   = 0.30;
-const W_DEPTH         = 0.10;
+const W_NAME_TOKENS   = 0.40;
 /** Entity density -- how much INDEXED code lives under this
  *  candidate. Discriminates real code modules from
  *  documentation-only directories that share a name (Test A on
@@ -98,10 +106,14 @@ const W_ENTITY_DENSITY = 0.15;
 /** Small additive bonuses. */
 const DIR_STRUCTURAL_BONUS = 0.10;
 
-/** Multiplicative penalty for test-only paths on structural queries.
- *  "Map the X module" almost never means "point at the test file for
- *  X". Halving the score keeps test files in the ranked list (for
- *  fallback) but pushes them below real modules. */
+/** Multiplicative penalty for test-only paths. Applied
+ *  UNCONDITIONALLY (previously gated on `structuralBoost`, which
+ *  missed queries that don't happen to include a structural keyword
+ *  -- observed 2026-07-11 when `executor-placeholders.test.ts` beat
+ *  `executor.ts` on a "map the executor" style query because the
+ *  query had no structural token to trip the gate). Test files
+ *  should almost never rank #1 unless the query explicitly mentions
+ *  tests. Halving keeps them in the list for fallback. */
 const TEST_PATH_PENALTY = 0.50;
 
 /** Regex matching test paths -- anywhere in the path OR basename
@@ -243,11 +255,12 @@ function scoreCandidate(
 	const pathMatchNorm = pathHits / tokens.length;
 	const nameMatchNorm = nameHits / tokens.length;
 
-	// Depth score: fewer path segments = higher. Repo root = 0
-	// segments (max). Each extra segment costs a small linear amount
-	// (cap ~6 levels).
+	// Depth is observed but not scored. See W_PATH_TOKENS block above
+	// for the rationale: depth is a bad prior in real codebases where
+	// docs cluster near the root and code sinks into modules. We keep
+	// the segment count as a diagnostic so callers can still see it
+	// in `diagnostics.pathDepth`, but it does not enter the score.
 	const depthSegments = relPath.split(/[\\/]+/g).filter(x => x.length > 0).length;
-	const depthScore = Math.max(0, 1 - depthSegments / 6);
 
 	// Entity-density score: how much INDEXED code lives under this
 	// candidate. For directories, this is the count of non-artefact
@@ -260,18 +273,17 @@ function scoreCandidate(
 	let score =
 		W_PATH_TOKENS    * pathMatchNorm +
 		W_NAME_TOKENS    * nameMatchNorm +
-		W_DEPTH          * depthScore    +
 		W_ENTITY_DENSITY * density;
 
 	if (structuralBoost && c.kind === 'dir') {
 		score += DIR_STRUCTURAL_BONUS;
 	}
 
-	// Structural queries almost never want a test file as the top
-	// hit. Halve the score on test-path candidates so they can still
-	// appear in the ranked list (useful when the user IS asking about
-	// tests) but real modules float above them.
-	if (structuralBoost && isTestPath(c.path)) {
+	// Test-only paths are halved UNCONDITIONALLY -- see the
+	// TEST_PATH_PENALTY constant above for why the structuralBoost
+	// guard was removed. Test files should almost never rank #1
+	// unless the query explicitly mentions tests.
+	if (isTestPath(c.path)) {
 		score *= TEST_PATH_PENALTY;
 	}
 

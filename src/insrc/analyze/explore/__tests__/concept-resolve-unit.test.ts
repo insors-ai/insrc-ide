@@ -97,7 +97,13 @@ test('directory match beats file match on same token count (Test 3 case)', () =>
 	);
 });
 
-test('shallower path scores higher when token match is equal', () => {
+test('depth does NOT enter the score (docs shallow, code deep is a bad prior)', () => {
+	// Path depth is observed via `diagnostics.pathDepth` but no longer
+	// weighted into the score. A design-doc-shaped shallow path and a
+	// module-shaped deep path with the same token+density profile MUST
+	// score identically -- rewarding shallow paths systematically taxes
+	// code retrieval in real codebases where docs cluster near the root.
+	// See W_PATH_TOKENS block for the rationale + removed W_DEPTH constant.
 	const tokens = _tokeniseForTest('payable module');
 	const shallow = _scoreCandidateForTest(
 		{ kind: 'dir', path: `${REPO}/payable`, name: 'payable' },
@@ -108,7 +114,13 @@ test('shallower path scores higher when token match is equal', () => {
 		tokens, REPO, true,
 	);
 	assert.ok(shallow !== null && deep !== null);
-	assert.ok(shallow.score > deep.score);
+	assert.equal(
+		shallow.score, deep.score,
+		`depth should not affect the score any more (shallow=${shallow.score}, deep=${deep.score})`,
+	);
+	// pathDepth stays observable in diagnostics for callers that want it.
+	assert.equal(shallow.diagnostics.pathDepth, 1);
+	assert.equal(deep.diagnostics.pathDepth, 6);
 });
 
 test('zero token hits returns null (dropped)', () => {
@@ -284,6 +296,39 @@ test('test path regex matches common test directory conventions', () => {
 	);
 	assert.ok(testDir !== null && realDir !== null);
 	assert.ok(realDir.score > testDir.score);
+});
+
+test('test path penalty fires WITHOUT structuralBoost too (regression: executor-placeholders.test.ts beat executor.ts)', () => {
+	// Query does NOT contain a STRUCTURAL_TOKEN ("module" / "package"
+	// / ...), so `structuralBoost` is false. Under the old design the
+	// TEST_PATH_PENALTY was gated on structuralBoost and never fired,
+	// letting test files beat real source. Now the penalty is
+	// unconditional -- the real source MUST rank above the test file
+	// even without a structural keyword in the query.
+	const tokens = _tokeniseForTest('exploration executor placeholder');
+	const testFile = _scoreCandidateForTest(
+		{
+			kind: 'file',
+			path: `${REPO}/src/analyze/__tests__/executor-placeholders.test.ts`,
+			name: 'executor-placeholders.test.ts',
+			entityCount: 2,
+		},
+		tokens, REPO, /* structuralBoost */ false,
+	);
+	const source = _scoreCandidateForTest(
+		{
+			kind: 'file',
+			path: `${REPO}/src/analyze/executor.ts`,
+			name: 'executor.ts',
+			entityCount: 20,
+		},
+		tokens, REPO, /* structuralBoost */ false,
+	);
+	assert.ok(testFile !== null && source !== null);
+	assert.ok(
+		source.score > testFile.score,
+		`source ${source.score} should beat test file ${testFile.score} even without structuralBoost`,
+	);
 });
 
 test('short query token (<7 chars) does NOT prefix-match (no false hit)', () => {
