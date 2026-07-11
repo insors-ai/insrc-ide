@@ -210,6 +210,59 @@ if [ -d "$OUT_DIR" ] && [ ! -e "$OUT_DIR/node_modules" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Step 4b: Ollama probe + first-boot config
+# ---------------------------------------------------------------------------
+
+# On a fresh install with NO Ollama, the daemon would boot with its
+# default config (embeddingModel=qwen3-embedding:0.6b, embeddingDim=
+# 1024), probe Ollama, fail, fall back to ONNX (nomic-embed-text-v1.5,
+# 768-dim), notice the config-dim vs ONNX-dim mismatch, and disable
+# vector ops. Bad UX for a first-time install.
+#
+# Fix: probe Ollama here. If it isn't reachable AND the user has no
+# existing config.json, write a config that pre-sets the ONNX-matching
+# dim so first boot activates ONNX cleanly. If the user has an
+# existing config (returning install), leave it alone -- they've
+# chosen deliberately.
+
+CONFIG_FILE="$HOME/.insrc/config.json"
+HAS_OLLAMA=0
+OLLAMA_HOST_URL="${OLLAMA_HOST:-http://localhost:11434}"
+if curl -fsS --max-time 2 "$OLLAMA_HOST_URL/api/tags" >/dev/null 2>&1; then
+	HAS_OLLAMA=1
+	ok "detected Ollama at $OLLAMA_HOST_URL"
+else
+	log "Ollama not detected at $OLLAMA_HOST_URL -- daemon will use the in-process ONNX embedder (nomic-embed-text-v1.5, ~140 MB downloaded on first use)"
+	# Only auto-write config if the user has none. Don't overwrite an
+	# existing config: they may have deliberately configured it.
+	if [ ! -f "$CONFIG_FILE" ]; then
+		mkdir -p "$HOME/.insrc"
+		cat > "$CONFIG_FILE" <<'CFG'
+{
+	"models": {
+		"providers": {
+			"local": {
+				"host":           "http://localhost:11434",
+				"embeddingModel": "nomic-ai/nomic-embed-text-v1.5",
+				"embeddingDim":   768,
+				"coreModel":      "qwen3-coder:latest",
+				"charsPerToken":  3
+			}
+		},
+		"analyze": {
+			"shaperProvider": "cli-claude",
+			"shaperModel":    "qwen3.6:35b-a3b"
+		}
+	}
+}
+CFG
+		ok "wrote $CONFIG_FILE (ONNX embedder + shaperProvider=cli-claude)"
+	else
+		log "existing $CONFIG_FILE left in place"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # Step 5: start
 # ---------------------------------------------------------------------------
 
@@ -235,9 +288,40 @@ fi
 # ---------------------------------------------------------------------------
 
 printf '\n%s%sinsrc daemon install complete.%s\n\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
-cat <<EOF
+
+if [ "$HAS_OLLAMA" -eq 0 ]; then
+	cat <<EOF
+Embedder: in-process ONNX (nomic-embed-text-v1.5, 768-dim). The
+model downloads to ~/.insrc/models/hf-cache on first embed call
+(~140 MB, ~30 s cold).
+
+Analyze shaper: routed to your CLI OAuth session (Claude Code
+via the multi-turn insrc_analyze_step tool, or Codex CLI).
+Ollama is NOT required for this mode.
+
+If you later install Ollama and want to use it:
+- ollama pull qwen3-embedding:0.6b
+- Update ~/.insrc/config.json embeddingModel/embeddingDim back to Ollama's model + dim.
+- rm -rf ~/.insrc/lance && re-add repos.
+
 Next steps:
 
+EOF
+else
+	cat <<EOF
+Embedder: Ollama (auto-detected at $OLLAMA_HOST_URL).
+
+If Ollama's embedding model isn't installed yet, pull it once:
+
+ollama pull qwen3-embedding:0.6b     # ~700 MB
+ollama pull qwen3-coder:latest       # ~10 GB (optional; used by the indexer's summariser)
+
+Next steps:
+
+EOF
+fi
+
+cat <<EOF
 1. Register the MCP tool with your CLI clients:
 
 claude mcp add insrc \\
