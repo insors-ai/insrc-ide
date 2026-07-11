@@ -61,7 +61,7 @@ export interface DocSectionResult {
 	readonly diagnostics?: {
 		readonly vectorScore?:  number;    // 1 - cosine distance, in [0, 1]
 		readonly keywordScore?: number;    // bounded keyword-hit signal in [0, 1]
-		readonly pathBoost?:    number;    // pathHint bonus, in [0, 0.15]
+		readonly pathBoost?:    number;    // additive lift produced by the multiplicative path-hint boost (score * PATH_HINT_MULTIPLIER - score); reported for observability
 	};
 }
 
@@ -102,19 +102,20 @@ const DEFAULT_KINDS: readonly ('document' | 'section' | 'config')[] = [
  *  the keyword pass has a candidate pool to boost/reorder. */
 const VECTOR_DEPTH_MULT = 3;
 
-/** Keyword pass caps hits at K per section. Bounded signal avoids
- *  a section winning purely by keyword density. */
-const KEYWORD_HITS_CAP = 6;
-
 /** Score blend. Vector weight + keyword weight sum to 1.0 (before
- *  path boost). */
+ *  the multiplicative path boost). */
 const VECTOR_WEIGHT  = 0.6;
 const KEYWORD_WEIGHT = 0.4;
 
-/** Path-hint boost added when `filenameHint` matches the entity's
- *  file. Small enough not to invert the vector ranking, big enough
- *  to break ties. */
-const PATH_HINT_BOOST = 0.15;
+/** Path-hint boost applied MULTIPLICATIVELY when `filenameHint`
+ *  matches the entity's file. Multiplicative so the lift scales with
+ *  the base score -- a weak candidate (score 0.15) gets a
+ *  proportional lift to 0.17, not a 75% relative bump to 0.30 that
+ *  would swamp real vector/keyword ranking. Additive boost was
+ *  observed 2026-07-11 to systematically rank-lift an entire
+ *  directory of noise when `filenameHint` was a coarse prefix like
+ *  `design/`. */
+const PATH_HINT_MULTIPLIER = 1.15;
 
 // ---------------------------------------------------------------------------
 // Public entry
@@ -196,6 +197,12 @@ export async function retrieveDocSections(
 	// (3) Keyword pass. Tokenise the query into salient terms, scan
 	// every candidate's body for hits. Simple substring count, not
 	// BM25 -- we don't need corpus statistics for a small doc corpus.
+	// Score = (distinct terms hit) / (total terms in the query), so a
+	// section that hits every query term scores 1.0 regardless of
+	// query length. Previously the divisor was a fixed KEYWORD_HITS_
+	// CAP=6 which (a) short-circuited scanning after 6 hits (making
+	// the score ordering-dependent) and (b) punished short precise
+	// queries by dividing by a constant larger than terms.length.
 	const terms = tokeniseQuery(args.query);
 	const keywordScores = new Map<string, number>();
 	if (terms.length > 0) {
@@ -205,11 +212,9 @@ export async function retrieveDocSections(
 			let hits = 0;
 			for (const t of terms) {
 				if (body.includes(t)) hits += 1;
-				if (hits >= KEYWORD_HITS_CAP) break;
 			}
 			if (hits > 0) {
-				// Normalise to [0, 1] via cap.
-				keywordScores.set(e.id, hits / KEYWORD_HITS_CAP);
+				keywordScores.set(e.id, hits / terms.length);
 			}
 		}
 	}
@@ -231,11 +236,16 @@ export async function retrieveDocSections(
 		const kScore = keywordScores.get(id) ?? 0;
 		let score = VECTOR_WEIGHT * vScore + KEYWORD_WEIGHT * kScore;
 
+		// Path-hint boost is now MULTIPLICATIVE (see PATH_HINT_
+		// MULTIPLIER above). Applied AFTER the additive blend so it
+		// scales the entire hybrid score proportionally rather than
+		// swamping weak candidates.
 		let pathBoost = 0;
 		if (filenameHint !== undefined && filenameHint.length > 0
 			&& e.file.toLowerCase().includes(filenameHint.toLowerCase())) {
-			pathBoost = PATH_HINT_BOOST;
-			score += pathBoost;
+			const boosted = score * PATH_HINT_MULTIPLIER;
+			pathBoost = boosted - score;   // reported for diagnostics parity
+			score = boosted;
 		}
 
 		if (score < minScore) continue;
