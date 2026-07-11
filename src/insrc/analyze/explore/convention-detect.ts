@@ -93,6 +93,11 @@ export async function runConventionDetect(
 	const all = await listEntitiesForRepo(db, ctx.repoPath);
 	const under = all.filter(e =>
 		e.artifact !== true
+		// Drop stale entities under gitignored paths (out/, build/,
+		// dist/, ...). Otherwise the naming-convention sample is
+		// biased by compiled-output style (kebab-case files, minified
+		// symbols) that doesn't reflect authored source.
+		&& ctx.ignoreFilter.isIncluded(e.file)
 		&& (e.file === params.path || e.file.startsWith(params.path.endsWith('/') ? params.path : params.path + '/')),
 	);
 

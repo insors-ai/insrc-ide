@@ -13,12 +13,14 @@ import { runConventionDetect }   from '../convention-detect.js';
 import { runDataModelTrace }     from '../data-model-trace.js';
 import { runTestLocate }         from '../test-locate.js';
 import type { Exploration, ExplorationRunnerContext } from '../types.js';
+import { permissiveIgnoreFilter } from '../../context/repo-ignore-filter.js';
 
 const CTX: ExplorationRunnerContext = {
 	runId:        'test-run',
 	repoPath:     '/tmp/does-not-exist-phase4-root',
 	closureRepos: ['/tmp/does-not-exist-phase4-root'],
 	readDep:      () => undefined,
+	ignoreFilter: permissiveIgnoreFilter(),
 };
 
 function mkExp(type: Exploration['type'], params: Record<string, unknown>): Exploration {

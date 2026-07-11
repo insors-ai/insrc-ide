@@ -34,7 +34,6 @@ import { loadAnalyzeConfig } from '../../config/analyze.js';
 import { getLogger } from '../../shared/logger.js';
 import type {
 	LLMMessage,
-	LLMProvider,
 	StructuredSchema,
 } from '../../shared/types.js';
 
@@ -116,12 +115,99 @@ export async function runCapabilityReuseCheck(
 	exp: Exploration,
 	ctx: ExplorationRunnerContext,
 ): Promise<CapabilityReuseCheckOutput> {
+	const prepared = await prepareCapabilityReuseCheck(exp, ctx);
+	if (prepared.kind === 'short-circuit') return prepared.shortCircuit;
+
+	// LLM narrow pass -- daemon-side shaperProvider. Skips gracefully
+	// on unavailable Ollama / missing prompt: finalizer merges with
+	// verdicts=undefined and emits `unrelated` placeholders.
+	let raw: CapabilityReuseCheckLLMOutput | undefined;
+	let llmSkipReason: string | undefined;
+	try {
+		const cfg = loadAnalyzeConfig();
+		const provider = buildShaperProvider(cfg);
+		raw = await provider.completeStructured<CapabilityReuseCheckLLMOutput>(
+			[
+				{ role: 'system', content: prepared.systemPrompt },
+				{ role: 'user',   content: prepared.userTurn     },
+			],
+			VERDICTS_SCHEMA,
+			{
+				maxAttempts:     cfg.shaper.structuredOutputRetries,
+				disableThinking: true,
+				maxTokens:       2_048,
+			},
+		);
+		log.info(
+			{
+				runId:      ctx.runId,
+				capability: prepared.prepared.capability,
+				returned:   raw.verdicts.length,
+			},
+			'capability.reuse-check: LLM verdicts received',
+		);
+	} catch (err) {
+		llmSkipReason = (err as Error).message;
+		log.info(
+			{ runId: ctx.runId, capability: prepared.prepared.capability, err: llmSkipReason },
+			'capability.reuse-check: LLM verdict pass skipped',
+		);
+	}
+
+	return finalizeCapabilityReuseCheck(prepared.prepared, raw, llmSkipReason, ctx.runId);
+}
+
+// ---------------------------------------------------------------------------
+// prepare / finalize split (used by the multi-turn MCP handler)
+// ---------------------------------------------------------------------------
+
+export interface CapabilityReuseCheckPrepared {
+	readonly capability:    string;
+	readonly profiles:      ReadonlyArray<{
+		readonly path:    string;
+		readonly profile: ModuleProfile | undefined;
+		readonly score:   number;
+	}>;
+	readonly conceptHits:   number;
+}
+
+interface CapabilityReuseCheckLLMOutput {
+	readonly capability: string;
+	readonly verdicts:   ReadonlyArray<{
+		readonly path:      string;
+		readonly verdict:   CapabilityReuseCandidate['verdict'];
+		readonly rationale: string;
+	}>;
+}
+
+export type CapabilityReuseCheckPrepareResult =
+	| {
+		readonly kind:         'short-circuit';
+		readonly shortCircuit: CapabilityReuseCheckOutput;
+	  }
+	| {
+		readonly kind:         'narrow-llm';
+		readonly systemPrompt: string;
+		readonly userTurn:     string;
+		readonly schema:       StructuredSchema;
+		readonly prepared:     CapabilityReuseCheckPrepared;
+	  };
+
+/**
+ * Deterministic prep for `capability.reuse-check`: runs concept.
+ * resolve then module.profile for each top candidate, then builds
+ * the LLM messages + schema. Short-circuits when concept.resolve
+ * returns no hits (no LLM needed).
+ */
+export async function prepareCapabilityReuseCheck(
+	exp: Exploration,
+	ctx: ExplorationRunnerContext,
+): Promise<CapabilityReuseCheckPrepareResult> {
 	const params = parseParams(exp);
 	const capability = params.capability;
 	const limit = params.limit ?? DEFAULT_LIMIT;
 
-	// (1) concept.resolve for module candidates. dir + file, no
-	// entity kinds -- reuse is a module-level question.
+	// (1) concept.resolve for module candidates.
 	const conceptExp: Exploration = {
 		id:      `${exp.id}-inner-concept`,
 		type:    'concept.resolve',
@@ -140,20 +226,19 @@ export async function runCapabilityReuseCheck(
 			'capability.reuse-check: concept.resolve returned no hits',
 		);
 		return {
-			type:         'capability.reuse-check',
-			capability,
-			candidates:   [],
-			notFoundNote: `No modules matched "${capability}" via concept.resolve.`,
+			kind: 'short-circuit',
+			shortCircuit: {
+				type:         'capability.reuse-check',
+				capability,
+				candidates:   [],
+				notFoundNote: `No modules matched "${capability}" via concept.resolve.`,
+			},
 		};
 	}
 
-	// Pick top-N distinct paths (concept can return dir + file for
-	// same tree; prefer dir when both appear for the same directory).
 	const topHits = pickTopDistinct(concept.hits, limit);
 
-	// (2) module.profile each candidate serially. Never parallel-await
-	// LLM calls, and profiles do a small amount of graph work so keep
-	// it serial for predictability.
+	// (2) module.profile each candidate serially.
 	const profiles: Array<{ path: string; profile: ModuleProfile | undefined; score: number }> = [];
 	for (const h of topHits) {
 		const profileExp: Exploration = {
@@ -174,23 +259,45 @@ export async function runCapabilityReuseCheck(
 		}
 	}
 
-	// (3) LLM narrow pass. Skips gracefully on unavailable Ollama /
-	// missing prompt -- candidates still get returned as `unrelated`
-	// placeholders.
-	let verdicts: Map<string, { verdict: CapabilityReuseCandidate['verdict']; rationale: string }>;
-	let llmSkipReason: string | undefined;
-	try {
-		verdicts = await runVerdictPass(capability, profiles, ctx);
-	} catch (err) {
-		llmSkipReason = (err as Error).message;
-		verdicts = new Map();
-		log.info(
-			{ runId: ctx.runId, capability, err: llmSkipReason },
-			'capability.reuse-check: LLM verdict pass skipped',
-		);
+	const promptContent = loadPromptFile();
+	const messages = buildMessages(promptContent, capability, profiles);
+	const systemMsg = messages[0]!.content as string;
+	const userMsg   = messages[1]!.content as string;
+
+	return {
+		kind:         'narrow-llm',
+		systemPrompt: systemMsg,
+		userTurn:     userMsg,
+		schema:       VERDICTS_SCHEMA,
+		prepared: {
+			capability,
+			profiles,
+			conceptHits: concept.hits.length,
+		},
+	};
+}
+
+/**
+ * Merge the LLM verdicts (if any) with the deterministic profiles
+ * and emit the final CapabilityReuseCheckOutput. Handles the
+ * degraded case where the LLM is unavailable -- `raw` undefined and
+ * `llmSkipReason` set produces `unrelated` placeholders.
+ */
+export function finalizeCapabilityReuseCheck(
+	prepared:      CapabilityReuseCheckPrepared,
+	raw:           CapabilityReuseCheckLLMOutput | undefined,
+	llmSkipReason: string | undefined,
+	runId?:        string,
+): CapabilityReuseCheckOutput {
+	const verdicts = new Map<string, { verdict: CapabilityReuseCandidate['verdict']; rationale: string }>();
+	if (raw !== undefined) {
+		for (const v of raw.verdicts) {
+			if (typeof v.path !== 'string' || v.path.length === 0) continue;
+			verdicts.set(v.path, { verdict: v.verdict, rationale: v.rationale });
+		}
 	}
 
-	const candidates: CapabilityReuseCandidate[] = profiles.map(p => {
+	const candidates: CapabilityReuseCandidate[] = prepared.profiles.map(p => {
 		const v = verdicts.get(p.path);
 		const evidenceEntities = p.profile !== undefined
 			? p.profile.exports.slice(0, 5)
@@ -209,18 +316,18 @@ export async function runCapabilityReuseCheck(
 
 	log.info(
 		{
-			runId:        ctx.runId,
-			capability,
-			hits:         concept.hits.length,
-			candidates:   candidates.length,
-			skippedLLM:   llmSkipReason !== undefined,
+			runId,
+			capability: prepared.capability,
+			hits:       prepared.conceptHits,
+			candidates: candidates.length,
+			skippedLLM: llmSkipReason !== undefined,
 		},
 		'capability.reuse-check: complete',
 	);
 
 	return {
 		type:         'capability.reuse-check',
-		capability,
+		capability:   prepared.capability,
 		candidates,
 		notFoundNote: '',
 		...(llmSkipReason !== undefined ? { llmSkipReason } : {}),
@@ -228,47 +335,8 @@ export async function runCapabilityReuseCheck(
 }
 
 // ---------------------------------------------------------------------------
-// LLM verdict pass
+// LLM prompt assembly
 // ---------------------------------------------------------------------------
-
-async function runVerdictPass(
-	capability: string,
-	profiles:   ReadonlyArray<{ path: string; profile: ModuleProfile | undefined; score: number }>,
-	ctx:        ExplorationRunnerContext,
-): Promise<Map<string, { verdict: CapabilityReuseCandidate['verdict']; rationale: string }>> {
-	const cfg = loadAnalyzeConfig();
-	const provider = buildShaperProvider(cfg);
-	const promptContent = loadPromptFile();
-	const messages = buildMessages(promptContent, capability, profiles);
-
-	const raw = await provider.completeStructured<{
-		capability: string;
-		verdicts: Array<{ path: string; verdict: CapabilityReuseCandidate['verdict']; rationale: string }>;
-	}>(
-		messages,
-		VERDICTS_SCHEMA,
-		{
-			maxAttempts:     cfg.shaper.structuredOutputRetries,
-			disableThinking: true,
-			maxTokens:       2_048,
-		},
-	);
-
-	const out = new Map<string, { verdict: CapabilityReuseCandidate['verdict']; rationale: string }>();
-	for (const v of raw.verdicts) {
-		if (typeof v.path !== 'string' || v.path.length === 0) continue;
-		out.set(v.path, { verdict: v.verdict, rationale: v.rationale });
-	}
-	log.info(
-		{
-			runId:     ctx.runId,
-			capability,
-			returned:  raw.verdicts.length,
-		},
-		'capability.reuse-check: LLM verdicts received',
-	);
-	return out;
-}
 
 function buildMessages(
 	promptContent: string,

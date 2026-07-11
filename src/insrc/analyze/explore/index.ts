@@ -17,8 +17,15 @@
  * hands them to executePlan; the synthesizer reads the results.
  */
 
-export { executePlan } from './executor.js';
-export type { ExecutePlanArgs } from './executor.js';
+export { executePlan, stepPlan, getNarrowRunner, NARROW_LLM_TYPES } from './executor.js';
+export type {
+	ExecutePlanArgs,
+	NarrowPrepareResult,
+	StepPlanResumeState,
+	StepPlanPending,
+	StepPlanDone,
+	StepPlanResult,
+} from './executor.js';
 
 export { runConceptResolve }          from './concept-resolve.js';
 export { runModuleProfile }           from './module-profile.js';

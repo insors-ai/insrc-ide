@@ -19,12 +19,14 @@ import {
 	isK8sPath,
 } from '../manifests-locate.js';
 import type { Exploration, ExplorationRunnerContext } from '../types.js';
+import { permissiveIgnoreFilter } from '../../context/repo-ignore-filter.js';
 
 const CTX: ExplorationRunnerContext = {
 	runId:        'test-run',
 	repoPath:     '/tmp/does-not-exist-phase5-root',
 	closureRepos: ['/tmp/does-not-exist-phase5-root'],
 	readDep:      () => undefined,
+	ignoreFilter: permissiveIgnoreFilter(),
 };
 
 function mkExp(type: Exploration['type'], params: Record<string, unknown>): Exploration {

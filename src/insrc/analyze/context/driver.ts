@@ -1006,7 +1006,7 @@ function inferScopePath(inputs: RunShaperArgs['inputs']): string {
  * key-hash check alone. This is the conservative choice: if we
  * can't read the registry, we don't pretend the cache is fresh.
  */
-async function resolveRepoLastIndexedAt(scopePath: string): Promise<number | undefined> {
+export async function resolveRepoLastIndexedAt(scopePath: string): Promise<number | undefined> {
 	if (scopePath.length === 0) return undefined;
 
 	let repos: readonly RegisteredRepo[];

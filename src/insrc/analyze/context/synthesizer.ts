@@ -27,10 +27,12 @@ import { fileURLToPath } from 'node:url';
 
 import { buildShaperProvider } from './shaper-provider.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
+import { validateAgainstSchema } from '../../agent/providers/structured-output.js';
 import { getLogger } from '../../shared/logger.js';
 import type {
 	LLMMessage,
 	LLMProvider,
+	StructuredSchema,
 } from '../../shared/types.js';
 import type { ClassifiedIntent } from '../../shared/analyze-types.js';
 
@@ -149,6 +151,60 @@ export async function synthesize(args: SynthesizeArgs): Promise<Omit<AnalyzeCont
 	);
 
 	return raw;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-turn MCP prepare / finalize split (plans/mcp-multi-turn-analyze.md)
+//
+// Same as decomposer's split: prepareSynthesize returns everything the
+// outer client's LLM needs to emit the bundle directly (verbatim prompt
+// + user turn + JSON Schema), and finalizeSynthesize applies the raw
+// JSON the client emitted (re-validating against the same schema the
+// wire layer would have enforced on the Ollama / CLI paths).
+// ---------------------------------------------------------------------------
+
+export interface SynthesizePrepared {
+	readonly systemPrompt: string;
+	readonly userTurn:     string;
+	readonly schema:       StructuredSchema;
+}
+
+/**
+ * Return the prompt content, user turn, and stripped bundle schema
+ * for the synthesizer without invoking an LLM.
+ */
+export function prepareSynthesize(
+	args: Omit<SynthesizeArgs, 'runId' | 'provider'>,
+): SynthesizePrepared {
+	const promptContent = loadPromptFile(args.target);
+	const messages = buildMessages(promptContent, args.intent, args.executed);
+	return {
+		systemPrompt: messages[0]!.content as string,
+		userTurn:     messages[1]!.content as string,
+		schema:       stripMetaFromSchema(
+			ANALYZE_CONTEXT_BUNDLE_SCHEMA as Record<string, unknown>,
+		) as StructuredSchema,
+	};
+}
+
+/**
+ * Validate the raw JSON the outer client emitted for a bundle against
+ * the stripped bundle schema (defensive check: the wire layer never
+ * saw this JSON). Throws SynthesizerSchemaUnrecoverable on failure.
+ * Meta stamping is the caller's responsibility -- same shape as the
+ * driver's meta-stamp path today.
+ */
+export function finalizeSynthesize(raw: unknown): Omit<AnalyzeContextBundle, 'meta'> {
+	const strippedSchema = stripMetaFromSchema(
+		ANALYZE_CONTEXT_BUNDLE_SCHEMA as Record<string, unknown>,
+	) as StructuredSchema;
+	const result = validateAgainstSchema<Omit<AnalyzeContextBundle, 'meta'>>(
+		strippedSchema, raw,
+	);
+	if (!result.ok) {
+		throw new SynthesizerSchemaUnrecoverable(result.errors);
+	}
+	return result.value;
 }
 
 // ---------------------------------------------------------------------------

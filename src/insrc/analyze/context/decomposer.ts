@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 
 import { buildShaperProvider } from './shaper-provider.js';
 import { loadAnalyzeConfig } from '../../config/analyze.js';
+import { validateAgainstSchema } from '../../agent/providers/structured-output.js';
 import { getLogger } from '../../shared/logger.js';
 import type {
 	LLMMessage,
@@ -110,7 +111,7 @@ const EXPLORATION_TYPES: readonly ExplorationType[] = [
 	'freeform.probe',
 ];
 
-const DECOMPOSE_SCHEMA: StructuredSchema = {
+export const DECOMPOSE_SCHEMA: StructuredSchema = {
 	type:                 'object',
 	additionalProperties: false,
 	required:             ['answerType', 'explorations', 'synthesisHint'],
@@ -202,6 +203,67 @@ export async function decompose(args: DecomposeArgs): Promise<ExplorationPlan> {
 		answerType:    raw.answerType,
 		explorations:  raw.explorations,
 		synthesisHint: raw.synthesisHint,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Multi-turn MCP prepare / finalize split (plans/mcp-multi-turn-analyze.md)
+//
+// prepareDecompose returns the exact prompt + user turn + JSON Schema the
+// outer client's LLM needs to emit an ExplorationPlan directly. The
+// existing decompose() function still runs the in-process LLM path for
+// Ollama / CliProvider / sampling; this split exposes the same building
+// blocks so the MCP multi-turn tool can hand them to the client instead.
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything the outer client needs to emit an ExplorationPlan without
+ * the server calling an LLM.
+ */
+export interface DecomposePrepared {
+	readonly systemPrompt: string;
+	readonly userTurn:     string;
+	readonly schema:       StructuredSchema;
+}
+
+/**
+ * Return the prompt content, user turn, and schema for the decomposer
+ * without invoking an LLM. Same content the in-process decompose()
+ * would have sent -- prompt is loaded verbatim from disk; user turn is
+ * composed the same way `buildMessages` composes it.
+ */
+export function prepareDecompose(intent: ClassifiedIntent): DecomposePrepared {
+	const promptContent = loadPromptFile();
+	const messages = buildMessages(promptContent, intent);
+	return {
+		systemPrompt: messages[0]!.content as string,
+		userTurn:     messages[1]!.content as string,
+		schema:       DECOMPOSE_SCHEMA,
+	};
+}
+
+/**
+ * Take the raw JSON the outer client emitted for an ExplorationPlan,
+ * defensively re-validate it against DECOMPOSE_SCHEMA (the wire schema
+ * validation only fires on the Ollama / CLI path -- MCP multi-turn
+ * skips that entirely), then run the topology check + return the
+ * ExplorationPlan. Throws DecomposerSchemaUnrecoverable on either
+ * failure so the outer handler can decide to retry vs give up.
+ */
+export function finalizeDecompose(raw: unknown): ExplorationPlan {
+	const result = validateAgainstSchema<{
+		answerType:    AnswerType;
+		explorations:  Exploration[];
+		synthesisHint: string;
+	}>(DECOMPOSE_SCHEMA, raw);
+	if (!result.ok) {
+		throw new DecomposerSchemaUnrecoverable(result.errors);
+	}
+	validatePlanTopology(result.value.explorations);
+	return {
+		answerType:    result.value.answerType,
+		explorations:  result.value.explorations,
+		synthesisHint: result.value.synthesisHint,
 	};
 }
 

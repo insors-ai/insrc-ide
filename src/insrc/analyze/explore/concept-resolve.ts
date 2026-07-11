@@ -313,7 +313,10 @@ const IGNORE_DIRS = new Set([
 
 const MAX_DIR_DEPTH = 8;
 
-function enumerateDirs(repoPath: string): Candidate[] {
+function enumerateDirs(
+	repoPath: string,
+	ignoreFilter: import('../context/repo-ignore-filter.js').RepoIgnoreFilter,
+): Candidate[] {
 	const out: Candidate[] = [];
 	function walk(dir: string, depth: number): void {
 		if (depth > MAX_DIR_DEPTH) return;
@@ -327,6 +330,13 @@ function enumerateDirs(repoPath: string): Candidate[] {
 			if (IGNORE_DIRS.has(name)) continue;
 			if (name.startsWith('.') && depth === 0) continue;   // skip .git-like at root
 			const full = join(dir, name);
+			// Drop anything git considers gitignored (build/, dist/,
+			// target/, out/, .next/, node_modules/, ...). The hardcoded
+			// IGNORE_DIRS above is intentionally incomplete -- every
+			// toolchain names its build dir differently. Delegating to
+			// git guarantees the analyze surface matches the indexer's
+			// view of the repo.
+			if (!ignoreFilter.isIncluded(full)) continue;
 			let s;
 			try { s = statSync(full); }
 			catch { continue; }
@@ -405,7 +415,10 @@ function parentDir(path: string): string {
  * Enumerate `file` entities in the repo. Every source-code file gets
  * a kind='file' entity from the parser layer.
  */
-function fileCandidatesFromEntities(entities: readonly Entity[]): Candidate[] {
+function fileCandidatesFromEntities(
+	entities:     readonly Entity[],
+	ignoreFilter: import('../context/repo-ignore-filter.js').RepoIgnoreFilter,
+): Candidate[] {
 	const out: Candidate[] = [];
 	for (const e of entities) {
 		if (e.kind !== 'file') continue;
@@ -415,6 +428,11 @@ function fileCandidatesFromEntities(entities: readonly Entity[]): Candidate[] {
 		// guide.md" doesn't beat the actual `insors/core/messaging/`
 		// module on a code-target query.
 		if (e.artifact === true) continue;
+		// Drop stale entities that live under a currently-gitignored
+		// path. The entity table can carry rows from prior indexing
+		// runs where the path was still tracked; git is the source of
+		// truth for what should surface *now*.
+		if (!ignoreFilter.isIncluded(e.file)) continue;
 		out.push({
 			kind: 'file',
 			path: e.file,
@@ -433,11 +451,19 @@ const STRUCTURAL_ENTITY_KINDS = new Set([
 	'function', 'class', 'method', 'interface', 'type', 'module',
 ]);
 
-function structuralEntityCandidates(entities: readonly Entity[]): Candidate[] {
+function structuralEntityCandidates(
+	entities:     readonly Entity[],
+	ignoreFilter: import('../context/repo-ignore-filter.js').RepoIgnoreFilter,
+): Candidate[] {
 	const out: Candidate[] = [];
 	for (const e of entities) {
 		if (!STRUCTURAL_ENTITY_KINDS.has(e.kind)) continue;
 		if (e.artifact === true) continue;
+		// Same stale-entity filter as fileCandidatesFromEntities: a
+		// function/class living under a currently-gitignored path
+		// (`out/`, `build/`, `dist/`, ...) is a build artefact and must
+		// not surface as a candidate.
+		if (!ignoreFilter.isIncluded(e.file)) continue;
 		out.push({
 			kind:     'entity',
 			path:     e.file,
@@ -511,9 +537,9 @@ export async function runConceptResolve(
 
 	// Assemble the candidate pool.
 	const rawCandidates: Candidate[] = [];
-	if (includeKinds.includes('dir'))    rawCandidates.push(...enumerateDirs(ctx.repoPath));
-	if (includeKinds.includes('file'))   rawCandidates.push(...fileCandidatesFromEntities(entities));
-	if (includeKinds.includes('entity')) rawCandidates.push(...structuralEntityCandidates(entities));
+	if (includeKinds.includes('dir'))    rawCandidates.push(...enumerateDirs(ctx.repoPath, ctx.ignoreFilter));
+	if (includeKinds.includes('file'))   rawCandidates.push(...fileCandidatesFromEntities(entities, ctx.ignoreFilter));
+	if (includeKinds.includes('entity')) rawCandidates.push(...structuralEntityCandidates(entities, ctx.ignoreFilter));
 
 	// Annotate every candidate with an entityCount so the density
 	// signal can discriminate real code modules from empty docs

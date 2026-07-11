@@ -28,7 +28,6 @@ import { getLogger } from '../../shared/logger.js';
 import type { DbClient } from '../../db/client.js';
 import type {
 	LLMMessage,
-	LLMProvider,
 	StructuredSchema,
 } from '../../shared/types.js';
 
@@ -91,9 +90,98 @@ export interface RunDocConstraintEnumerateArgs {
 	readonly logContext?: string;
 }
 
+/**
+ * Original all-in-one runner. Retains behaviour for the Ollama /
+ * CliProvider path. Internally composes prepare + provider.
+ * completeStructured + finalize.
+ */
 export async function runSharedDocConstraintEnumerate(
 	args: RunDocConstraintEnumerateArgs,
 ): Promise<DocConstraintEnumerateOutput> {
+	const prepared = await prepareDocConstraintEnumerate({
+		subject:    args.subject,
+		repoPath:   args.repoPath,
+		db:         args.db,
+		...(args.maxSources !== undefined ? { maxSources: args.maxSources } : {}),
+		...(args.runId !== undefined ? { runId: args.runId } : {}),
+		...(args.logContext !== undefined ? { logContext: args.logContext } : {}),
+	});
+	if (prepared.kind === 'short-circuit') return prepared.shortCircuit;
+
+	const cfg = loadAnalyzeConfig();
+	const provider = buildShaperProvider(cfg);
+	let raw: DocConstraintEnumerateLLMOutput;
+	try {
+		raw = await provider.completeStructured(
+			[
+				{ role: 'system', content: prepared.systemPrompt },
+				{ role: 'user',   content: prepared.userTurn     },
+			],
+			CONSTRAINTS_SCHEMA,
+			{
+				maxAttempts:     cfg.shaper.structuredOutputRetries,
+				disableThinking: true,
+				maxTokens:       4_096,
+			},
+		);
+	} catch (err) {
+		log.warn(
+			{ runId: args.runId, subject: prepared.prepared.subject, ctx: args.logContext, err: (err as Error).message },
+			'doc.constraint.enumerate: LLM extraction failed',
+		);
+		return {
+			type:                  'doc.constraint.enumerate',
+			subject:               prepared.prepared.subject,
+			constraints:           [],
+			notFoundNote:
+				`LLM extraction failed for subject "${prepared.prepared.subject}": ${(err as Error).message}. ` +
+				`Retrieved ${prepared.prepared.retrievedSectionCount} sections but could not process them.`,
+			retrievedSectionCount: prepared.prepared.retrievedSectionCount,
+		};
+	}
+
+	return finalizeDocConstraintEnumerate(prepared.prepared, raw, args.runId, args.logContext);
+}
+
+// ---------------------------------------------------------------------------
+// prepare / finalize split (used by the multi-turn MCP handler)
+// ---------------------------------------------------------------------------
+
+export interface DocConstraintEnumeratePrepared {
+	readonly subject:                string;
+	readonly retrievedSectionCount:  number;
+	readonly validEntityIds:         readonly string[];
+}
+
+interface HydratedSection {
+	readonly entityId: string;
+	readonly file:     string;
+	readonly heading:  string;
+	readonly body:     string;
+}
+
+interface DocConstraintEnumerateLLMOutput {
+	readonly subject:      string;
+	readonly constraints:  DocConstraintRecord[];
+	readonly notFoundNote: string;
+}
+
+export type DocConstraintEnumeratePrepareResult =
+	| {
+		readonly kind:         'short-circuit';
+		readonly shortCircuit: DocConstraintEnumerateOutput;
+	  }
+	| {
+		readonly kind:         'narrow-llm';
+		readonly systemPrompt: string;
+		readonly userTurn:     string;
+		readonly schema:       StructuredSchema;
+		readonly prepared:     DocConstraintEnumeratePrepared;
+	  };
+
+export async function prepareDocConstraintEnumerate(
+	args: RunDocConstraintEnumerateArgs,
+): Promise<DocConstraintEnumeratePrepareResult> {
 	const subject = args.subject.trim();
 	if (subject.length === 0) {
 		throw new Error('doc.constraint.enumerate: subject is required (non-empty string)');
@@ -117,20 +205,18 @@ export async function runSharedDocConstraintEnumerate(
 			'doc.constraint.enumerate: no matching sections',
 		);
 		return {
-			type:                  'doc.constraint.enumerate',
-			subject,
-			constraints:           [],
-			notFoundNote:          `No doc sections in the retrieved corpus mention "${subject}".`,
-			retrievedSectionCount: 0,
+			kind: 'short-circuit',
+			shortCircuit: {
+				type:                  'doc.constraint.enumerate',
+				subject,
+				constraints:           [],
+				notFoundNote:          `No doc sections in the retrieved corpus mention "${subject}".`,
+				retrievedSectionCount: 0,
+			},
 		};
 	}
 
-	const hydrated: Array<{
-		readonly entityId: string;
-		readonly file:     string;
-		readonly heading:  string;
-		readonly body:     string;
-	}> = [];
+	const hydrated: HydratedSection[] = [];
 	for (const s of sections) {
 		const entity = await getEntity(args.db, s.entityId);
 		if (entity === null) continue;
@@ -142,53 +228,39 @@ export async function runSharedDocConstraintEnumerate(
 		});
 	}
 
-	const cfg = loadAnalyzeConfig();
-	const provider = buildShaperProvider(cfg);
 	const promptContent = loadPromptFile();
 	const messages = buildMessages(promptContent, subject, hydrated);
+	const systemMsg = messages[0]!.content as string;
+	const userMsg   = messages[1]!.content as string;
 
-	let raw: {
-		subject: string;
-		constraints: DocConstraintRecord[];
-		notFoundNote: string;
-	};
-	try {
-		raw = await provider.completeStructured(
-			messages,
-			CONSTRAINTS_SCHEMA,
-			{
-				maxAttempts:     cfg.shaper.structuredOutputRetries,
-				disableThinking: true,
-				maxTokens:       4_096,
-			},
-		);
-	} catch (err) {
-		log.warn(
-			{ runId: args.runId, subject, ctx: args.logContext, err: (err as Error).message },
-			'doc.constraint.enumerate: LLM extraction failed',
-		);
-		return {
-			type:                  'doc.constraint.enumerate',
+	return {
+		kind:         'narrow-llm',
+		systemPrompt: systemMsg,
+		userTurn:     userMsg,
+		schema:       CONSTRAINTS_SCHEMA,
+		prepared: {
 			subject,
-			constraints:           [],
-			notFoundNote:
-				`LLM extraction failed for subject "${subject}": ${(err as Error).message}. ` +
-				`Retrieved ${sections.length} sections but could not process them.`,
 			retrievedSectionCount: sections.length,
-		};
-	}
+			validEntityIds:        hydrated.map(h => h.entityId),
+		},
+	};
+}
 
-	// Faithfulness check: drop any constraint whose sourceEntityId
-	// isn't in the retrieved set.
-	const validIds = new Set(hydrated.map(h => h.entityId));
+export function finalizeDocConstraintEnumerate(
+	prepared:   DocConstraintEnumeratePrepared,
+	raw:        DocConstraintEnumerateLLMOutput,
+	runId?:     string,
+	logContext?: string,
+): DocConstraintEnumerateOutput {
+	const validIds = new Set(prepared.validEntityIds);
 	const filtered = raw.constraints.filter(c => validIds.has(c.sourceEntityId));
 
 	log.info(
 		{
-			runId:     args.runId,
-			ctx:       args.logContext,
-			subject,
-			retrieved: sections.length,
+			runId,
+			ctx:       logContext,
+			subject:   prepared.subject,
+			retrieved: prepared.retrievedSectionCount,
 			extracted: raw.constraints.length,
 			surviving: filtered.length,
 		},
@@ -197,10 +269,10 @@ export async function runSharedDocConstraintEnumerate(
 
 	return {
 		type:                  'doc.constraint.enumerate',
-		subject,
+		subject:               prepared.subject,
 		constraints:           filtered,
-		notFoundNote:          filtered.length === 0 ? (raw.notFoundNote || `No constraints on "${subject}" found in the retrieved sections.`) : '',
-		retrievedSectionCount: sections.length,
+		notFoundNote:          filtered.length === 0 ? (raw.notFoundNote || `No constraints on "${prepared.subject}" found in the retrieved sections.`) : '',
+		retrievedSectionCount: prepared.retrievedSectionCount,
 	};
 }
 

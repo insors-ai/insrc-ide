@@ -84,7 +84,13 @@ export async function runDataModelTrace(
 			[params.entityName],
 			{ repo: ctx.repoPath, kinds: TARGET_KINDS },
 		)
-	).filter(e => e.artifact !== true).slice(0, MAX_TARGETS);
+	)
+		.filter(e => e.artifact !== true)
+		// Drop stale entities under gitignored paths so a compiled
+		// twin of the source doesn't resolve alongside the authored
+		// definition.
+		.filter(e => ctx.ignoreFilter.isIncluded(e.file))
+		.slice(0, MAX_TARGETS);
 
 	if (targets.length === 0) {
 		log.info(

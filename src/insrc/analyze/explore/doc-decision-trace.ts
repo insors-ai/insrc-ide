@@ -32,7 +32,6 @@ import type {
 } from '../../db/client.js';
 import type {
 	LLMMessage,
-	LLMProvider,
 	StructuredSchema,
 } from '../../shared/types.js';
 
@@ -93,74 +92,38 @@ export interface RunDocDecisionTraceArgs {
 	readonly logContext?: string;
 }
 
+/**
+ * Original all-in-one runner. Retains behaviour unchanged for the
+ * Ollama / CliProvider path (existing template runtime + exploration
+ * executor without the multi-turn MCP pause). Internally now composes
+ * `prepareDocDecisionTrace` + provider.completeStructured +
+ * `finalizeDocDecisionTrace` so any bug fix in the shared halves is
+ * picked up here for free.
+ */
 export async function runSharedDocDecisionTrace(
 	args: RunDocDecisionTraceArgs,
 ): Promise<DocDecisionTraceOutput> {
-	const topic = args.topic.trim();
-	if (topic.length === 0) {
-		throw new Error('doc.decision.trace: topic is required (non-empty string)');
-	}
-	const maxSources = args.maxSources !== undefined
-		? Math.max(1, Math.min(30, args.maxSources))
-		: 15;
-
-	// (1) Retrieve. V1 = repo-scoped (single-repo closure).
-	const sections = await retrieveDocSections({
-		db:           args.db,
-		query:        topic,
-		closureRepos: [args.repoPath],
-		maxResults:   maxSources,
-		// Prose-only for decision trace; skip config entities.
-		kinds:        ['document', 'section'],
-		previewChars: 0,
+	const prepared = await prepareDocDecisionTrace({
+		topic:      args.topic,
+		repoPath:   args.repoPath,
+		db:         args.db,
+		...(args.maxSources !== undefined ? { maxSources: args.maxSources } : {}),
+		...(args.runId !== undefined ? { runId: args.runId } : {}),
+		...(args.logContext !== undefined ? { logContext: args.logContext } : {}),
 	});
 
-	if (sections.length === 0) {
-		log.info(
-			{ runId: args.runId, topic, ctx: args.logContext },
-			'doc.decision.trace: no matching sections',
-		);
-		return {
-			type:                  'doc.decision.trace',
-			topic,
-			decisions:             [],
-			notFoundNote:          `No doc sections in the retrieved corpus mention "${topic}".`,
-			retrievedSectionCount: 0,
-		};
-	}
+	if (prepared.kind === 'short-circuit') return prepared.shortCircuit;
 
-	// (2) Hydrate full bodies for the LLM extraction pass.
-	const hydrated: Array<{
-		readonly entityId: string;
-		readonly file:     string;
-		readonly heading:  string;
-		readonly body:     string;
-	}> = [];
-	for (const s of sections) {
-		const entity = await getEntity(args.db, s.entityId);
-		if (entity === null) continue;
-		hydrated.push({
-			entityId: s.entityId,
-			file:     s.file,
-			heading:  s.heading,
-			body:     (entity.body ?? '').slice(0, 2_000),
-		});
-	}
-
-	// (3) LLM extraction.
+	// Fire the LLM call against the daemon-side shaperProvider.
 	const cfg = loadAnalyzeConfig();
 	const provider = buildShaperProvider(cfg);
-	const promptContent = loadPromptFile();
-	const messages = buildMessages(promptContent, topic, hydrated);
-
-	let raw: {
-		topic: string;
-		decisions: DocDecisionRecord[];
-		notFoundNote: string;
-	};
+	let raw: DocDecisionTraceLLMOutput;
 	try {
 		raw = await provider.completeStructured(
-			messages,
+			[
+				{ role: 'system', content: prepared.systemPrompt },
+				{ role: 'user',   content: prepared.userTurn     },
+			],
 			DECISIONS_SCHEMA,
 			{
 				maxAttempts:     cfg.shaper.structuredOutputRetries,
@@ -175,27 +138,151 @@ export async function runSharedDocDecisionTrace(
 		);
 		return {
 			type:  'doc.decision.trace',
-			topic,
+			topic: prepared.prepared.topic,
 			decisions: [],
 			notFoundNote:
-				`LLM extraction failed for topic "${topic}": ${(err as Error).message}. ` +
-				`Retrieved ${sections.length} sections but could not process them.`,
-			retrievedSectionCount: sections.length,
+				`LLM extraction failed for topic "${prepared.prepared.topic}": ${(err as Error).message}. ` +
+				`Retrieved ${prepared.prepared.retrievedSectionCount} sections but could not process them.`,
+			retrievedSectionCount: prepared.prepared.retrievedSectionCount,
 		};
 	}
 
-	// (4) Faithfulness check: drop any decision whose sourceEntityId
-	// isn't in the retrieved set. Prevents the LLM from inventing
-	// citations.
-	const validIds = new Set(hydrated.map(h => h.entityId));
+	return finalizeDocDecisionTrace(prepared.prepared, raw, args.runId, args.logContext);
+}
+
+// ---------------------------------------------------------------------------
+// prepare / finalize split (used by the multi-turn MCP handler so the
+// LLM call happens in the OUTER client's session instead of the
+// daemon's shaperProvider)
+// ---------------------------------------------------------------------------
+
+/** Deterministic-portion output preserved between prepare and finalize. */
+export interface DocDecisionTracePrepared {
+	readonly topic:                  string;
+	readonly retrievedSectionCount:  number;
+	readonly validEntityIds:         readonly string[];
+}
+
+interface HydratedSection {
+	readonly entityId: string;
+	readonly file:     string;
+	readonly heading:  string;
+	readonly body:     string;
+}
+
+interface DocDecisionTraceLLMOutput {
+	readonly topic:        string;
+	readonly decisions:    DocDecisionRecord[];
+	readonly notFoundNote: string;
+}
+
+/** Prepare result. Either a short-circuit ExplorationOutput (no
+ *  sections retrieved -- LLM call is not needed) or a payload the
+ *  caller emits to the outer LLM for structured output. */
+export type DocDecisionTracePrepareResult =
+	| {
+		readonly kind:         'short-circuit';
+		readonly shortCircuit: DocDecisionTraceOutput;
+	  }
+	| {
+		readonly kind:         'narrow-llm';
+		readonly systemPrompt: string;
+		readonly userTurn:     string;
+		readonly schema:       StructuredSchema;
+		readonly prepared:     DocDecisionTracePrepared;
+	  };
+
+export async function prepareDocDecisionTrace(
+	args: RunDocDecisionTraceArgs,
+): Promise<DocDecisionTracePrepareResult> {
+	const topic = args.topic.trim();
+	if (topic.length === 0) {
+		throw new Error('doc.decision.trace: topic is required (non-empty string)');
+	}
+	const maxSources = args.maxSources !== undefined
+		? Math.max(1, Math.min(30, args.maxSources))
+		: 15;
+
+	// (1) Retrieve. V1 = repo-scoped (single-repo closure).
+	const sections = await retrieveDocSections({
+		db:           args.db,
+		query:        topic,
+		closureRepos: [args.repoPath],
+		maxResults:   maxSources,
+		kinds:        ['document', 'section'],
+		previewChars: 0,
+	});
+
+	if (sections.length === 0) {
+		log.info(
+			{ runId: args.runId, topic, ctx: args.logContext },
+			'doc.decision.trace: no matching sections',
+		);
+		return {
+			kind: 'short-circuit',
+			shortCircuit: {
+				type:                  'doc.decision.trace',
+				topic,
+				decisions:             [],
+				notFoundNote:          `No doc sections in the retrieved corpus mention "${topic}".`,
+				retrievedSectionCount: 0,
+			},
+		};
+	}
+
+	// (2) Hydrate full bodies for the LLM extraction pass.
+	const hydrated: HydratedSection[] = [];
+	for (const s of sections) {
+		const entity = await getEntity(args.db, s.entityId);
+		if (entity === null) continue;
+		hydrated.push({
+			entityId: s.entityId,
+			file:     s.file,
+			heading:  s.heading,
+			body:     (entity.body ?? '').slice(0, 2_000),
+		});
+	}
+
+	const promptContent = loadPromptFile();
+	const messages = buildMessages(promptContent, topic, hydrated);
+	const systemMsg = messages[0]!.content as string;
+	const userMsg   = messages[1]!.content as string;
+
+	return {
+		kind:         'narrow-llm',
+		systemPrompt: systemMsg,
+		userTurn:     userMsg,
+		schema:       DECISIONS_SCHEMA,
+		prepared: {
+			topic,
+			retrievedSectionCount: sections.length,
+			validEntityIds:        hydrated.map(h => h.entityId),
+		},
+	};
+}
+
+/**
+ * Finalize the LLM output: apply the citation faithfulness filter
+ * against the retrieved entity set. `raw` is the JSON the outer LLM
+ * emitted against DECISIONS_SCHEMA.
+ */
+export function finalizeDocDecisionTrace(
+	prepared:   DocDecisionTracePrepared,
+	raw:        DocDecisionTraceLLMOutput,
+	runId?:     string,
+	logContext?: string,
+): DocDecisionTraceOutput {
+	// Faithfulness check: drop any decision whose sourceEntityId isn't
+	// in the retrieved set. Prevents the LLM from inventing citations.
+	const validIds = new Set(prepared.validEntityIds);
 	const filtered = raw.decisions.filter(d => validIds.has(d.sourceEntityId));
 
 	log.info(
 		{
-			runId:     args.runId,
-			ctx:       args.logContext,
-			topic,
-			retrieved: sections.length,
+			runId,
+			ctx:       logContext,
+			topic:     prepared.topic,
+			retrieved: prepared.retrievedSectionCount,
 			extracted: raw.decisions.length,
 			surviving: filtered.length,
 		},
@@ -204,10 +291,10 @@ export async function runSharedDocDecisionTrace(
 
 	return {
 		type:                  'doc.decision.trace',
-		topic,
+		topic:                 prepared.topic,
 		decisions:             filtered,
-		notFoundNote:          filtered.length === 0 ? (raw.notFoundNote || `No decisions on "${topic}" found in the retrieved sections.`) : '',
-		retrievedSectionCount: sections.length,
+		notFoundNote:          filtered.length === 0 ? (raw.notFoundNote || `No decisions on "${prepared.topic}" found in the retrieved sections.`) : '',
+		retrievedSectionCount: prepared.retrievedSectionCount,
 	};
 }
 

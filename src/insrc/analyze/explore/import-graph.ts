@@ -83,11 +83,14 @@ export async function runImportGraph(
 	const allEntities = await listEntitiesForRepo(db, ctx.repoPath);
 
 	// Collect File entities WITHIN `path`. Treat `path` as either a
-	// directory prefix or an exact file path.
+	// directory prefix or an exact file path. Drop stale entities
+	// under gitignored paths (out/, build/, dist/, ...) so we don't
+	// build the graph across the compiled twin of the source tree.
 	const inScopeFiles: Entity[] = [];
 	const pathWithSep = path.endsWith(sep) ? path : path + sep;
 	for (const e of allEntities) {
 		if (e.kind !== 'file') continue;
+		if (!ctx.ignoreFilter.isIncluded(e.file)) continue;
 		if (e.file === path || e.file.startsWith(pathWithSep)) {
 			inScopeFiles.push(e);
 		}
@@ -132,6 +135,7 @@ export async function runImportGraph(
 		const importerEntities = await getEntitiesByIds(db, importerIds);
 		for (const ie of importerEntities) {
 			if (ie.repo !== ctx.repoPath) continue;
+			if (!ctx.ignoreFilter.isIncluded(ie.file)) continue;
 			if (inScopePaths.has(ie.file)) continue;
 			importerCount.set(ie.file, (importerCount.get(ie.file) ?? 0) + 1);
 			totalIn += 1;
@@ -148,6 +152,7 @@ export async function runImportGraph(
 		const importeeEntities = await getEntitiesByIds(db, importeeIds);
 		for (const ie of importeeEntities) {
 			if (ie.repo !== ctx.repoPath) continue;
+			if (!ctx.ignoreFilter.isIncluded(ie.file)) continue;
 			if (inScopePaths.has(ie.file)) continue;
 			importeeCount.set(ie.file, (importeeCount.get(ie.file) ?? 0) + 1);
 			totalOut += 1;

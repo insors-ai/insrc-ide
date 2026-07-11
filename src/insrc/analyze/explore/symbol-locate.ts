@@ -124,6 +124,12 @@ export async function runSymbolLocate(
 		else matched = mergeUnique(matched, substringMatches);
 	}
 
+	// Drop stale entities under gitignored paths (out/, build/, dist/,
+	// ...). Otherwise a symbol defined in src/ shows up twice -- once
+	// from source, once from its compiled JS twin -- and the outer LLM
+	// cites the compiled file as if it were canonical.
+	matched = matched.filter(e => ctx.ignoreFilter.isIncluded(e.file));
+
 	// Cap + sort deterministically (by file:line for stable output).
 	matched.sort((a, b) => {
 		if (a.file !== b.file) return a.file.localeCompare(b.file);

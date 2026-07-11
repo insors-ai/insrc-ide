@@ -96,6 +96,10 @@ export async function runClassHierarchy(
 		// Prefer real definitions over test/spec doubles.
 		targets = targets.filter(e => e.artifact !== true);
 	}
+	// Drop targets that live under a currently-gitignored path.
+	// `class Extractor` compiled into out/insrc/ shouldn't resolve
+	// alongside the source `class Extractor` in src/insrc/.
+	targets = targets.filter(e => ctx.ignoreFilter.isIncluded(e.file));
 
 	if (targets.length === 0) {
 		log.info(
@@ -126,10 +130,14 @@ export async function runClassHierarchy(
 		const subclassIds    = await entityIdsByU64s(inheritsIn);
 		const implementerIds = await entityIdsByU64s(implementsIn);
 
-		const extendsEnts     = await hydrate(extendsIds);
-		const implementsEnts  = await hydrate(implementsIds);
-		const subclassEnts    = await hydrate(subclassIds);
-		const implementerEnts = await hydrate(implementerIds);
+		// Drop neighbors under gitignored paths so a compiled-JS class
+		// under out/ doesn't show up alongside the authored source
+		// class as a phantom subclass or implementer.
+		const includeE = (e: Entity): boolean => ctx.ignoreFilter.isIncluded(e.file);
+		const extendsEnts     = (await hydrate(extendsIds)).filter(includeE);
+		const implementsEnts  = (await hydrate(implementsIds)).filter(includeE);
+		const subclassEnts    = (await hydrate(subclassIds)).filter(includeE);
+		const implementerEnts = (await hydrate(implementerIds)).filter(includeE);
 
 		nodes.push({
 			entityId:  t.id,

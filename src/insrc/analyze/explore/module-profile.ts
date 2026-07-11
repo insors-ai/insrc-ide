@@ -129,7 +129,7 @@ export async function runModuleProfile(
 		return { type: 'module.profile', profile };
 	}
 
-	const profile = await profileDir(path, entities);
+	const profile = await profileDir(path, entities, ctx.ignoreFilter);
 	log.info(
 		{
 			runId:       ctx.runId,
@@ -150,7 +150,11 @@ export async function runModuleProfile(
 // Dir profile
 // ---------------------------------------------------------------------------
 
-async function profileDir(dir: string, entities: readonly Entity[]): Promise<ModuleProfile> {
+async function profileDir(
+	dir:      string,
+	entities: readonly Entity[],
+	ignoreFilter: import('../context/repo-ignore-filter.js').RepoIgnoreFilter,
+): Promise<ModuleProfile> {
 	// Immediate children (subdirs + files) via filesystem.
 	const subdirs: string[] = [];
 	const filesInDir: Array<{
@@ -166,6 +170,11 @@ async function profileDir(dir: string, entities: readonly Entity[]): Promise<Mod
 		if (IGNORE_DIRS.has(name)) continue;
 		if (name.startsWith('.') && name !== '.env.example') continue;
 		const full = join(dir, name);
+		// .gitignore-aware filter. See analyze/context/repo-ignore-
+		// filter.ts -- drops anything not tracked by git (out/, build/,
+		// dist/, target/, .next/, node_modules/, ...). Permissive for
+		// non-git repos, so the IGNORE_DIRS set above still guards.
+		if (!ignoreFilter.isIncluded(full)) continue;
 		let s;
 		try { s = statSync(full); }
 		catch { continue; }

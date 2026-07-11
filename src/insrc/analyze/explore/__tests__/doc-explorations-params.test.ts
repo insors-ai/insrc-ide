@@ -16,12 +16,14 @@ import { runDocMention }              from '../doc-mention.js';
 import { runDocDecisionTrace }        from '../doc-decision-trace.js';
 import { runDocConstraintEnumerate }  from '../doc-constraint-enumerate.js';
 import type { Exploration, ExplorationRunnerContext } from '../types.js';
+import { permissiveIgnoreFilter } from '../../context/repo-ignore-filter.js';
 
 const CTX: ExplorationRunnerContext = {
 	runId:        'test-run',
 	repoPath:     '/tmp/does-not-exist',
 	closureRepos: ['/tmp/does-not-exist'],
 	readDep:      () => undefined,
+	ignoreFilter: permissiveIgnoreFilter(),
 };
 
 function mkExp(type: Exploration['type'], params: Record<string, unknown>): Exploration {

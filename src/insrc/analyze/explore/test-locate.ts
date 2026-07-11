@@ -101,6 +101,9 @@ export async function runTestLocate(
 
 	for (const e of all) {
 		if (e.artifact === true) continue;
+		// Drop stale entities under gitignored paths so a compiled
+		// twin doesn't double-count as a matching test.
+		if (!ctx.ignoreFilter.isIncluded(e.file)) continue;
 		const inTestPath = TEST_PATH_RX.test(e.file);
 		const stemIsTest = TEST_STEM_RX.test(basename(e.file, extname(e.file)));
 

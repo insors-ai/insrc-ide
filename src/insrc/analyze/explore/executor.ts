@@ -26,8 +26,14 @@
 
 import { getCachedExploration, putCachedExploration } from '../../db/exploration-cache.js';
 import { getLogger } from '../../shared/logger.js';
+import type { StructuredSchema } from '../../shared/types.js';
+import { createRepoIgnoreFilter } from '../context/repo-ignore-filter.js';
 
-import { runCapabilityReuseCheck } from './capability-reuse-check.js';
+import {
+	prepareCapabilityReuseCheck,
+	finalizeCapabilityReuseCheck,
+	runCapabilityReuseCheck,
+} from './capability-reuse-check.js';
 import { runClassHierarchy } from './class-hierarchy.js';
 import { runConceptResolve } from './concept-resolve.js';
 import { runConfigTrace } from './config-trace.js';
@@ -36,8 +42,16 @@ import { runDataModelTrace } from './data-model-trace.js';
 import { runDbConnectionsList } from './db-connections-list.js';
 import { runDbTableDescribe } from './db-table-describe.js';
 import { runDbTablesList } from './db-tables-list.js';
-import { runDocConstraintEnumerate } from './doc-constraint-enumerate.js';
-import { runDocDecisionTrace } from './doc-decision-trace.js';
+import {
+	prepareDocConstraintEnumerate,
+	finalizeDocConstraintEnumerate,
+	runDocConstraintEnumerate,
+} from './doc-constraint-enumerate.js';
+import {
+	prepareDocDecisionTrace,
+	finalizeDocDecisionTrace,
+	runDocDecisionTrace,
+} from './doc-decision-trace.js';
 import { runDocMention } from './doc-mention.js';
 import { runFreeformProbe } from './freeform-probe.js';
 import { runImportGraph } from './import-graph.js';
@@ -47,6 +61,7 @@ import { runSearchText } from './search-text.js';
 import { runSymbolLocate } from './symbol-locate.js';
 import { runTestLocate } from './test-locate.js';
 import { runUsageExample } from './usage-example.js';
+import { getDb } from '../../db/client.js';
 import type {
 	ExecutedExploration,
 	ExecutedPlan,
@@ -118,6 +133,12 @@ export async function executePlan(args: ExecutePlanArgs): Promise<ExecutedPlan> 
 	const outputsById = new Map<string, ExplorationOutput>();
 	let totalCached = 0;
 
+	// One filter per plan execution. Shared across every runner via
+	// ExplorationRunnerContext so a single subprocess call to `git
+	// ls-files` powers .gitignore-aware directory filtering across
+	// the whole plan.
+	const ignoreFilter = createRepoIgnoreFilter(args.repoPath);
+
 	for (const originalExp of args.plan.explorations) {
 		const runnerStart = Date.now();
 
@@ -182,6 +203,7 @@ export async function executePlan(args: ExecutePlanArgs): Promise<ExecutedPlan> 
 						repoPath:     args.repoPath,
 						closureRepos: args.closureRepos,
 						readDep:      (id: string) => outputsById.get(id),
+						ignoreFilter,
 					};
 					output = await runner(exp, ctx);
 					if (cacheable) {
@@ -229,6 +251,342 @@ export async function executePlan(args: ExecutePlanArgs): Promise<ExecutedPlan> 
 		results,
 		totalMs,
 		totalCached,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Multi-turn step function (used by the `insrc_analyze_step` MCP tool
+// so narrow-LLM explorations pause out to the OUTER client's LLM
+// instead of firing daemon-side).
+//
+// Design shape:
+//   - `stepPlan` walks the plan in declared order (same as
+//     executePlan). Deterministic explorations run inline through the
+//     same RUNNERS registry + cache logic.
+//   - For a narrow-LLM exploration, we invoke the runner's
+//     `prepare(exp, ctx)` split. If prepare short-circuits, use the
+//     short-circuit output. Otherwise return { kind: 'pending', ... }
+//     with the prompt + schema the outer client's LLM should emit.
+//   - The multi-turn phase handler serialises the resulting state and
+//     hands prompt+schema to the outer client. On the next call it
+//     invokes `finalizeNarrow` with the raw LLM output + the prepared
+//     blob to produce the final ExplorationOutput, then re-enters
+//     stepPlan with the resume state to continue.
+// ---------------------------------------------------------------------------
+
+/** Which exploration types call an LLM internally (would pause out to
+ *  the outer client in multi-turn mode). Kept as a separate set so
+ *  `stepPlan` can detect them without an instanceof branch. */
+export const NARROW_LLM_TYPES: ReadonlySet<ExplorationType> = new Set([
+	'doc.decision.trace',
+	'doc.constraint.enumerate',
+	'capability.reuse-check',
+]);
+
+/** Uniform shape a narrow runner's prepare() returns. Mirrors each
+ *  runner's local `*PrepareResult` union but erases the specific
+ *  prepared-blob type so the executor can carry it opaquely. */
+export type NarrowPrepareResult =
+	| { readonly kind: 'short-circuit'; readonly shortCircuit: ExplorationOutput }
+	| {
+		readonly kind:         'narrow-llm';
+		readonly systemPrompt: string;
+		readonly userTurn:     string;
+		readonly schema:       StructuredSchema;
+		readonly prepared:     unknown;   // opaque; runner-specific
+	  };
+
+interface NarrowRunnerEntry {
+	readonly prepare:  (exp: Exploration, ctx: ExplorationRunnerContext) => Promise<NarrowPrepareResult>;
+	readonly finalize: (prepared: unknown, raw: unknown, runId?: string) => ExplorationOutput;
+}
+
+/** Registry of the three narrow-LLM runners' prepare/finalize splits.
+ *  Order-agnostic: keyed by exploration type. */
+const NARROW_RUNNERS: Partial<Record<ExplorationType, NarrowRunnerEntry>> = {
+	'doc.decision.trace': {
+		async prepare(exp, ctx) {
+			const params = exp.params as Record<string, unknown>;
+			const topic = typeof params['topic'] === 'string' ? params['topic'] : '';
+			return prepareDocDecisionTrace({
+				topic,
+				repoPath:  ctx.repoPath,
+				db:        await getDb(),
+				...(typeof params['maxSources'] === 'number' ? { maxSources: params['maxSources'] as number } : {}),
+				...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+				logContext: 'exploration',
+			});
+		},
+		finalize(prepared, raw, runId) {
+			return finalizeDocDecisionTrace(
+				prepared as Parameters<typeof finalizeDocDecisionTrace>[0],
+				raw      as Parameters<typeof finalizeDocDecisionTrace>[1],
+				runId,
+				'exploration',
+			);
+		},
+	},
+	'doc.constraint.enumerate': {
+		async prepare(exp, ctx) {
+			const params = exp.params as Record<string, unknown>;
+			const subject = typeof params['subject'] === 'string' ? params['subject'] : '';
+			return prepareDocConstraintEnumerate({
+				subject,
+				repoPath:  ctx.repoPath,
+				db:        await getDb(),
+				...(typeof params['maxSources'] === 'number' ? { maxSources: params['maxSources'] as number } : {}),
+				...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+				logContext: 'exploration',
+			});
+		},
+		finalize(prepared, raw, runId) {
+			return finalizeDocConstraintEnumerate(
+				prepared as Parameters<typeof finalizeDocConstraintEnumerate>[0],
+				raw      as Parameters<typeof finalizeDocConstraintEnumerate>[1],
+				runId,
+				'exploration',
+			);
+		},
+	},
+	'capability.reuse-check': {
+		async prepare(exp, ctx) {
+			return prepareCapabilityReuseCheck(exp, ctx);
+		},
+		finalize(prepared, raw, runId) {
+			// Prepare uses no llmSkipReason because the outer LLM is the
+			// only source. If raw is absent, tag it as "outer LLM
+			// returned nothing" so the finalize can emit the placeholder.
+			const skip = raw === null || raw === undefined ? 'outer LLM returned no verdict payload' : undefined;
+			return finalizeCapabilityReuseCheck(
+				prepared as Parameters<typeof finalizeCapabilityReuseCheck>[0],
+				raw as Parameters<typeof finalizeCapabilityReuseCheck>[1],
+				skip,
+				runId,
+			);
+		},
+	},
+};
+
+/** Structured public view of the narrow runners so the multi-turn
+ *  handler can look up prepare/finalize without importing every
+ *  runner file individually. */
+export function getNarrowRunner(type: ExplorationType): NarrowRunnerEntry | undefined {
+	return NARROW_RUNNERS[type];
+}
+
+/** Resume state carried across turns of the multi-turn loop. Held in
+ *  the encoded state blob between MCP calls. */
+export interface StepPlanResumeState {
+	/** Prior deterministic + short-circuit results, in declared order. */
+	readonly results: readonly ExecutedExploration[];
+	/** outputsById flattened to an array so it's JSON-safe. */
+	readonly outputs: ReadonlyArray<{ readonly id: string; readonly output: ExplorationOutput }>;
+	readonly totalCached: number;
+	readonly totalMsSoFar: number;
+}
+
+/** Continuation shape for a stepPlan pause -- carries every field the
+ *  multi-turn phase handler needs to (a) emit an emit_narrow response
+ *  and (b) resume on the next call. */
+export interface StepPlanPending {
+	readonly kind:            'pending';
+	readonly explorationId:   string;
+	readonly explorationType: ExplorationType;
+	readonly systemPrompt:    string;
+	readonly userTurn:        string;
+	readonly schema:          StructuredSchema;
+	readonly preparedBlob:    unknown;
+	/** Everything below is what the next stepPlan call needs to resume
+	 *  from AFTER the outer client returns the narrow LLM output. */
+	readonly resumeState:     StepPlanResumeState;
+	readonly elapsedForPause: number;
+}
+
+export interface StepPlanDone {
+	readonly kind:     'done';
+	readonly executed: ExecutedPlan;
+}
+
+export type StepPlanResult = StepPlanPending | StepPlanDone;
+
+/**
+ * Multi-turn analogue of `executePlan`. Runs the plan up to the first
+ * narrow-LLM exploration that would need the outer client's LLM,
+ * pauses there, and returns the prompt + schema for the client to
+ * satisfy. Deterministic explorations are executed identically to
+ * executePlan (same runner, same cache).
+ *
+ * `resumeState` (optional) carries prior-turn results. When provided,
+ * stepPlan seeds outputsById + results from it and continues from the
+ * next unprocessed exploration.
+ */
+export async function stepPlan(
+	args: ExecutePlanArgs & {
+		readonly resumeState?: StepPlanResumeState;
+	},
+): Promise<StepPlanResult> {
+	const runStart = Date.now();
+	const outputsById = new Map<string, ExplorationOutput>();
+	const results: ExecutedExploration[] = [];
+	let totalCached = 0;
+	let priorMs = 0;
+
+	if (args.resumeState !== undefined) {
+		for (const { id, output } of args.resumeState.outputs) {
+			outputsById.set(id, output);
+		}
+		for (const r of args.resumeState.results) results.push(r);
+		totalCached = args.resumeState.totalCached;
+		priorMs = args.resumeState.totalMsSoFar;
+	}
+
+	const ignoreFilter = createRepoIgnoreFilter(args.repoPath);
+
+	for (const originalExp of args.plan.explorations) {
+		// Skip explorations that already have an output from a prior
+		// turn (resume path).
+		if (outputsById.has(originalExp.id)) continue;
+
+		const runnerStart = Date.now();
+		const { exp, unmetPrerequisites } = substitutePlaceholders(originalExp, outputsById);
+
+		let output: ExplorationOutput = {
+			type: 'failed',
+			requested: exp.type,
+			errorCode: 'not-executed',
+			message: 'exploration was not executed (executor bug)',
+		};
+		let cached = false;
+
+		const runner = RUNNERS[exp.type];
+		if (runner === undefined) {
+			output = {
+				type: 'unsupported',
+				requested: exp.type,
+				reason: `V1 executor does not implement exploration type '${exp.type}'`,
+			};
+		} else if (unmetPrerequisites.length > 0) {
+			output = {
+				type: 'failed',
+				requested: exp.type,
+				errorCode: 'prerequisite-empty',
+				message:
+					`skipped: placeholder(s) [${unmetPrerequisites.join(', ')}] ` +
+					`resolved to empty/undefined against prior outputs. ` +
+					`The dependent exploration produced no data for these accessors.`,
+			};
+		} else if (NARROW_LLM_TYPES.has(exp.type) && NARROW_RUNNERS[exp.type] !== undefined) {
+			// Narrow-LLM exploration: try cache first (same key as
+			// executePlan), else prepare + pause.
+			const hit = await getCachedExploration(
+				args.repoPath, args.repoLastIndexedAtMs, exp,
+			);
+			if (hit !== null) {
+				output = hit;
+				cached = true;
+				totalCached += 1;
+			} else {
+				const narrow = NARROW_RUNNERS[exp.type]!;
+				const ctx: ExplorationRunnerContext = {
+					runId:        args.runId,
+					repoPath:     args.repoPath,
+					closureRepos: args.closureRepos,
+					readDep:      (id: string) => outputsById.get(id),
+					ignoreFilter,
+				};
+				const prep = await narrow.prepare(exp, ctx);
+				if (prep.kind === 'short-circuit') {
+					output = prep.shortCircuit;
+					await putCachedExploration(
+						args.repoPath, args.repoLastIndexedAtMs, exp, output,
+					);
+				} else {
+					// PAUSE: return the prompt + schema, encode enough
+					// resume state that the next call can pick up here.
+					const elapsedForPause = Date.now() - runnerStart;
+					return {
+						kind:            'pending',
+						explorationId:   exp.id,
+						explorationType: exp.type,
+						systemPrompt:    prep.systemPrompt,
+						userTurn:        prep.userTurn,
+						schema:          prep.schema,
+						preparedBlob:    prep.prepared,
+						resumeState: {
+							results,
+							outputs: [...outputsById.entries()].map(([id, out]) => ({ id, output: out })),
+							totalCached,
+							totalMsSoFar: priorMs + (Date.now() - runStart),
+						},
+						elapsedForPause,
+					};
+				}
+			}
+		} else {
+			// Deterministic path -- identical to executePlan.
+			const hit = await getCachedExploration(
+				args.repoPath, args.repoLastIndexedAtMs, exp,
+			);
+			if (hit !== null) {
+				output = hit;
+				cached = true;
+				totalCached += 1;
+			} else {
+				try {
+					const ctx: ExplorationRunnerContext = {
+						runId:        args.runId,
+						repoPath:     args.repoPath,
+						closureRepos: args.closureRepos,
+						readDep:      (id: string) => outputsById.get(id),
+						ignoreFilter,
+					};
+					output = await runner(exp, ctx);
+					await putCachedExploration(
+						args.repoPath, args.repoLastIndexedAtMs, exp, output,
+					);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					log.warn(
+						{ runId: args.runId, explorationId: exp.id, type: exp.type, err: msg },
+						'multi-turn exploration failed',
+					);
+					output = {
+						type:      'failed',
+						requested: exp.type,
+						errorCode: classifyExplorationError(err),
+						message:   msg,
+					};
+				}
+			}
+		}
+
+		const elapsedMs = Date.now() - runnerStart;
+		outputsById.set(exp.id, output);
+		results.push({ exploration: exp, output, cached, elapsedMs });
+	}
+
+	const totalMs = priorMs + (Date.now() - runStart);
+	log.info(
+		{
+			runId:       args.runId,
+			answerType:  args.plan.answerType,
+			total:       results.length,
+			cached:      totalCached,
+			failed:      results.filter(r => r.output.type === 'failed').length,
+			unsupported: results.filter(r => r.output.type === 'unsupported').length,
+			totalMs,
+		},
+		'stepPlan: multi-turn plan executed',
+	);
+
+	return {
+		kind: 'done',
+		executed: {
+			plan:        args.plan,
+			results,
+			totalMs,
+			totalCached,
+		},
 	};
 }
 

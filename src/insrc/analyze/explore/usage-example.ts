@@ -105,11 +105,16 @@ export async function runUsageExample(
 		const row = await getEntity(db, params.entityId);
 		if (row !== null) target = row;
 	} else {
-		const rows = await findEntitiesByName(
-			db,
-			[params.symbolName!],
-			{ repo: ctx.repoPath, kinds: targetKinds },
-		);
+		const rows = (
+			await findEntitiesByName(
+				db,
+				[params.symbolName!],
+				{ repo: ctx.repoPath, kinds: targetKinds },
+			)
+		)
+			// Drop stale entities under gitignored paths so the compiled
+			// twin doesn't hijack the usage-example resolution.
+			.filter(r => ctx.ignoreFilter.isIncluded(r.file));
 		ambiguousCandidates = rows.length;
 		if (rows.length > 0) {
 			// Prefer the non-artefact / non-test-path candidate.

@@ -93,6 +93,9 @@ export async function runManifestsLocate(
 	for (const e of all) {
 		if (e.artifact !== true) continue;
 		if (!isManifestCandidate(e)) continue;
+		// Drop stale entities under gitignored paths so a docker-
+		// compose.yml copied into out/ doesn't double-count.
+		if (!ctx.ignoreFilter.isIncluded(e.file)) continue;
 		if (seen.has(e.file)) continue;
 		seen.add(e.file);
 

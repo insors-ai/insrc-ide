@@ -764,6 +764,12 @@ export interface ExplorationRunnerContext {
 	 *  when the id doesn't resolve (should not happen if the
 	 *  decomposer emitted a valid dependsOn). */
 	readonly readDep: (id: string) => ExplorationOutput | undefined;
+	/** Repo-scoped `.gitignore` filter. Runners that walk the
+	 *  filesystem via readdirSync MUST consult this before yielding
+	 *  paths so build artefacts (out/, dist/, target/, .next/, ...)
+	 *  don't leak into structural bundles. See
+	 *  analyze/context/repo-ignore-filter.ts. */
+	readonly ignoreFilter: import('../context/repo-ignore-filter.js').RepoIgnoreFilter;
 }
 
 export type ExplorationRunner = (

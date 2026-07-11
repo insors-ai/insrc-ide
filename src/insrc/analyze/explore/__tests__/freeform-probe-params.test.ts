@@ -10,12 +10,14 @@ import assert from 'node:assert/strict';
 
 import { runFreeformProbe } from '../freeform-probe.js';
 import type { Exploration, ExplorationRunnerContext } from '../types.js';
+import { permissiveIgnoreFilter } from '../../context/repo-ignore-filter.js';
 
 const CTX: ExplorationRunnerContext = {
 	runId:        'test-run',
 	repoPath:     '/tmp/does-not-exist-phase6-root',
 	closureRepos: ['/tmp/does-not-exist-phase6-root'],
 	readDep:      () => undefined,
+	ignoreFilter: permissiveIgnoreFilter(),
 };
 
 function mkExp(params: Record<string, unknown>): Exploration {

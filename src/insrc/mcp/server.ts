@@ -41,6 +41,7 @@ import { buildRun } from '../daemon/analyze-rpc.js';
 import { runWithSamplerContext } from '../analyze/context/shaper-provider.js';
 import { getLogger } from '../shared/logger.js';
 
+import { handleAnalyzeStep } from './analyze-step/handler.js';
 import { renderBundleAsMarkdown } from './bundle-md.js';
 import { makeSamplerFromMcpServer } from './sampling-bridge.js';
 
@@ -120,15 +121,18 @@ export function buildInsrcMcpServer(): McpServer {
 		{
 			title: 'insrc analyze',
 			description:
-				'ALWAYS call this tool FIRST when the user asks about a ' +
-				'repository\'s code structure, conventions, adherence to ' +
-				'rules, existing capabilities, or design decisions. Runs the ' +
-				'insrc analyze framework which walks the indexed code graph + ' +
-				'emits a verified, citation-grounded 7-layer bundle (system, ' +
-				'focus, summary, structure, surface, artefacts, upstream). ' +
-				'Deterministic and cited -- MORE accurate than manual ' +
-				'grep + read for context questions.\n\n' +
-				'Prefer this over Read/Grep/Glob for:\n' +
+				'One-shot analyze: runs the full insrc pipeline server-side and ' +
+				'returns a verified, citation-grounded 7-layer bundle (system, ' +
+				'focus, summary, structure, surface, artefacts, upstream) in a ' +
+				'single tool call. Prefer this variant for STRUCTURAL-MAP ' +
+				'questions (module maps, tree layout, entity counts) where no ' +
+				'narrow-LLM reasoning is needed; inner LLM calls (if any) go to ' +
+				'the daemon\'s configured shaperProvider (Ollama by default).\n\n' +
+				'For adherence-check, capability-discovery, or prose-retrieval ' +
+				'intents, prefer the sibling tool `insrc_analyze_step` -- it ' +
+				'hands narrow-LLM reasoning to YOUR model in-session (better ' +
+				'accuracy, no subprocess spawns, no separate billing).\n\n' +
+				'Prefer either analyze tool over Read/Grep/Glob for:\n' +
 				'  - "map / explore <module>"\n' +
 				'  - "does the codebase already do <X>?"\n' +
 				'  - "how does <Y> work?"\n' +
@@ -137,12 +141,8 @@ export function buildInsrcMcpServer(): McpServer {
 				'  - "list every registered <data source | infra manifest>"\n' +
 				'  - Any question where you\'d otherwise grep + read to answer.\n\n' +
 				'Call again with a narrower `focus` to drill down. Fall back ' +
-				'to Read/Grep/Glob only when this tool returns an empty or ' +
-				'clearly off-topic bundle. When the client supports MCP ' +
-				'sampling, inner LLM calls (decomposer, synthesizer, narrow-' +
-				'LLM explorations) route back to the client\'s own model in ' +
-				'the same session; otherwise the daemon\'s configured ' +
-				'shaperProvider handles them.',
+				'to Read/Grep/Glob only when the tool returns an empty or ' +
+				'clearly off-topic bundle.',
 			annotations: {
 				readOnlyHint:   true,
 				idempotentHint: false,   // running twice can pick a new plan; not idempotent
@@ -159,6 +159,141 @@ export function buildInsrcMcpServer(): McpServer {
 			};
 			return handleAnalyze(server, args);
 		},
+	);
+
+	// -------------------------------------------------------------------
+	// insrc_analyze_step -- multi-turn variant (plans/mcp-multi-turn-
+	// analyze.md). Runs alongside the one-shot tool; the client picks
+	// which to invoke. The multi-turn form keeps every LLM reasoning
+	// turn in the outer client's session, so no subprocess spawn / no
+	// sampling dependency. Phase A supports structural-map fully;
+	// narrow-LLM recipes (adherence-check, prose-retrieval, capability-
+	// discovery) still fire their inner LLM calls through the daemon's
+	// shaperProvider until Phase B lands.
+	// -------------------------------------------------------------------
+	server.registerTool(
+		'insrc_analyze_step',
+		{
+			title: 'insrc analyze (multi-turn)',
+			description:
+				'Phase-driven multi-turn context analyzer. Alternative to ' +
+				'`insrc_analyze` for clients that want to keep every LLM ' +
+				'reasoning turn in-session (no subprocess spawn, no MCP sampling ' +
+				'required). Use when:\n\n' +
+				'  - The user asks about a repository\'s code structure, ' +
+				'conventions, adherence, reuse candidates, or design decisions.\n' +
+				'  - You want to answer using the citation-grounded analyze ' +
+				'framework rather than manual grep + read.\n\n' +
+				'Multi-turn loop:\n\n' +
+				'  1. Call phase=\'start\' with the user\'s focus. Server returns\n' +
+				'     { next: \'emit_plan\', prompt, schema, state }.\n' +
+				'  2. Follow the prompt to emit a JSON object matching the schema\n' +
+				'     (the ExplorationPlan). Then call phase=\'plan\' with your\n' +
+				'     plan + state.\n' +
+				'  3. If the server returns { next: \'emit_narrow\', prompt, schema,\n' +
+				'     state, explorationId }, emit the JSON matching the schema and\n' +
+				'     call phase=\'narrow\' with your JSON + explorationId + state.\n' +
+				'     Repeat until the server returns emit_bundle instead.\n' +
+				'  4. Server returns { next: \'emit_bundle\', prompt, schema, state }.\n' +
+				'     Emit the bundle JSON, then call phase=\'bundle\' with your\n' +
+				'     bundle + state.\n' +
+				'  5. Server returns { next: \'done\', markdown } -- render this\n' +
+				'     to the user.\n\n' +
+				'The `guidance` field on each response explains what to do next ' +
+				'in one sentence; the `prompt` + `schema` fields are the ' +
+				'authoritative instructions. Preserve `state` verbatim between ' +
+				'calls.',
+			annotations: {
+				readOnlyHint:   true,
+				idempotentHint: false,
+				openWorldHint:  false,
+			},
+			inputSchema: {
+				phase: z.enum(['start', 'plan', 'narrow', 'bundle'])
+					.describe(
+						'Which turn of the loop this call carries. Start a new run ' +
+						'with `start`, then walk through `plan` -> optional ' +
+						'`narrow` (one or more) -> `bundle`. The `narrow` phase is ' +
+						'ONLY needed when the prior response was next="emit_narrow"; ' +
+						'the server tells you which via the `next` field.',
+					),
+				// start-only inputs
+				focus: z.string().min(1)
+					.describe('Only for phase=start. Natural-language framing of what to analyze.')
+					.optional(),
+				repo: z.string()
+					.describe('Only for phase=start. Absolute repo path; falls back to INSRC_REPO env.')
+					.optional(),
+				target: z.enum(['code', 'docs', 'data', 'infra', 'generic'])
+					.describe('Only for phase=start. Optional target hint.')
+					.optional(),
+				scope: z.enum(['XS', 'S', 'M', 'L', 'XL'])
+					.describe('Only for phase=start. Optional scope bucket.')
+					.optional(),
+				// plan-phase inputs. We type this loosely as an object with
+				// the three known top-level fields; ajv still runs a strict
+				// pass server-side. Untyped `z.unknown()` compiles to a
+				// JSON schema with NO `type` field, which Claude Code's
+				// tool-call validator refuses to emit -- observed live on
+				// 2026-06-23 when Claude reported "parameter validation is
+				// blocking structured plan submission" after repeated
+				// retries at phase=start.
+				plan: z.object({
+					answerType:    z.string(),
+					synthesisHint: z.string(),
+					explorations:  z.array(z.record(z.string(), z.unknown())),
+				})
+					.passthrough()
+					.describe(
+						'Only for phase=plan. The ExplorationPlan JSON your LLM ' +
+						'emitted from the prior emit_plan response.',
+					)
+					.optional(),
+				// narrow-phase inputs. Explicit object so the outer LLM's
+				// tool-call validator has a shape to satisfy.
+				narrow: z.record(z.string(), z.unknown())
+					.describe(
+						'Only for phase=narrow. The JSON your LLM emitted matching ' +
+						'the schema from the prior emit_narrow response (finalizes ' +
+						'one narrow-LLM exploration).',
+					)
+					.optional(),
+				explorationId: z.string()
+					.describe(
+						'Only for phase=narrow. Echo the explorationId from the ' +
+						'prior emit_narrow response so the server can cross-check ' +
+						'which exploration this narrow output finalizes.',
+					)
+					.optional(),
+				// bundle-phase inputs. Same reasoning: give a typed object
+				// with the seven bundle layer keys so the outer LLM's
+				// tool-call validator has a shape to satisfy.
+				bundle: z.object({
+					system:    z.string(),
+					focus:     z.string(),
+					summary:   z.string(),
+					structure: z.string(),
+					surface:   z.string(),
+					artefacts: z.string(),
+					upstream:  z.string(),
+				})
+					.passthrough()
+					.describe(
+						'Only for phase=bundle. The AnalyzeContextBundle JSON your ' +
+						'LLM emitted from the prior emit_bundle response.',
+					)
+					.optional(),
+				// carried state
+				state: z.string()
+					.describe(
+						'Opaque continuation token from the prior tool response. ' +
+						'Required for phase=\'plan\' and phase=\'bundle\'; server ' +
+						'generates it on phase=\'start\'.',
+					)
+					.optional(),
+			},
+		},
+		async (rawArgs, _extra) => handleAnalyzeStep(rawArgs),
 	);
 
 	return server;

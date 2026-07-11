@@ -10,12 +10,14 @@ import assert from 'node:assert/strict';
 
 import { runSearchText } from '../search-text.js';
 import type { Exploration, ExplorationRunnerContext } from '../types.js';
+import { permissiveIgnoreFilter } from '../../context/repo-ignore-filter.js';
 
 const CTX: ExplorationRunnerContext = {
 	runId:        'test-run',
 	repoPath:     '/tmp/does-not-exist-scope-root',
 	closureRepos: ['/tmp/does-not-exist-scope-root'],
 	readDep:      () => undefined,
+	ignoreFilter: permissiveIgnoreFilter(),
 };
 
 function mkExp(params: Record<string, unknown>): Exploration {
