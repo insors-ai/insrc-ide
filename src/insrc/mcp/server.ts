@@ -304,6 +304,24 @@ export function buildInsrcMcpServer(): McpServer {
  * closes. Used by `bin/insrc-mcp`.
  */
 export async function runInsrcMcpStdio(): Promise<void> {
+	// Register the unified tool set + data drivers BEFORE serving any
+	// tool call. The analyze framework's freeform.probe fallback needs
+	// the read-only tool surface at runtime; without this the shaper
+	// crashes with ReadOnlyToolRegistryMismatch listing every allow-
+	// listed tool as unregistered (observed 2026-07-11 when the docs
+	// adherence-check plan fell back to freeform.probe on the Ollama
+	// path). Mirrors what the main daemon does at boot -- see
+	// daemon/index.ts phase 6b/6c.
+	const [
+		{ registerBuiltinTools },
+		{ registerBuiltinDataDrivers },
+	] = await Promise.all([
+		import('../daemon/tools/builtins/index.js'),
+		import('../daemon/db/drivers/index.js'),
+	]);
+	registerBuiltinTools();
+	registerBuiltinDataDrivers();
+
 	const server = buildInsrcMcpServer();
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
