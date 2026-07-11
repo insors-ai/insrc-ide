@@ -1,6 +1,15 @@
 import { writeFileSync, readFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { PATHS } from '../shared/paths.js';
-import { ensureEmbeddingModel, isOllamaAvailable } from '../indexer/embedder.js';
+import {
+  EMBEDDING_DIM,
+  ensureEmbeddingModel,
+  isConfiguredEmbeddingModelInstalled,
+  isOllamaAvailable,
+  isOnnxEmbedderAvailable,
+  ONNX_EMBEDDING_DIM,
+  ONNX_EMBEDDING_MODEL,
+  setActiveEmbedderBackend,
+} from '../indexer/embedder.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('daemon');
@@ -62,36 +71,101 @@ export function isAlreadyRunning(): boolean {
 // ---------------------------------------------------------------------------
 
 export interface ModelBootstrapState {
-  status: 'checking' | 'pulling' | 'ready' | 'unavailable';
-  pct?:   number;
+  /** `ready` covers both Ollama-ready and ONNX-ready (see `backend`).
+   *  `disabled` fires when the ONNX fallback was picked but the config's
+   *  `embeddingDim` doesn't match ONNX_EMBEDDING_DIM — in that case the
+   *  daemon boots + serves deterministic queries, but every embed call
+   *  returns [] and every Lance vector op silently no-ops. */
+  status:  'checking' | 'pulling' | 'ready' | 'unavailable' | 'disabled';
+  backend: 'ollama' | 'onnx' | 'unknown' | 'disabled';
+  /** Ollama pull progress percentage. Only set while status='pulling'. */
+  pct?:    number;
+  /** Human-readable reason set on `disabled` to help the user act. */
+  reason?: string;
 }
 
-let modelState: ModelBootstrapState = { status: 'checking' };
+let modelState: ModelBootstrapState = { status: 'checking', backend: 'unknown' };
 
 export function getModelState(): ModelBootstrapState { return modelState; }
 
 /**
- * Check Ollama availability and pull the embedding model if missing.
- * Non-blocking — sets modelState for callers to inspect via getModelState().
- * If Ollama is not reachable, logs a warning and sets status = 'unavailable'.
+ * Pick the embedding backend and prepare it.
+ *
+ * Decision tree:
+ *   1. Ollama reachable AND configured embedding model installed → use
+ *      Ollama.
+ *   2. Ollama reachable, model NOT installed → pull the model, then use
+ *      Ollama. (Same behaviour as v0.)
+ *   3. Ollama NOT reachable → fall back to the in-process ONNX embedder
+ *      (nomic-embed-text-v1.5, 768-dim). If the config's embeddingDim
+ *      is anything other than 768 we can't safely write to the existing
+ *      Lance schema, so we set backend='disabled' and log a clear
+ *      recovery path.
+ *
+ * Non-blocking (called with `void` at boot). Sets `modelState` and the
+ * embedder module's active backend so subsequent embed calls dispatch
+ * correctly.
  */
 export async function bootstrapEmbeddingModel(): Promise<void> {
-  const available = await isOllamaAvailable();
-  if (!available) {
-    modelState = { status: 'unavailable' };
-    log.warn('Ollama not reachable — embeddings will be disabled until available');
+  const ollamaUp = await isOllamaAvailable();
+
+  if (ollamaUp) {
+    const installed = await isConfiguredEmbeddingModelInstalled();
+    if (installed) {
+      setActiveEmbedderBackend('ollama');
+      modelState = { status: 'ready', backend: 'ollama' };
+      log.info('embedder backend: ollama (model already installed)');
+      return;
+    }
+    // Ollama reachable but the model isn't installed → try to pull.
+    try {
+      modelState = { status: 'pulling', backend: 'ollama', pct: 0 };
+      await ensureEmbeddingModel(pct => {
+        modelState = { status: 'pulling', backend: 'ollama', pct };
+      });
+      setActiveEmbedderBackend('ollama');
+      modelState = { status: 'ready', backend: 'ollama' };
+      log.info('embedder backend: ollama (model pulled)');
+      return;
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'Ollama model pull failed; attempting ONNX fallback');
+      // fall through to ONNX
+    }
+  } else {
+    log.info('Ollama not reachable; falling back to in-process ONNX embedder');
+  }
+
+  // Fallback: ONNX in-process embedder.
+  const onnxOk = await isOnnxEmbedderAvailable();
+  if (!onnxOk) {
+    setActiveEmbedderBackend('unknown');
+    modelState = {
+      status: 'unavailable', backend: 'unknown',
+      reason: 'Ollama not reachable AND ONNX embedder failed to load; embeddings disabled.',
+    };
+    log.error(modelState.reason);
     return;
   }
 
-  try {
-    modelState = { status: 'pulling', pct: 0 };
-    await ensureEmbeddingModel(pct => {
-      modelState = { status: 'pulling', pct };
-    });
-    modelState = { status: 'ready' };
-    log.info('embedding model ready');
-  } catch (err) {
-    log.error({ err }, 'failed to bootstrap embedding model');
-    modelState = { status: 'unavailable' };
+  // ONNX loaded. Reconcile against the Lance schema dim baked in from
+  // config at module init time. Existing Lance tables carry that dim.
+  if (EMBEDDING_DIM !== ONNX_EMBEDDING_DIM) {
+    const reason =
+      `ONNX fallback picked but config embeddingDim=${EMBEDDING_DIM} != ` +
+      `${ONNX_EMBEDDING_MODEL}'s ${ONNX_EMBEDDING_DIM}. ` +
+      `Vector search + writes DISABLED. To enable: either (a) start Ollama with the ` +
+      `configured model, or (b) update ~/.insrc/config.json ` +
+      `(models.providers.local.embeddingModel="${ONNX_EMBEDDING_MODEL}", ` +
+      `models.providers.local.embeddingDim=${ONNX_EMBEDDING_DIM}), ` +
+      `rm -rf ~/.insrc/lance, and re-add repos.`;
+    setActiveEmbedderBackend('disabled');
+    modelState = { status: 'disabled', backend: 'disabled', reason };
+    log.error({ configDim: EMBEDDING_DIM, onnxDim: ONNX_EMBEDDING_DIM }, reason);
+    return;
   }
+
+  // ONNX + dim match → all vector ops route through nomic.
+  setActiveEmbedderBackend('onnx');
+  modelState = { status: 'ready', backend: 'onnx' };
+  log.info({ model: ONNX_EMBEDDING_MODEL, dim: ONNX_EMBEDDING_DIM }, 'embedder backend: onnx');
 }

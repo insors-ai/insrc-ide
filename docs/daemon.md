@@ -51,21 +51,64 @@ The daemon does **not**:
   `.gitignore` awareness).
 - **~500 MB free disk** for `~/.insrc/` (grows with indexed repo
   size — see [Data + config layout](#data--config-layout)).
-- **Ollama** installed and running on `http://localhost:11434`
-  if you want local LLM + embedding calls. Not strictly required
-  at boot — the daemon starts fine without it and reports
-  `model: unavailable` — but every analyze pipeline that touches
-  the shaper (adherence-check, prose-retrieval, capability-
-  discovery) needs Ollama or a `claude`/`codex` CLI subprocess to
-  do the narrow-LLM step.
+- **Ollama is OPTIONAL.** The daemon auto-detects Ollama at boot;
+  if it's not reachable (or the configured embedding model isn't
+  installed), the daemon falls back to an **in-process ONNX
+  embedder** — `nomic-embed-text-v1.5` at 768-dim, ~140 MB
+  quantised weights downloaded once to `~/.insrc/models/hf-cache`
+  on first use. Vector search and doc retrieval keep working.
 
-Recommended Ollama models:
+You can run in one of three modes:
+
+| Mode | Embedder | Shaper narrow-LLM | Best for |
+| :--- | :--- | :--- | :--- |
+| Full Ollama | qwen3-embedding via Ollama | qwen3.6 via Ollama (`shaperProvider: ollama`) | Local, offline, no CLI OAuth session |
+| Hybrid | qwen3-embedding via Ollama | Claude Code / Codex session (`shaperProvider: cli-claude` / `cli-codex`, or via multi-turn `insrc_analyze_step`) | Best quality — big shaper LLM lives in the CLI |
+| ONNX-only | nomic-embed-text-v1.5 in-process | Claude Code / Codex session (multi-turn only) | Minimal footprint — no Ollama install |
+
+Recommended Ollama models (full or hybrid mode only):
 
 ```
 ollama pull qwen3-embedding:0.6b     # embeddings (~700 MB)
 ollama pull qwen3-coder:latest       # core / indexer  (~10 GB)
 ollama pull qwen3.6:35b-a3b          # analyze shaper (~20 GB, optional if you're only using cli-claude / cli-codex)
 ```
+
+### Choosing ONNX-only mode
+
+For ONNX-only mode, no Ollama install needed — the daemon boots,
+detects Ollama is absent, and initialises the ONNX embedder
+automatically. **BUT** the default `config.json` targets Ollama's
+qwen3-embedding at 1024-dim, and ONNX (nomic) is 768-dim. On
+first-time install this is fine (empty Lance store, no schema to
+mismatch). If you're migrating an existing install from Ollama to
+ONNX, update `~/.insrc/config.json` first:
+
+```json
+{
+  "models": {
+    "providers": {
+      "local": {
+        "embeddingModel": "nomic-ai/nomic-embed-text-v1.5",
+        "embeddingDim":   768
+      }
+    }
+  }
+}
+```
+
+Then wipe the Lance store and reindex:
+
+```bash
+~/.insrc/daemon/scripts/daemon-ctl.sh stop
+rm -rf ~/.insrc/lance
+~/.insrc/daemon/scripts/daemon-ctl.sh start
+# then repo remove + repo add for each registered repo
+```
+
+If you skip the migration, the daemon boots into `disabled` state
+for vector operations (deterministic queries still work) and
+logs a clear error explaining the dim mismatch + recovery steps.
 
 ---
 
