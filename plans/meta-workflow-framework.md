@@ -345,29 +345,43 @@ generality is visible.
 - **Handoff to design.** Whole Epic + list of approved Stories.
   Design consumes ONE Story at a time (see below).
 
-### design
+### design (two tiers: HLD + LLD)
 
-- **Produces.** Design doc **for a single Story**.
-- **Inputs.** The Epic artifact + the chosen Story id.
-- **Steps (illustrative).**
-  - `analyze.query` — capability-discovery on the Story's domain
-    ("does the codebase already solve this?").
-  - `analyze.query` — structural-map on the module the change will
-    live in.
-  - `alternatives.enumerate` — LLM. Emits 2-4 design alternatives
-    with pros/cons/costs.
-  - `alternatives.judge` — LLM. Scores alternatives against the
-    Story's constraints. Returns a ranked verdict.
-  - `chosen.contract` — LLM. Writes the API contract + data model
-    for the winning alternative.
-  - `rollout.sketch` — LLM. Writes the rollout plan (phases,
-    migrations, backward compat, feature flag or none).
-  - `checklist.verify` — LLM, forced.
-- **Artifact.** `docs/designs/<epic-slug>/<story-id>.md` + `.json`.
-- **Handoff to plan.** Chosen contracts + rollout sketch.
-- **Concurrent stories.** Nothing prevents `design` from running on
-  Story A while a human is still reviewing Story B's design. The
-  gate is per-Story.
+`design` splits into two modes matching the industry-standard
+HLD / LLD (or *system design* / *component design*) split. Both
+modes are the same fine-grained recipe pattern at different
+altitudes; both use the same synthesizer scaffolding.
+
+- **`design.epic` (HLD)** — one HLD per Epic. Framework choice,
+  shared contracts, cross-Story concerns, non-functional
+  properties, Story boundaries. Runs FIRST, before any LLD.
+- **`design.story` (LLD)** — one LLD per Story. Detailed API,
+  data model, error paths, test strategy for that Story
+  operating WITHIN the framework the HLD established.
+
+The gate contract enforces order: LLD requires an approved HLD +
+approved Epic; HLD requires an approved Epic. Once HLD is
+approved, LLDs for independent Stories can run in parallel.
+
+- **Produces.**
+  - HLD: `docs/designs/<epic-slug>/_hld.md` + `.json`.
+  - LLD: `docs/designs/<epic-slug>/<story-id>.md` + `.json`.
+- **Inputs.**
+  - HLD: the whole Epic (all Stories, all constraints).
+  - LLD: one Story + the approved HLD + the Epic.
+- **Steps.** See `workflow-design.md` for the full recipe. Both
+  modes share the alternatives → judge → detail pattern.
+- **Handoff to plan.**
+  - Plan reads BOTH the HLD (for cross-cutting choices — libraries,
+    patterns, shared infra) AND the specific Story's LLD (for
+    what to task-ify). Task-level ordering respects the Story
+    dependency graph from define.
+- **Concurrent stories.** Multiple LLDs run in parallel once HLD
+  is approved. The gate is per-Story.
+- **Back-flow.** An LLD run may discover the HLD was wrong. It
+  emits a back-flow signal targeting HLD; the human decides
+  whether to redo the HLD (invalidating other in-progress LLDs)
+  or record the finding as an HLD open question.
 
 ### plan
 
