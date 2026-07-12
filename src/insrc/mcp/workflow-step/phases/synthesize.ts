@@ -15,7 +15,8 @@
 
 import { getLogger } from '../../../shared/logger.js';
 import { finalizeArtifact } from '../../../workflow/orchestrator.js';
-import { defineArtifactPaths, hldArtifactPaths, stubArtifactPaths, writeAtomic, appendRunLog } from '../../../workflow/storage.js';
+import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths, stubArtifactPaths, writeAtomic, appendRunLog } from '../../../workflow/storage.js';
+import type { WorkflowIntent } from '../../../workflow/types.js';
 import { assertStage, decodeState } from '../state.js';
 import { releaseState } from '../state-store.js';
 import type {
@@ -52,7 +53,7 @@ export async function handleSynthesize(
 		const code = failure.ok ? 'synthesize-unknown' : `synthesize-${failure.kind}`;
 		return errorResult(code, formatFailure(failure), true);
 	}
-	const paths = pathsForWorkflow(state.intent.workflow, state.intent.repoPath, state.slug);
+	const paths = pathsForWorkflow(state.intent, state.slug);
 	writeAtomic(paths.md,   result.finalized.renderedMd);
 	writeAtomic(paths.json, result.finalized.renderedJson);
 	appendRunLog(state.slug, state.intent.workflow, state.runId, {
@@ -76,14 +77,22 @@ export async function handleSynthesize(
 }
 
 function pathsForWorkflow(
-	workflow: string,
-	repoPath: string,
-	slug:     string,
+	intent: WorkflowIntent,
+	slug:   string,
 ): { readonly md: string; readonly json: string } {
+	const { workflow, repoPath } = intent;
 	if (workflow === 'stub')        return stubArtifactPaths(repoPath, slug);
 	if (workflow === 'define')      return defineArtifactPaths(repoPath, slug);
 	if (workflow === 'design.epic') {
 		const { md, json } = hldArtifactPaths(repoPath, slug);
+		return { md, json };
+	}
+	if (workflow === 'design.story') {
+		const storyId = intent.params['storyId'];
+		if (typeof storyId !== 'string' || storyId.length === 0) {
+			throw new Error(`design.story synthesize requires params.storyId`);
+		}
+		const { md, json } = lldArtifactPaths(repoPath, slug, storyId);
 		return { md, json };
 	}
 	throw new Error(`pathsForWorkflow: workflow '${workflow}' not yet supported`);

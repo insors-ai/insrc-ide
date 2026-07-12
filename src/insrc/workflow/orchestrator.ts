@@ -48,7 +48,21 @@ import {
 	renderHldMarkdown,
 	type HldArtifact,
 } from './artifacts/hld.js';
-import { requireApprovedEpic } from './gates.js';
+import {
+	checkAcceptanceMapping,
+	checkApiSignaturesTypeLevel,
+	checkImplementOwnership,
+	checkSharedContractRefs,
+	computeHldEffectiveHash,
+	extractHldContextSlice,
+	isCitationArray as isLldCitationArray,
+	isLldBody,
+	LLD_SCHEMA_VERSION,
+	renderLldMarkdown,
+	type LldArtifact,
+	type LldBody,
+} from './artifacts/lld.js';
+import { requireApprovedEpic, requireApprovedHld } from './gates.js';
 
 const log = getLogger('workflow:orchestrator');
 
@@ -67,9 +81,10 @@ export interface DecomposerPrompt {
  *  hands it to `executor.startRun`. */
 export function prepareDecompose(intent: WorkflowIntent): DecomposerPrompt {
 	switch (intent.workflow) {
-		case 'stub':        return stubDecomposer(intent);
-		case 'define':      return defineDecomposer(intent);
-		case 'design.epic': return designEpicDecomposer(intent);
+		case 'stub':         return stubDecomposer(intent);
+		case 'define':       return defineDecomposer(intent);
+		case 'design.epic':  return designEpicDecomposer(intent);
+		case 'design.story': return designStoryDecomposer(intent);
 		default:
 			throw new Error(`prepareDecompose: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -132,9 +147,10 @@ export function prepareSynthesize(
 	stepOutputs: Readonly<Record<string, unknown>>,
 ): SynthesizerPrompt {
 	switch (intent.workflow) {
-		case 'stub':        return stubSynthesizer(intent, stepOutputs);
-		case 'define':      return defineSynthesizer(intent, stepOutputs);
-		case 'design.epic': return designEpicSynthesizer(intent, stepOutputs);
+		case 'stub':         return stubSynthesizer(intent, stepOutputs);
+		case 'define':       return defineSynthesizer(intent, stepOutputs);
+		case 'design.epic':  return designEpicSynthesizer(intent, stepOutputs);
+		case 'design.story': return designStorySynthesizer(intent, stepOutputs);
 		default:
 			throw new Error(`prepareSynthesize: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -226,9 +242,10 @@ export function finalizeArtifact(
 	llmResponse:  Record<string, unknown>,
 ): FinalizeResult {
 	switch (intent.workflow) {
-		case 'stub':        return finalizeStub(intent, stepOutputs, runId, elapsedMs, llmResponse);
-		case 'define':      return finalizeDefine(intent, stepOutputs, runId, elapsedMs, llmResponse);
-		case 'design.epic': return finalizeDesignEpic(intent, stepOutputs, runId, elapsedMs, llmResponse);
+		case 'stub':         return finalizeStub(intent, stepOutputs, runId, elapsedMs, llmResponse);
+		case 'define':       return finalizeDefine(intent, stepOutputs, runId, elapsedMs, llmResponse);
+		case 'design.epic':  return finalizeDesignEpic(intent, stepOutputs, runId, elapsedMs, llmResponse);
+		case 'design.story': return finalizeDesignStory(intent, stepOutputs, runId, elapsedMs, llmResponse);
 		default:
 			throw new Error(`finalizeArtifact: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -697,4 +714,256 @@ function requireEpicSlug(intent: WorkflowIntent): string {
 		throw new Error(`design.epic requires intent.params.epicSlug`);
 	}
 	return slug;
+}
+
+// ---------------------------------------------------------------------------
+// design.story (LLD) workflow
+// ---------------------------------------------------------------------------
+
+function designStoryDecomposer(intent: WorkflowIntent): DecomposerPrompt {
+	const epicSlug = requireEpicSlug(intent);
+	const storyId  = requireStoryId(intent);
+	const systemPrompt = [
+		'You are the workflow decomposer for the `design.story` (LLD) workflow.',
+		'',
+		'The LLD workflow always runs the SAME eight steps in the SAME order (s7 short-circuits for new-capability Epics):',
+		'  s1: `context.assemble`       — analyze bundles at Story scope',
+		'  s2: `alternatives.enumerate` — 2-4 contract/data-model shapes',
+		'  s3: `alternatives.judge`     — score against Story + HLD constraints',
+		'  s4: `contract.detail`        — Story API + data model + shared-contract interaction',
+		'  s5: `error.paths`            — errors, edges, invariants to preserve',
+		'  s6: `test.strategy`          — test types + acceptance mapping',
+		'  s7: `migration.write`        — conditional; runs only for enhancement flavor',
+		'  s8: `checklist.verify`       — LLD audit',
+		'',
+		'Params are `{}` on every step. Runners read prior step outputs via the executor.',
+	].join('\n');
+	const userTurn = `Focus: ${intent.focus}\nEpic slug: ${epicSlug}   Story: ${storyId}\nEmit the plan JSON now.`;
+	const schema = {
+		type: 'object',
+		required: ['workflow', 'steps'],
+		properties: {
+			workflow:  { const: 'design.story' },
+			rationale: { type: 'string' },
+			steps: {
+				type:     'array',
+				minItems: 8,
+				maxItems: 8,
+				items: {
+					type: 'object',
+					required: ['id', 'runner', 'params'],
+					properties: {
+						id:     { type: 'string', pattern: '^s[1-8]$' },
+						runner: { enum: ['context.assemble', 'alternatives.enumerate', 'alternatives.judge', 'contract.detail', 'error.paths', 'test.strategy', 'migration.write', 'checklist.verify'] },
+						params: { type: 'object' },
+						note:   { type: 'string' },
+					},
+					additionalProperties: false,
+				},
+			},
+		},
+		additionalProperties: false,
+	} as const;
+	return { systemPrompt, userTurn, schema: schema as unknown as Record<string, unknown> };
+}
+
+function designStorySynthesizer(
+	intent:      WorkflowIntent,
+	stepOutputs: Readonly<Record<string, unknown>>,
+): SynthesizerPrompt {
+	const epicSlug = requireEpicSlug(intent);
+	const storyId  = requireStoryId(intent);
+	const hld = requireApprovedHld(intent.repoPath, epicSlug);
+	const hldSlice = extractHldContextSlice(hld, storyId);
+	const s7 = stepOutputs['s7'] as { skipped?: boolean } | undefined;
+	const migrationOptional = s7 !== undefined && s7.skipped === true;
+
+	const systemPrompt = [
+		'You are the synthesizer for the `design.story` (LLD) workflow.',
+		'',
+		'Read s1..s8 outputs and emit an LldArtifact JSON matching the schema.',
+		'',
+		'HARD RULES:',
+		'- `body.hldContextSlice` MUST be verbatim from the HLD context slice below.',
+		'- `body.contractDetails`, `body.dataModelChanges`, `body.interactionWithShared` MUST be verbatim from s4.',
+		'- `body.errorPaths` MUST be verbatim from s5.',
+		'- `body.testStrategy` MUST be verbatim from s6.',
+		`- ${migrationOptional
+			? '`body.migration` MUST be OMITTED (Epic is new-capability; s7 short-circuited).'
+			: '`body.migration` MUST be verbatim from s7.'}`,
+		'- `body.alternativesConsidered` MUST include every alternative from s2 with losers carrying `reasonRejected` pulled from s3.',
+		'- `body.chosenAlternative` MUST equal s3.winnerId.',
+		'- `body.openQuestions` collects `missed`/`ambiguous` verdicts from s8 (except sbdry1-4 which hard-fail).',
+		'- Citation ids `cN` reference `citations[]`; every claim in body cites at least one.',
+	].join('\n');
+	const userTurn = [
+		`Focus: ${intent.focus}   Epic: ${epicSlug}   Story: ${storyId}`,
+		'',
+		'HLD context slice (verbatim into body.hldContextSlice):',
+		'```json',
+		JSON.stringify(hldSlice, null, 2),
+		'```',
+		'',
+		'Step outputs:',
+		'```json',
+		JSON.stringify(stepOutputs, null, 2),
+		'```',
+		'',
+		'Emit the LldArtifact JSON now.',
+	].join('\n');
+
+	const schema = {
+		type: 'object',
+		required: ['body', 'citations'],
+		properties: {
+			body: {
+				type: 'object',
+				required: ['hldContextSlice', 'contractDetails', 'dataModelChanges', 'interactionWithShared', 'errorPaths', 'testStrategy', 'alternativesConsidered', 'chosenAlternative', 'openQuestions'],
+				additionalProperties: false,
+				properties: {
+					hldContextSlice:       { type: 'object' },
+					contractDetails:       { type: 'object' },
+					dataModelChanges:      { type: 'array' },
+					interactionWithShared: { type: 'array' },
+					errorPaths:            { type: 'object' },
+					testStrategy:          { type: 'object' },
+					migration:             { type: 'object' },
+					alternativesConsidered: { type: 'array', minItems: 2 },
+					chosenAlternative:     { type: 'string', pattern: '^a\\d+$' },
+					openQuestions:         { type: 'array', items: { type: 'string' } },
+				},
+			},
+			citations: {
+				type: 'array',
+				minItems: 1,
+				items: {
+					type: 'object',
+					required: ['id', 'kind', 'ref'],
+					properties: {
+						id:         { type: 'string', pattern: '^c\\d+$' },
+						kind:       { enum: ['step-output', 'analyze-bundle', 'doc', 'code', 'stakeholder', 'convention', 'prior-artifact'] },
+						ref:        { type: 'string', minLength: 1 },
+						quotedText: { type: 'string' },
+					},
+					additionalProperties: false,
+				},
+			},
+		},
+		additionalProperties: false,
+	} as const;
+	return { systemPrompt, userTurn, schema: schema as unknown as Record<string, unknown> };
+}
+
+function finalizeDesignStory(
+	intent:      WorkflowIntent,
+	stepOutputs: Readonly<Record<string, unknown>>,
+	runId:       string,
+	elapsedMs:   number,
+	llmResponse: Record<string, unknown>,
+): FinalizeResult {
+	if (typeof llmResponse !== 'object' || llmResponse === null) {
+		return { ok: false, failure: schemaFailure(`synthesizer response is not an object`) };
+	}
+	const body      = (llmResponse as { body?: unknown }).body;
+	const citations = (llmResponse as { citations?: unknown }).citations;
+	if (!isLldBody(body)) {
+		return { ok: false, failure: schemaFailure(`body does not match LldBody shape`) };
+	}
+	if (!isLldCitationArray(citations)) {
+		return { ok: false, failure: schemaFailure(`citations must be an array of { id, kind, ref }`) };
+	}
+
+	// s8 hard-fail scope-boundary items.
+	const s8 = stepOutputs['s8'] as { results?: Array<{ itemId?: string; verdict?: string }> } | undefined;
+	if (s8 !== undefined && Array.isArray(s8.results)) {
+		const boundaryIds = new Set(['sbdry1', 'sbdry2', 'sbdry3', 'sbdry4']);
+		const failed = s8.results.filter(r =>
+			r.itemId !== undefined && boundaryIds.has(r.itemId) &&
+			(r.verdict === 'missed' || r.verdict === 'ambiguous'),
+		);
+		if (failed.length > 0) {
+			const items = failed.map(f => f.itemId).join(', ');
+			return { ok: false, failure: schemaFailure(`s8 scope-boundary hard-fail on: ${items}`) };
+		}
+	}
+
+	// Cross-artifact invariants — LLD must fit approved Epic + HLD.
+	const epicSlug = requireEpicSlug(intent);
+	const storyId  = requireStoryId(intent);
+	const epic     = requireApprovedEpic(intent.repoPath, epicSlug);
+	const hld      = requireApprovedHld(intent.repoPath, epicSlug);
+	const story    = epic.body.stories.find(s => s.id === storyId);
+	if (story === undefined) {
+		return { ok: false, failure: schemaFailure(`Story '${storyId}' not found in Epic '${epicSlug}'`) };
+	}
+
+	// Migration conditional consistency.
+	const s7 = stepOutputs['s7'] as { skipped?: boolean } | undefined;
+	const migrationExpected = epic.body.flavor === 'enhancement';
+	if (migrationExpected && body.migration === undefined) {
+		return { ok: false, failure: schemaFailure(`Epic flavor is enhancement but body.migration is missing`) };
+	}
+	if (!migrationExpected && body.migration !== undefined) {
+		return { ok: false, failure: schemaFailure(`Epic flavor is new-capability but body.migration is present (s7 should have been skipped: ${JSON.stringify(s7)})`) };
+	}
+
+	const scRefIssues       = checkSharedContractRefs(body, hld);
+	const implIssues        = checkImplementOwnership(body, hld, storyId);
+	const acIssues          = checkAcceptanceMapping(body, story.acceptanceCriteria.map(ac => ac.id));
+	const apiSigIssues      = checkApiSignaturesTypeLevel(body);
+	const combined = [...scRefIssues, ...implIssues, ...acIssues, ...apiSigIssues];
+	if (combined.length > 0) {
+		return { ok: false, failure: { ok: false, kind: 'schema', message: 'LLD cross-artifact checks failed', details: combined } };
+	}
+
+	// chosenAlternative sanity
+	if (!body.alternativesConsidered.some(a => a.id === body.chosenAlternative)) {
+		return { ok: false, failure: schemaFailure(`chosenAlternative '${body.chosenAlternative}' not in alternativesConsidered`) };
+	}
+
+	const artifact: LldArtifact = {
+		meta: {
+			workflow:      'design.story',
+			runId,
+			repoPath:      intent.repoPath,
+			createdAt:     new Date().toISOString(),
+			model:         'client',
+			elapsedMs,
+			repoIndexedAt: intent.repoIndexedAt,
+			schemaVersion: LLD_SCHEMA_VERSION,
+			epicSlug,
+			storyId,
+			hldBaseRunId:         hld.meta.runId,
+			hldEffectiveHash:     computeHldEffectiveHash(hld.meta.runId, []),
+			hldAmendmentsApplied: [],
+		},
+		body,
+		citations,
+	};
+	const renderedBody = renderLldMarkdown(artifact);
+	const check = validateBodyAndCitations({ meta: artifact.meta, body: artifact.body as LldBody, citations: artifact.citations }, renderedBody);
+	if (!check.ok) return { ok: false, failure: check };
+	const renderedMd = renderedBody + renderCitationBlock(citations);
+	const renderedJson = JSON.stringify(artifact, null, 2) + '\n';
+	log.info(
+		{ workflow: 'design.story', runId, epicSlug, storyId, size: renderedMd.length, citations: citations.length },
+		'finalizeDesignStory: artifact ready',
+	);
+	return {
+		ok: true,
+		finalized: {
+			workflow:   'design.story',
+			renderedMd,
+			renderedJson,
+			artifact,
+		},
+	};
+}
+
+function requireStoryId(intent: WorkflowIntent): string {
+	const id = intent.params['storyId'];
+	if (typeof id !== 'string' || id.length === 0) {
+		throw new Error(`design.story requires intent.params.storyId`);
+	}
+	return id;
 }

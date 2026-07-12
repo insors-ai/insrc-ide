@@ -9,9 +9,10 @@
  * import from `workflow/index.js`.
  */
 
-import { registerDefineRunners }     from './runners/define/index.js';
-import { registerDesignEpicRunners } from './runners/design-epic/index.js';
-import { registerStubRunners }       from './runners/stub/index.js';
+import { registerDefineRunners }      from './runners/define/index.js';
+import { registerDesignEpicRunners }  from './runners/design-epic/index.js';
+import { registerDesignStoryRunners } from './runners/design-story/index.js';
+import { registerStubRunners }        from './runners/stub/index.js';
 
 let registered = false;
 
@@ -22,6 +23,7 @@ export function registerWorkflowRunners(): void {
 	registerStubRunners();
 	registerDefineRunners();
 	registerDesignEpicRunners();
+	registerDesignStoryRunners();
 	registered = true;
 }
 
