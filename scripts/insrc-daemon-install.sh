@@ -23,6 +23,9 @@
 #   ./insrc-daemon-install.sh --branch main         # track a different branch
 #   ./insrc-daemon-install.sh --no-start            # install + build but don't start
 #   ./insrc-daemon-install.sh --repo <url>          # install from a fork
+#   ./insrc-daemon-install.sh --embedder onnx       # force embedded ONNX (skip Ollama probe)
+#   ./insrc-daemon-install.sh --embedder ollama     # force Ollama (error if not reachable)
+#   ./insrc-daemon-install.sh --embedder auto       # default: prompt if Ollama detected
 #   ./insrc-daemon-install.sh -y                    # non-interactive, assume defaults
 #   ./insrc-daemon-install.sh --help
 #
@@ -52,6 +55,7 @@ REPO_URL="$DEFAULT_REPO_URL"
 BRANCH="$DEFAULT_BRANCH"
 START_AFTER_INSTALL=1
 ASSUME_YES=0
+EMBEDDER_CHOICE="auto"     # auto | ollama | onnx
 LOG_FILE=""
 
 # ---------------------------------------------------------------------------
@@ -100,6 +104,14 @@ while [ $# -gt 0 ]; do
 		--branch)    shift; BRANCH="${1:-}";       [ -n "$BRANCH" ]       || die "--branch requires a value" ;;
 		--repo)      shift; REPO_URL="${1:-}";     [ -n "$REPO_URL" ]     || die "--repo requires a value" ;;
 		--no-start)  START_AFTER_INSTALL=0 ;;
+		--embedder)
+			shift
+			EMBEDDER_CHOICE="${1:-}"
+			case "$EMBEDDER_CHOICE" in
+				auto|ollama|onnx) ;;
+				*) die "--embedder must be one of: auto | ollama | onnx (got '$EMBEDDER_CHOICE')" ;;
+			esac
+			;;
 		-y|--yes)    ASSUME_YES=1 ;;
 		-h|--help)   usage ;;
 		*)           die "unknown arg: $1 (see --help)" ;;
@@ -122,6 +134,7 @@ log "target:    $INSTALL_ROOT"
 log "repo URL:  $REPO_URL"
 log "branch:    $BRANCH"
 log "auto-start: $([ "$START_AFTER_INSTALL" -eq 1 ] && echo yes || echo no)"
+log "embedder:  $EMBEDDER_CHOICE"
 [ -n "$LOG_FILE" ] && log "install log: $LOG_FILE"
 printf '\n'
 
@@ -210,31 +223,84 @@ if [ -d "$OUT_DIR" ] && [ ! -e "$OUT_DIR/node_modules" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4b: Ollama probe + first-boot config
+# Step 4b: embedder selection + first-boot config
 # ---------------------------------------------------------------------------
 
-# On a fresh install with NO Ollama, the daemon would boot with its
-# default config (embeddingModel=qwen3-embedding:0.6b, embeddingDim=
-# 1024), probe Ollama, fail, fall back to ONNX (nomic-embed-text-v1.5,
-# 768-dim), notice the config-dim vs ONNX-dim mismatch, and disable
-# vector ops. Bad UX for a first-time install.
+# Precedence:
+#   1. --embedder ollama : force Ollama. Error if not reachable.
+#   2. --embedder onnx   : force embedded ONNX. Skip Ollama probe entirely.
+#   3. --embedder auto (default):
+#      - Probe Ollama.
+#      - If reachable AND interactive: prompt the user.
+#      - If reachable AND -y: keep Ollama (backward-compat default).
+#      - If not reachable: use ONNX.
 #
-# Fix: probe Ollama here. If it isn't reachable AND the user has no
-# existing config.json, write a config that pre-sets the ONNX-matching
-# dim so first boot activates ONNX cleanly. If the user has an
-# existing config (returning install), leave it alone -- they've
-# chosen deliberately.
+# On the ONNX path, we write a fresh config that pre-sets
+# embeddingModel/embeddingDim to the ONNX values so the daemon
+# doesn't boot with the Ollama defaults and end up in dim-mismatch
+# purgatory (see [[out-insrc-node-modules-symlink]] for the earlier
+# fix in this space).
+#
+# If the user has an existing config we leave it alone by default,
+# but warn when the resolved embedder disagrees with what's stored.
 
 CONFIG_FILE="$HOME/.insrc/config.json"
-HAS_OLLAMA=0
 OLLAMA_HOST_URL="${OLLAMA_HOST:-http://localhost:11434}"
-if curl -fsS --max-time 2 "$OLLAMA_HOST_URL/api/tags" >/dev/null 2>&1; then
-	HAS_OLLAMA=1
-	ok "detected Ollama at $OLLAMA_HOST_URL"
-else
-	log "Ollama not detected at $OLLAMA_HOST_URL -- daemon will use the in-process ONNX embedder (nomic-embed-text-v1.5, ~140 MB downloaded on first use)"
-	# Only auto-write config if the user has none. Don't overwrite an
-	# existing config: they may have deliberately configured it.
+HAS_OLLAMA=0
+RESOLVED_EMBEDDER=""
+
+# 1. Probe Ollama (skip when the user forced ONNX).
+if [ "$EMBEDDER_CHOICE" != "onnx" ]; then
+	if curl -fsS --max-time 2 "$OLLAMA_HOST_URL/api/tags" >/dev/null 2>&1; then
+		HAS_OLLAMA=1
+	fi
+fi
+
+# 2. Resolve the choice.
+case "$EMBEDDER_CHOICE" in
+	ollama)
+		if [ "$HAS_OLLAMA" -eq 0 ]; then
+			die "--embedder ollama specified but Ollama is not reachable at $OLLAMA_HOST_URL" 2
+		fi
+		RESOLVED_EMBEDDER="ollama"
+		ok "using Ollama at $OLLAMA_HOST_URL (forced by --embedder ollama)"
+		;;
+	onnx)
+		RESOLVED_EMBEDDER="onnx"
+		ok "using embedded ONNX (nomic-embed-text-v1.5, 768-dim) -- forced by --embedder onnx"
+		;;
+	auto)
+		if [ "$HAS_OLLAMA" -eq 1 ]; then
+			if [ "$ASSUME_YES" -eq 1 ]; then
+				RESOLVED_EMBEDDER="ollama"
+				ok "detected Ollama at $OLLAMA_HOST_URL (using it; pass --embedder onnx to override)"
+			else
+				printf '\n%sOllama detected at %s.%s\n' "$C_BOLD" "$OLLAMA_HOST_URL" "$C_RESET"
+				printf 'Choose an embedder:\n'
+				printf '  1) Ollama          -- qwen3-embedding:0.6b (~700 MB, GPU-accelerated, 1024-dim)\n'
+				printf '  2) Embedded ONNX   -- nomic-embed-text-v1.5 (~140 MB, CPU, no external deps, 768-dim)\n\n'
+				printf 'Which one? [1/2] (default 1): '
+				read -r reply || reply=""
+				case "$reply" in
+					2|onnx|nomic|N|n)
+						RESOLVED_EMBEDDER="onnx"
+						ok "chose embedded ONNX"
+						;;
+					*)
+						RESOLVED_EMBEDDER="ollama"
+						ok "chose Ollama"
+						;;
+				esac
+			fi
+		else
+			RESOLVED_EMBEDDER="onnx"
+			log "Ollama not detected at $OLLAMA_HOST_URL -- using embedded ONNX (nomic-embed-text-v1.5, ~140 MB on first use)"
+		fi
+		;;
+esac
+
+# 3. Write / warn about config.
+if [ "$RESOLVED_EMBEDDER" = "onnx" ]; then
 	if [ ! -f "$CONFIG_FILE" ]; then
 		mkdir -p "$HOME/.insrc"
 		cat > "$CONFIG_FILE" <<'CFG'
@@ -258,7 +324,23 @@ else
 CFG
 		ok "wrote $CONFIG_FILE (ONNX embedder + shaperProvider=cli-claude)"
 	else
-		log "existing $CONFIG_FILE left in place"
+		# Existing config may not match -- leave alone but warn loudly.
+		if ! grep -q 'nomic-embed-text' "$CONFIG_FILE" 2>/dev/null; then
+			warn "existing $CONFIG_FILE does not appear to reference the ONNX embedder"
+			warn "  update embeddingModel to 'nomic-ai/nomic-embed-text-v1.5' and embeddingDim to 768"
+			warn "  then: rm -rf ~/.insrc/lance && re-add repos"
+		else
+			log "existing $CONFIG_FILE already references ONNX embedder -- left in place"
+		fi
+	fi
+elif [ "$RESOLVED_EMBEDDER" = "ollama" ]; then
+	# Ollama path: the daemon's default config assumes qwen3-embedding:0.6b
+	# so no config file is required. But if the user has a stale ONNX
+	# config from a previous install, warn.
+	if [ -f "$CONFIG_FILE" ] && grep -q 'nomic-embed-text' "$CONFIG_FILE" 2>/dev/null; then
+		warn "existing $CONFIG_FILE references the ONNX embedder but you chose Ollama"
+		warn "  update embeddingModel to 'qwen3-embedding:0.6b' and embeddingDim to 1024"
+		warn "  then: rm -rf ~/.insrc/lance && re-add repos"
 	fi
 fi
 
@@ -289,7 +371,7 @@ fi
 
 printf '\n%s%sinsrc daemon install complete.%s\n\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
 
-if [ "$HAS_OLLAMA" -eq 0 ]; then
+if [ "$RESOLVED_EMBEDDER" = "onnx" ]; then
 	cat <<EOF
 Embedder: in-process ONNX (nomic-embed-text-v1.5, 768-dim). The
 model downloads to ~/.insrc/models/hf-cache on first embed call
@@ -299,9 +381,9 @@ Analyze shaper: routed to your CLI OAuth session (Claude Code
 via the multi-turn insrc_analyze_step tool, or Codex CLI).
 Ollama is NOT required for this mode.
 
-If you later install Ollama and want to use it:
+To switch back to Ollama later:
 - ollama pull qwen3-embedding:0.6b
-- Update ~/.insrc/config.json embeddingModel/embeddingDim back to Ollama's model + dim.
+- Update ~/.insrc/config.json embeddingModel to 'qwen3-embedding:0.6b' and embeddingDim to 1024.
 - rm -rf ~/.insrc/lance && re-add repos.
 
 Next steps:
@@ -309,12 +391,16 @@ Next steps:
 EOF
 else
 	cat <<EOF
-Embedder: Ollama (auto-detected at $OLLAMA_HOST_URL).
+Embedder: Ollama (at $OLLAMA_HOST_URL).
 
 If Ollama's embedding model isn't installed yet, pull it once:
 
 ollama pull qwen3-embedding:0.6b     # ~700 MB
 ollama pull qwen3-coder:latest       # ~10 GB (optional; used by the indexer's summariser)
+
+To switch to embedded ONNX later (no Ollama needed):
+- Update ~/.insrc/config.json embeddingModel to 'nomic-ai/nomic-embed-text-v1.5' and embeddingDim to 768.
+- rm -rf ~/.insrc/lance && re-add repos.
 
 Next steps:
 
