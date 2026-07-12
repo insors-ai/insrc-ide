@@ -42,8 +42,10 @@ import { runWithSamplerContext } from '../analyze/context/shaper-provider.js';
 import { getLogger } from '../shared/logger.js';
 
 import { handleAnalyzeStep } from './analyze-step/handler.js';
+import { handleWorkflowStep } from './workflow-step/handler.js';
 import { renderBundleAsMarkdown } from './bundle-md.js';
 import { makeSamplerFromMcpServer } from './sampling-bridge.js';
+import { WORKFLOW_NAMES } from '../workflow/types.js';
 
 const log = getLogger('mcp:server');
 
@@ -296,6 +298,82 @@ export function buildInsrcMcpServer(): McpServer {
 		async (rawArgs, _extra) => handleAnalyzeStep(rawArgs),
 	);
 
+	// -------------------------------------------------------------------
+	// insrc_workflow_step — Phase A framework skeleton
+	// (plans/workflow-implementation.md §6.A). Same multi-turn shape as
+	// insrc_analyze_step: server holds state under a 22-char opaque
+	// token, hands prompts + schemas to the outer LLM turn by turn.
+	// Phase A only supports the `stub` workflow to exercise the wiring
+	// end-to-end. `define` / `design.epic` / `design.story` land in
+	// Phases B / C / D.
+	// -------------------------------------------------------------------
+	server.registerTool(
+		'insrc_workflow_step',
+		{
+			title: 'insrc workflow (multi-turn)',
+			description:
+				'Phase-driven multi-turn workflow runner. Currently supports the ' +
+				'`stub` workflow only (Phase A framework skeleton). Real ' +
+				'workflows (`define`, `design.epic`, `design.story`, and the ' +
+				'`tracker.*` utilities) land in later phases.\n\n' +
+				'Multi-turn loop:\n\n' +
+				'  1. phase=\'start\' with { workflow, focus }. Server returns\n' +
+				'     { next: \'emit_plan\', prompt, schema, state }.\n' +
+				'  2. Emit the plan JSON matching the schema, then phase=\'plan\'\n' +
+				'     with plan=<your JSON> + state.\n' +
+				'  3. If the server returns { next: \'emit_step\', stepId, prompt,\n' +
+				'     schema, state }, emit the JSON matching the schema and call\n' +
+				'     phase=\'step\' with stepId + response + state. Repeat until\n' +
+				'     you receive emit_synthesize.\n' +
+				'  4. Server returns { next: \'emit_synthesize\', prompt, schema, state }.\n' +
+				'     Emit the artifact JSON, then phase=\'synthesize\' with artifact + state.\n' +
+				'  5. Server returns { next: \'done\', path, markdown, artifact } once\n' +
+				'     the artifact has been written to disk.',
+			annotations: {
+				readOnlyHint:   false,   // writes artifacts to disk
+				idempotentHint: false,
+				openWorldHint:  false,
+			},
+			inputSchema: {
+				phase: z.enum(['start', 'plan', 'step', 'synthesize'])
+					.describe('Which turn of the loop this call carries.'),
+				workflow: z.enum(WORKFLOW_NAMES)
+					.describe('Only for phase=start. Which workflow to run.')
+					.optional(),
+				focus: z.string().min(1)
+					.describe('Only for phase=start. Natural-language framing of the ask.')
+					.optional(),
+				repo: z.string()
+					.describe('Only for phase=start. Absolute repo path; falls back to INSRC_REPO env.')
+					.optional(),
+				params: z.record(z.string(), z.unknown())
+					.describe('Only for phase=start. Optional workflow-specific parameters.')
+					.optional(),
+				plan: z.object({
+					workflow: z.string(),
+					steps:    z.array(z.record(z.string(), z.unknown())),
+					rationale: z.string().optional(),
+				})
+					.passthrough()
+					.describe('Only for phase=plan. The WorkflowPlan JSON your LLM emitted.')
+					.optional(),
+				stepId: z.string()
+					.describe('Only for phase=step. Echo the stepId from the prior emit_step response.')
+					.optional(),
+				response: z.record(z.string(), z.unknown())
+					.describe('Only for phase=step. The JSON your LLM emitted matching the emit_step schema.')
+					.optional(),
+				artifact: z.record(z.string(), z.unknown())
+					.describe('Only for phase=synthesize. The artifact JSON matching the emit_synthesize schema.')
+					.optional(),
+				state: z.string()
+					.describe('Opaque continuation token from the prior response. Required after phase=start.')
+					.optional(),
+			},
+		},
+		async (rawArgs, _extra) => handleWorkflowStep(rawArgs),
+	);
+
 	return server;
 }
 
@@ -315,12 +393,15 @@ export async function runInsrcMcpStdio(): Promise<void> {
 	const [
 		{ registerBuiltinTools },
 		{ registerBuiltinDataDrivers },
+		{ registerWorkflowRunners },
 	] = await Promise.all([
 		import('../daemon/tools/builtins/index.js'),
 		import('../daemon/db/drivers/index.js'),
+		import('../workflow/index.js'),
 	]);
 	registerBuiltinTools();
 	registerBuiltinDataDrivers();
+	registerWorkflowRunners();
 
 	const server = buildInsrcMcpServer();
 	const transport = new StdioServerTransport();

@@ -15,8 +15,9 @@
  */
 
 import { Command } from 'commander';
-import { registerDaemonCommands } from './commands/daemon.js';
-import { registerRepoCommands }   from './commands/repo.js';
+import { registerDaemonCommands }   from './commands/daemon.js';
+import { registerRepoCommands }     from './commands/repo.js';
+import { registerWorkflowCommands } from './commands/workflow.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('cli');
@@ -30,6 +31,7 @@ program
 
 registerDaemonCommands(program);
 registerRepoCommands(program);
+registerWorkflowCommands(program);
 
 // Setup / system detection
 program
