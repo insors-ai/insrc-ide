@@ -45,19 +45,27 @@ shape) rather than a bespoke pipeline.
 
 ## 2. Overview
 
-Five workflows, each an instance of the same framework:
+Five workflows, each an instance of the same framework. Artifacts
+follow a shared **Epic / Story / Task** hierarchy that maps 1:1 to
+the standard software-engineering ladder every issue tracker
+already understands.
 
-| Workflow | Input | Artifact | Storage | Primary consumer |
+| Workflow | Input | Produces | Storage | Primary consumer |
 | :--- | :--- | :--- | :--- | :--- |
-| `define` | Raw user ask + repo context | Problem statement + acceptance criteria + non-goals | `docs/defines/<slug>.md` | `design` |
-| `design` | Problem statement + repo context | Design doc: shape, alternatives, decisions, contracts, rollout | `docs/designs/<slug>.md` | `plan` |
-| `plan` | Design doc | Ordered, sized, dependency-labelled task list | `plans/<slug>.md` | `build` |
-| `build` | One task from the plan | Code change (branch + commits + PR) + inline verification | git tree + PR | `test` |
-| `test` | Built PR + acceptance criteria | Verification bundle: exercised flow, observed behaviour, gaps | `docs/test-runs/<slug>.md` | Human review; may loop back |
+| `define` | Raw user ask + repo context | **1 Epic + N Stories** under it (problem framing at epic level, valuable slices at story level) | `docs/defines/<epic-slug>.md` | `design` |
+| `design` | **ONE Story** from an approved Epic | Design doc: shape, alternatives, decisions, contracts, rollout | `docs/designs/<epic-slug>/<story-id>.md` | `plan` |
+| `plan` | **ONE Design** | **N Tasks** for that Story, ordered + sized + dependency-labelled | `plans/<epic-slug>/<story-id>.md` | `build` |
+| `build` | **ONE Task** | Code change (branch + commits + PR) + inline verification | git tree + PR | `test` |
+| `test` | Built PR + Story's acceptance criteria | Verification bundle: exercised flows, observed behaviour, gaps | `docs/test-runs/<epic-slug>/<story-id>-<runId>.md` | Human review; may loop back |
 
-Naming: `define` for "what problem are we solving", not for "define
-these names". It's the shortest available synonym for
-*problem-framing*.
+Naming: `define` for "what problem are we solving and what
+valuable slices does it break into", not for "define these names".
+It's the shortest available synonym for *problem-framing + story
+composition*.
+
+The hierarchy also matches how outside trackers (GitHub, Jira,
+Linear) already model work — so the framework can push and pull
+via a pluggable tracker adapter (§7.4).
 
 ## 3. Shared primitives
 
@@ -310,61 +318,75 @@ generality is visible.
 
 ### define
 
+- **Produces.** 1 **Epic** + N **Stories** under it.
+- **Two flavors** (§4 of `workflow-define.md`):
+  - `enhancement` — user is extending an existing capability. s1
+    fires analyze bundles that map the current capability,
+    schema, and API surface so the Epic's constraints preserve
+    what already works.
+  - `new-capability` — nothing comparable exists. s1 fires analyze
+    bundles that describe the project's tech stack, conventions,
+    and adjacent capabilities so the Epic aligns with the
+    established shape.
 - **Inputs.** User's raw ask; recent context (open files, current
   branch, recent commits).
-- **Steps (illustrative).**
-  - `intent.probe` — deterministic; pulls prior similar
-    problem-statement docs from `docs/defines/`.
-  - `analyze.query` — one call to `insrc_analyze_step` scoped to the
-    repo areas the ask names; produces the "existing landscape"
-    bundle.
-  - `assumptions.enumerate` — LLM step. Emits an unordered list of
-    assumptions the ask makes, with confidence tags.
-  - `constraints.enumerate` — LLM step. Enumerates the constraints
-    the ask implies (from repo conventions, prior decisions,
-    stakeholder statements).
-  - `acceptance.write` — LLM step. Writes the acceptance criteria
-    in Given/When/Then form.
-- **Artifact sections.** `problem`, `nonGoals`, `assumptions`,
-  `constraints`, `acceptanceCriteria`, `openQuestions`.
-- **Handoff to design.** Problem statement + acceptance criteria +
-  constraints.
+- **Steps.**
+  - `context.assemble` — deterministic (but heavily analyze-driven).
+    Detects flavor and fires the appropriate analyze bundles.
+  - `epic.frame` — LLM. Composes the Epic-level frame (problem,
+    non-goals, assumptions, constraints).
+  - `stories.compose` — LLM. Enumerates N valuable Stories under
+    the Epic, each with its own acceptance criteria + local
+    constraints.
+  - `checklist.verify` — LLM, forced. Audits both Epic and Stories
+    against the checklist in `workflow-define.md` §10.
+- **Artifact.** `docs/defines/<epic-slug>.md` + `.json`. See
+  `workflow-define.md` §7 for the full schema.
+- **Handoff to design.** Whole Epic + list of approved Stories.
+  Design consumes ONE Story at a time (see below).
 
 ### design
 
-- **Inputs.** `define` artifact + repo context.
+- **Produces.** Design doc **for a single Story**.
+- **Inputs.** The Epic artifact + the chosen Story id.
 - **Steps (illustrative).**
-  - `analyze.query` — capability-discovery on the problem's domain
+  - `analyze.query` — capability-discovery on the Story's domain
     ("does the codebase already solve this?").
   - `analyze.query` — structural-map on the module the change will
     live in.
-  - `alternatives.enumerate` — LLM step. Emits 2-4 design
-    alternatives with pros/cons/costs.
-  - `alternatives.judge` — LLM step. Scores alternatives against
-    the `define` artifact's constraints. Returns a ranked verdict.
-  - `chosen.contract` — LLM step. Writes the API contract + data
-    model for the winning alternative.
-  - `rollout.sketch` — LLM step. Writes the rollout plan (phases,
+  - `alternatives.enumerate` — LLM. Emits 2-4 design alternatives
+    with pros/cons/costs.
+  - `alternatives.judge` — LLM. Scores alternatives against the
+    Story's constraints. Returns a ranked verdict.
+  - `chosen.contract` — LLM. Writes the API contract + data model
+    for the winning alternative.
+  - `rollout.sketch` — LLM. Writes the rollout plan (phases,
     migrations, backward compat, feature flag or none).
-- **Artifact sections.** `shape`, `alternativesConsidered`,
-  `decisions`, `contracts`, `rolloutSketch`, `openQuestions`.
+  - `checklist.verify` — LLM, forced.
+- **Artifact.** `docs/designs/<epic-slug>/<story-id>.md` + `.json`.
 - **Handoff to plan.** Chosen contracts + rollout sketch.
+- **Concurrent stories.** Nothing prevents `design` from running on
+  Story A while a human is still reviewing Story B's design. The
+  gate is per-Story.
 
 ### plan
 
-- **Inputs.** `design` artifact.
+- **Produces.** N **Tasks** for a single Story.
+- **Inputs.** The Story's `design` artifact.
 - **Steps (illustrative).**
-  - `tasks.enumerate` — LLM step. Emits ordered tasks with sizes
-    (S/M/L), dependencies, and acceptance checks per task.
-  - `tasks.critique` — LLM step. Judges the enumeration: missing
-    tasks, misordered dependencies, over-sized tasks.
-  - `tasks.finalize` — LLM step. Applies critique fixes.
-  - `test-strategy.write` — LLM step. Names the tests the tasks
-    should produce (unit / integration / live / smoke).
-- **Artifact sections.** `taskList`, `dependencies`,
-  `testStrategy`, `openQuestions`.
-- **Handoff to build.** Task list. `build` operates one task at a
-  time.
+  - `tasks.enumerate` — LLM. Emits ordered Tasks with sizes
+    (S/M/L), dependencies, and acceptance checks per Task.
+  - `tasks.critique` — LLM. Judges the enumeration: missing Tasks,
+    misordered dependencies, over-sized Tasks.
+  - `tasks.finalize` — LLM. Applies critique fixes.
+  - `test-strategy.write` — LLM. Names the tests the Tasks should
+    produce (unit / integration / live / smoke).
+  - `checklist.verify` — LLM, forced.
+- **Artifact.** `plans/<epic-slug>/<story-id>.md` + `.json`. Also
+  the natural place for existing hand-authored `plans/*.md`
+  documents to migrate to over time.
+- **Handoff to build.** Task list. `build` operates on ONE Task at
+  a time.
 
 ### build
 
@@ -374,7 +396,8 @@ framework's contribution is **not** to sequence those steps — it's
 to assemble the brief perfectly and audit the outcome against a
 checklist. Three steps total:
 
-- **Inputs.** One task from a `plan` artifact.
+- **Produces.** Code change (branch + commits + PR) for one Task.
+- **Inputs.** One **Task** from a Story's `plan` artifact.
 - **Steps.**
   - `context.assemble` — deterministic. Reads the task's line from
     the `plan` artifact, the referenced sections of the `design`
@@ -421,8 +444,11 @@ Why this shape works:
 
 ### test
 
-- **Inputs.** `build` artifact + acceptance criteria (from the
-  original `define`).
+- **Produces.** Verification bundle for one Story (a Story is
+  "done" when all of its acceptance criteria are `met`).
+- **Inputs.** `build` artifacts for every Task under the Story +
+  the Story's acceptance criteria (from the original `define`
+  Epic).
 - **Steps (illustrative).**
   - `flows.enumerate` — LLM step. From the acceptance criteria,
     enumerate the flows to exercise.
@@ -486,28 +512,92 @@ one place the analyze framework's read-only bundle contract meets
 the workflow's write-side generation. Analyze bundles are cached
 per-run; workflow re-runs reuse them.
 
+### 7.4 Tracker integration
+
+The Epic / Story / Task hierarchy maps 1:1 to what GitHub Issues,
+Jira, and Linear model. The framework ships a pluggable
+`TrackerAdapter` so approved Epics + Stories can be pushed to a
+tracker, and status changes there can be pulled back into artifact
+meta.
+
+```typescript
+interface TrackerAdapter {
+    readonly kind: 'github' | 'jira' | 'linear' | 'none';
+    pushEpic(epic: EpicRef):                       Promise<TrackerRef>;
+    pushStory(story: StoryRef, epic: TrackerRef):  Promise<TrackerRef>;
+    pushTask?(task: TaskRef,   story: TrackerRef): Promise<TrackerRef>;
+    pullStatus(refs: readonly TrackerRef[]):       Promise<StatusUpdate[]>;
+    linkPR?(pr: PrRef, task: TrackerRef):          Promise<void>;
+}
+
+interface TrackerRef {
+    kind:      'github-issue' | 'jira-issue' | 'linear-issue';
+    ref:       string;                    // "owner/repo#123" | "PROJ-456"
+    url:       string;
+    parentRef?: string;                   // the epic issue for stories, story for tasks
+}
+
+interface StatusUpdate {
+    trackerRef: TrackerRef;
+    status:     'open' | 'in-progress' | 'blocked' | 'closed';
+    changedAt:  string;
+    assignee?:  string;
+}
+```
+
+Configuration lives at `~/.insrc/trackers.json` — one entry per
+repo, plus a default. Auth is delegated: GitHub uses the local
+`gh` CLI's token (same one release publishing uses), Jira and
+Linear ask for API tokens at `insrc tracker connect` time and
+store them in the OS keychain. No secrets in the config file.
+
+Push direction is opt-in per Epic: after `define` approval, the
+user runs `insrc workflow push <epic-slug> --tracker github` to
+create the tracker issues. The artifact's `meta.tracker` records
+the tracker refs, so subsequent `pull` calls know which issues to
+watch.
+
+Pull direction is manual for v1: `insrc workflow sync <epic-slug>`
+reads current status from the tracker and updates the artifact
+meta. No polling, no webhooks — those are follow-ups.
+
+The `TrackerAdapter` layer is dumb transport; it never talks to
+the LLM. Ship `github` first; `jira` and `linear` land as follow-ups
+once someone actually needs them.
+
 ## 8. Storage layout
+
+Two roots. `docs/` and `plans/` hold artifacts the team reviews +
+PRs. `~/.insrc/` holds ephemeral run logs + framework state.
 
 ```
 docs/
 ├── defines/
-│   ├── <slug>.md         ← human-readable
-│   └── <slug>.json       ← canonical, parsed by design
+│   ├── <epic-slug>.md            # 1 Epic + all its Stories, human-readable
+│   └── <epic-slug>.json          # canonical, parsed by design
 ├── designs/
-│   ├── <slug>.md
-│   └── <slug>.json
+│   └── <epic-slug>/
+│       ├── <story-id>.md         # 1 Design per Story
+│       └── <story-id>.json
 ├── test-runs/
-│   └── <slug>-<runid>.md
-plans/
-└── <slug>.md             ← per plan.md convention (this repo already
-                            uses this dir for design docs; new plans
-                            use it too)
+│   └── <epic-slug>/
+│       └── <story-id>-<runId>.md # verification bundle per test run
 
-~/.insrc/workflow-runs/
-├── <slug>/
-│   ├── <workflow>-<runid>.jsonl   ← full step log
-│   └── ...
+plans/
+└── <epic-slug>/
+    ├── <story-id>.md             # N Tasks for the Story
+    └── <story-id>.json           # canonical, parsed by build
+
+~/.insrc/
+├── trackers.json                 # tracker config (§7.4)
+└── workflow-runs/
+    └── <epic-slug>/
+        └── <workflow>-<runId>.jsonl   # full step log per run
 ```
+
+Story ids follow the pattern `s1`, `s2`, ... scoped to the Epic.
+The whole hierarchy is addressable as `<epic-slug>/<story-id>[/<task-id>]`
+end to end.
 
 ## 9. Phased rollout
 
