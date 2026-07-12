@@ -147,6 +147,32 @@ wait_for_daemon_stop() {
 	return 1
 }
 
+# Wait for the pid file + socket to appear AND for the pid to be
+# alive. Handles the ONNX cold-boot case where the daemon spends
+# 30+ seconds downloading the embedder model before it's fully
+# ready. Returns 0 with the pid printed to stdout, 1 on timeout.
+#
+# We DON'T wait for "embedder ready" here -- the socket is enough
+# to prove the daemon accepted `daemon start`; long-running model
+# init happens off the boot path.
+wait_for_daemon_ready() {
+	local pid_file="$HOME/.insrc/daemon.pid"
+	local sock_file="$HOME/.insrc/daemon.sock"
+	local deadline=$(( $(date +%s) + 60 ))
+
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if [ -f "$pid_file" ] && [ -S "$sock_file" ]; then
+			local pid; pid=$(cat "$pid_file" 2>/dev/null || echo "")
+			if [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1; then
+				echo "$pid"
+				return 0
+			fi
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -174,10 +200,12 @@ cmd_start() {
 
 	log "starting daemon"
 	daemon_cli daemon start >>"$LOG_FILE" 2>&1 || die "daemon start failed (see $LOG_FILE)" 4
-	sleep 1
-	local pid; pid=$(cat "$pid_file" 2>/dev/null || echo "?")
-	if [ "$pid" = "?" ] || ! ps -p "$pid" >/dev/null 2>&1; then
-		die "daemon reported started but pid $pid is not running (see /tmp/.insrc/daemon.log)" 4
+	# Poll for the pid file + socket + live pid (up to 60 s). This
+	# covers ONNX cold-boot on a fresh install (~30 s to download +
+	# initialise the 140 MB nomic-embed-text-v1.5 model).
+	local pid
+	if ! pid=$(wait_for_daemon_ready); then
+		die "daemon did not become ready within 60 s (see /tmp/.insrc/daemon.log)" 4
 	fi
 	log "daemon running (pid $pid, log /tmp/.insrc/daemon.log)"
 	log "ctl-log: $LOG_FILE"

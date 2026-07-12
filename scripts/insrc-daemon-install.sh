@@ -134,7 +134,11 @@ log "target:    $INSTALL_ROOT"
 log "repo URL:  $REPO_URL"
 log "branch:    $BRANCH"
 log "auto-start: $([ "$START_AFTER_INSTALL" -eq 1 ] && echo yes || echo no)"
-log "embedder:  $EMBEDDER_CHOICE"
+case "$EMBEDDER_CHOICE" in
+	auto)   log "embedder mode: auto (probe Ollama; prompt if detected)" ;;
+	ollama) log "embedder mode: ollama (force Ollama; fail if unreachable)" ;;
+	onnx)   log "embedder mode: onnx (force embedded nomic-embed-text-v1.5)" ;;
+esac
 [ -n "$LOG_FILE" ] && log "install log: $LOG_FILE"
 printf '\n'
 
