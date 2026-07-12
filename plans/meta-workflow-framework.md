@@ -378,10 +378,12 @@ approved, LLDs for independent Stories can run in parallel.
     dependency graph from define.
 - **Concurrent stories.** Multiple LLDs run in parallel once HLD
   is approved. The gate is per-Story.
-- **Back-flow.** An LLD run may discover the HLD was wrong. It
-  emits a back-flow signal targeting HLD; the human decides
-  whether to redo the HLD (invalidating other in-progress LLDs)
-  or record the finding as an HLD open question.
+- **Back-flow vs amendment.** LLD (and downstream `plan` / `build`
+  / `test`) can discover HLD needs a change. Small localised
+  changes → emit an **amendment proposal** (§7.5). Fundamental
+  changes → back-flow signal targeting HLD (full re-run). The
+  amendment-vs-back-flow heuristic is documented in
+  [`workflow-design.md`](workflow-design.md) §11.5.
 
 ### plan
 
@@ -578,6 +580,48 @@ meta. No polling, no webhooks — those are follow-ups.
 The `TrackerAdapter` layer is dumb transport; it never talks to
 the LLM. Ship `github` first; `jira` and `linear` land as follow-ups
 once someone actually needs them.
+
+### 7.5 Amendments
+
+Reference documents get consumed by many downstream workflows.
+When a downstream discovery would only change a small piece of an
+upstream artifact — a shared contract needs one more field, a
+rollout phase needs splitting, a non-functional target needs
+retuning — re-running the whole upstream artifact from scratch is
+wasteful.
+
+The framework's answer: **amendments**. A typed, cited, small
+delta emitted by a downstream step, applied to the base artifact
+on human approval. The **effective** artifact (what downstream
+reads) is `base + approved amendments applied in order`.
+
+Key invariants:
+
+- Every amendment has a **type discriminator** and a **schema** for
+  that type. The applier is pure and deterministic.
+- Amendments are IMMUTABLE once proposed. Rejected → new id if
+  reproposed. Approved → cannot be modified.
+- Downstream reads always go through `getEffective<X>` — no way
+  to accidentally read the raw base.
+- Downstream artifacts store an `<upstream>EffectiveHash` in
+  their meta so staleness detection works across amendments too,
+  not just re-runs.
+- Amendment ≠ back-flow. Amendment says "small delta"; back-flow
+  says "wrong at the roots, re-run". Every workflow that
+  supports amendments documents an amendment-vs-back-flow
+  heuristic.
+
+Today, **HLD is the only artifact that uses amendments** — see
+[`workflow-design.md`](workflow-design.md) §11 for the concrete
+implementation including amendment types, on-disk shape, CLI,
+staleness handling, and the amendment-vs-back-flow heuristic.
+
+The pattern generalises. If `define`'s Epic + Stories artifact
+ever needs the same treatment (e.g., adding a Story to an
+approved Epic without a full re-run), that workflow will adopt
+the same primitives. Same for `plan`'s Task list. No workflow is
+required to support amendments; each opts in when the
+re-run-from-scratch cost gets too high.
 
 ## 8. Storage layout
 
