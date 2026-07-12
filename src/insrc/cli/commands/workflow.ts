@@ -40,6 +40,9 @@ import {
 import { scanLldStaleness } from '../../workflow/amendments/staleness.js';
 import { deriveSlug } from '../../workflow/slug.js';
 import { WORKFLOW_NAMES } from '../../workflow/types.js';
+import { resolveGithubConfig } from '../../workflow/config/github.js';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { defineArtifactPaths, writeAtomic as writeAtomicStorage } from '../../workflow/storage.js';
 
 export function registerWorkflowCommands(program: Command): void {
 	const wf = program
@@ -217,6 +220,48 @@ export function registerWorkflowCommands(program: Command): void {
 				const jsonPath = jsonPathForMd(artifactPath);
 				const r = ackStaleArtifact(jsonPath, opts.reason);
 				process.stdout.write(`acked ${r.path} at ${r.ackedAt} — ${r.reason}\n`);
+			} catch (err) {
+				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+				process.exit(1);
+			}
+		});
+
+	// ---------------------------------------------------------------
+	// GitHub tracker (Phase F)
+	//
+	// push/sync/post themselves run through the MCP tool
+	// (`insrc_workflow_step`) — those are LLM-driven. The CLI only
+	// carries the deterministic supporting commands.
+	// ---------------------------------------------------------------
+
+	wf.command('gh-config')
+		.description('print the resolved GitHub config for the current repo')
+		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
+		.action((opts: { repo: string }) => {
+			try {
+				const cfg = resolveGithubConfig(opts.repo);
+				process.stdout.write(JSON.stringify(cfg, null, 2) + '\n');
+			} catch (err) {
+				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+				process.exit(1);
+			}
+		});
+
+	wf.command('unlink <epic-slug>')
+		.description('clear tracker meta from the local Epic artifact (does NOT touch GitHub)')
+		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
+		.action((epicSlug: string, opts: { repo: string }) => {
+			try {
+				const paths = defineArtifactPaths(opts.repo, epicSlug);
+				const raw = readFileSync(paths.json, 'utf8');
+				const artifact = JSON.parse(raw) as { meta?: Record<string, unknown> };
+				if (artifact.meta === undefined || (artifact.meta as { tracker?: unknown }).tracker === undefined) {
+					process.stdout.write('no tracker meta to clear\n');
+					return;
+				}
+				delete (artifact.meta as { tracker?: unknown }).tracker;
+				writeAtomicStorage(paths.json, JSON.stringify(artifact, null, 2) + '\n');
+				process.stdout.write(`unlinked ${paths.json} (GitHub issues left intact)\n`);
 			} catch (err) {
 				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
 				process.exit(1);

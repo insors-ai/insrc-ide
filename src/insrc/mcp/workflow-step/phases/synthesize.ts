@@ -15,7 +15,8 @@
 
 import { getLogger } from '../../../shared/logger.js';
 import { finalizeArtifact } from '../../../workflow/orchestrator.js';
-import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths, stubArtifactPaths, writeAtomic, appendRunLog } from '../../../workflow/storage.js';
+import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths, runsDirFor, stubArtifactPaths, writeAtomic, appendRunLog } from '../../../workflow/storage.js';
+import { join } from 'node:path';
 import type { WorkflowIntent } from '../../../workflow/types.js';
 import { assertStage, decodeState } from '../state.js';
 import { releaseState } from '../state-store.js';
@@ -53,7 +54,7 @@ export async function handleSynthesize(
 		const code = failure.ok ? 'synthesize-unknown' : `synthesize-${failure.kind}`;
 		return errorResult(code, formatFailure(failure), true);
 	}
-	const paths = pathsForWorkflow(state.intent, state.slug);
+	const paths = pathsForWorkflow(state.intent, state.slug, state.runId);
 	writeAtomic(paths.md,   result.finalized.renderedMd);
 	writeAtomic(paths.json, result.finalized.renderedJson);
 	appendRunLog(state.slug, state.intent.workflow, state.runId, {
@@ -79,6 +80,7 @@ export async function handleSynthesize(
 function pathsForWorkflow(
 	intent: WorkflowIntent,
 	slug:   string,
+	runId:  string,
 ): { readonly md: string; readonly json: string } {
 	const { workflow, repoPath } = intent;
 	if (workflow === 'stub')        return stubArtifactPaths(repoPath, slug);
@@ -94,6 +96,13 @@ function pathsForWorkflow(
 		}
 		const { md, json } = lldArtifactPaths(repoPath, slug, storyId);
 		return { md, json };
+	}
+	if (workflow === 'tracker.push' || workflow === 'tracker.sync' || workflow === 'tracker.post') {
+		const dir = runsDirFor(slug);
+		return {
+			md:   join(dir, `${workflow}-${runId}.md`),
+			json: join(dir, `${workflow}-${runId}.json`),
+		};
 	}
 	throw new Error(`pathsForWorkflow: workflow '${workflow}' not yet supported`);
 }

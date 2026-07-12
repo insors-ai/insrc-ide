@@ -62,7 +62,22 @@ import {
 	type LldArtifact,
 	type LldBody,
 } from './artifacts/lld.js';
-import { readBaseHld, requireApprovedEpic, requireApprovedHld } from './gates.js';
+import { readBaseHld, readDefineArtifact, requireApprovedEpic, requireApprovedHld } from './gates.js';
+import {
+	isTrackerChecklistResult,
+	isTrackerPostRefs,
+	isTrackerPushRefs,
+	isTrackerSyncRefs,
+	renderTrackerMarkdown,
+	TRACKER_SCHEMA_VERSION,
+	type TrackerArtifact,
+	type TrackerChecklistResult,
+	type TrackerPostRefs,
+	type TrackerPushRefs,
+	type TrackerSyncRefs,
+} from './artifacts/tracker.js';
+import { defineArtifactPaths, writeAtomic } from './storage.js';
+import { readFileSync } from 'node:fs';
 import {
 	AmendmentApplyError,
 	applyAmendments,
@@ -96,6 +111,10 @@ export function prepareDecompose(intent: WorkflowIntent): DecomposerPrompt {
 		case 'define':       return defineDecomposer(intent);
 		case 'design.epic':  return designEpicDecomposer(intent);
 		case 'design.story': return designStoryDecomposer(intent);
+		case 'tracker.push':
+		case 'tracker.sync':
+		case 'tracker.post':
+			return trackerDecomposer(intent);
 		default:
 			throw new Error(`prepareDecompose: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -162,6 +181,10 @@ export function prepareSynthesize(
 		case 'define':       return defineSynthesizer(intent, stepOutputs);
 		case 'design.epic':  return designEpicSynthesizer(intent, stepOutputs);
 		case 'design.story': return designStorySynthesizer(intent, stepOutputs);
+		case 'tracker.push':
+		case 'tracker.sync':
+		case 'tracker.post':
+			return trackerSynthesizer(intent, stepOutputs);
 		default:
 			throw new Error(`prepareSynthesize: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -257,6 +280,10 @@ export function finalizeArtifact(
 		case 'define':       return finalizeDefine(intent, stepOutputs, runId, elapsedMs, llmResponse);
 		case 'design.epic':  return finalizeDesignEpic(intent, stepOutputs, runId, elapsedMs, llmResponse);
 		case 'design.story': return finalizeDesignStory(intent, stepOutputs, runId, elapsedMs, llmResponse);
+		case 'tracker.push':
+		case 'tracker.sync':
+		case 'tracker.post':
+			return finalizeTracker(intent, stepOutputs, runId, elapsedMs, llmResponse);
 		default:
 			throw new Error(`finalizeArtifact: workflow '${intent.workflow}' not yet supported`);
 	}
@@ -1054,3 +1081,219 @@ function requireStoryId(intent: WorkflowIntent): string {
 	}
 	return id;
 }
+
+// ---------------------------------------------------------------------------
+// tracker.push / tracker.sync / tracker.post
+// ---------------------------------------------------------------------------
+
+function trackerDecomposer(intent: WorkflowIntent): DecomposerPrompt {
+	const flavor = intent.workflow.split('.')[1]!;   // 'push' | 'sync' | 'post'
+	const systemPrompt = [
+		`You are the workflow decomposer for the \`${intent.workflow}\` workflow.`,
+		'',
+		'This is a COARSE HANDOFF workflow. The plan is always the SAME three steps in the SAME order:',
+		'  s1: `context.assemble`   — deterministic; framework reads Epic + gh config',
+		'  s2: `execute`            — LLM turn; invokes `gh` directly to perform the action',
+		'  s3: `checklist.verify`   — LLM turn; audits refs against the conventions',
+		'',
+		'Params are `{}` on every step; the runners read prior step outputs via the executor.',
+	].join('\n');
+	const userTurn = `Focus: ${intent.focus}\nWorkflow: ${intent.workflow}\nEmit the plan JSON now.`;
+	const schema = {
+		type: 'object',
+		required: ['workflow', 'steps'],
+		properties: {
+			workflow:  { const: intent.workflow },
+			rationale: { type: 'string' },
+			steps: {
+				type:     'array',
+				minItems: 3,
+				maxItems: 3,
+				items: {
+					type: 'object',
+					required: ['id', 'runner', 'params'],
+					properties: {
+						id:     { type: 'string', pattern: '^s[1-3]$' },
+						runner: { enum: ['context.assemble', 'execute', 'checklist.verify'] },
+						params: { type: 'object' },
+						note:   { type: 'string' },
+					},
+					additionalProperties: false,
+				},
+			},
+		},
+		additionalProperties: false,
+	} as const;
+	return { systemPrompt, userTurn, schema: schema as unknown as Record<string, unknown> };
+	void flavor;
+}
+
+function trackerSynthesizer(
+	intent:      WorkflowIntent,
+	stepOutputs: Readonly<Record<string, unknown>>,
+): SynthesizerPrompt {
+	const systemPrompt = [
+		`You are the synthesizer for the \`${intent.workflow}\` workflow.`,
+		'',
+		'Emit a compact JSON with `{ refs, checklist, notes? }` where:',
+		'  - `refs` is the s2 execute output verbatim.',
+		'  - `checklist` is the s3 checklist.verify output verbatim.',
+		'  - `notes` is an optional short human-facing note.',
+		'',
+		'Do NOT re-derive; just pass through.',
+	].join('\n');
+	const userTurn = [
+		`Focus: ${intent.focus}`,
+		'',
+		'Step outputs:',
+		'```json',
+		JSON.stringify(stepOutputs, null, 2),
+		'```',
+		'',
+		'Emit the JSON now.',
+	].join('\n');
+	const schema = {
+		type: 'object',
+		required: ['refs', 'checklist'],
+		properties: {
+			refs:      { type: 'object' },
+			checklist: { type: 'object' },
+			notes:     { type: 'string' },
+		},
+		additionalProperties: false,
+	} as const;
+	return { systemPrompt, userTurn, schema: schema as unknown as Record<string, unknown> };
+}
+
+function finalizeTracker(
+	intent:      WorkflowIntent,
+	stepOutputs: Readonly<Record<string, unknown>>,
+	runId:       string,
+	elapsedMs:   number,
+	llmResponse: Record<string, unknown>,
+): FinalizeResult {
+	if (typeof llmResponse !== 'object' || llmResponse === null) {
+		return { ok: false, failure: schemaFailure(`synthesizer response is not an object`) };
+	}
+	const refs      = (llmResponse as { refs?: unknown }).refs;
+	const checklist = (llmResponse as { checklist?: unknown }).checklist;
+	const notes     = (llmResponse as { notes?: unknown }).notes;
+	if (!isTrackerChecklistResult(checklist)) {
+		return { ok: false, failure: schemaFailure(`checklist must be an object with items[] + failedCount`) };
+	}
+	if (checklist.failedCount > 0) {
+		const failed = checklist.items.filter(i => i.verdict === 'failed').map(i => i.itemId).join(', ');
+		return { ok: false, failure: schemaFailure(`tracker checklist failed on: ${failed}`) };
+	}
+
+	// Type-narrow refs per workflow.
+	let typedRefs: TrackerPushRefs | TrackerSyncRefs | TrackerPostRefs;
+	if (intent.workflow === 'tracker.push') {
+		if (!isTrackerPushRefs(refs)) return { ok: false, failure: schemaFailure(`refs do not match TrackerPushRefs`) };
+		typedRefs = refs;
+	} else if (intent.workflow === 'tracker.sync') {
+		if (!isTrackerSyncRefs(refs)) return { ok: false, failure: schemaFailure(`refs do not match TrackerSyncRefs`) };
+		typedRefs = refs;
+	} else {
+		if (!isTrackerPostRefs(refs)) return { ok: false, failure: schemaFailure(`refs do not match TrackerPostRefs`) };
+		typedRefs = refs;
+	}
+
+	// Read gh config from the s1 output (deterministic bundle).
+	const s1 = stepOutputs['s1'] as { gh?: { owner?: string; repo?: string }; epicSlug?: string } | undefined;
+	if (s1 === undefined || typeof s1.gh !== 'object' || typeof s1.gh.owner !== 'string' || typeof s1.gh.repo !== 'string' || typeof s1.epicSlug !== 'string') {
+		return { ok: false, failure: schemaFailure(`s1 context bundle is missing gh + epicSlug`) };
+	}
+	const epicSlug = s1.epicSlug;
+
+	// Mutate the Epic artifact's meta.tracker for push + sync.
+	try {
+		mutateEpicTrackerMeta(intent.repoPath, epicSlug, intent.workflow, typedRefs);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return { ok: false, failure: schemaFailure(`failed to patch Epic tracker meta: ${msg}`) };
+	}
+
+	const artifact: TrackerArtifact = {
+		meta: {
+			workflow:      intent.workflow,
+			runId,
+			repoPath:      intent.repoPath,
+			createdAt:     new Date().toISOString(),
+			model:         'client',
+			elapsedMs,
+			repoIndexedAt: intent.repoIndexedAt,
+			schemaVersion: TRACKER_SCHEMA_VERSION,
+			epicSlug,
+		},
+		body: {
+			workflow:  intent.workflow as 'tracker.push' | 'tracker.sync' | 'tracker.post',
+			epicSlug,
+			ghOwner:   s1.gh.owner,
+			ghRepo:    s1.gh.repo,
+			refs:      typedRefs,
+			checklist,
+			...(typeof notes === 'string' ? { notes } : {}),
+		},
+		citations: [] as const,
+	};
+	const renderedMd   = renderTrackerMarkdown(artifact);
+	const renderedJson = JSON.stringify(artifact, null, 2) + '\n';
+	log.info(
+		{ workflow: intent.workflow, runId, epicSlug, refs: Object.keys(typedRefs).length },
+		'finalizeTracker: artifact ready',
+	);
+	return {
+		ok: true,
+		finalized: {
+			workflow:   intent.workflow as WorkflowName,
+			renderedMd,
+			renderedJson,
+			artifact,
+		},
+	};
+}
+
+/** Merge tracker refs into the Epic artifact's meta.tracker. Push
+ *  writes epicRef + storyRefs + milestoneRef + labelsCreated; sync
+ *  writes storyStatus + epicStatus + lastSyncedAt; post is a no-op
+ *  at the Epic level (comment ids attach to the target artifact by
+ *  the caller if needed — Phase F doesn't record commentIds in the
+ *  design artifact meta since that would fragment the surface). */
+function mutateEpicTrackerMeta(
+	repoPath:   string,
+	epicSlug:   string,
+	workflow:   string,
+	refs:       TrackerPushRefs | TrackerSyncRefs | TrackerPostRefs,
+): void {
+	if (workflow === 'tracker.post') return;   // no-op for post
+	const paths = defineArtifactPaths(repoPath, epicSlug);
+	const raw = readFileSync(paths.json, 'utf8');
+	const artifact = JSON.parse(raw) as { meta?: { tracker?: Record<string, unknown> } };
+	if (artifact.meta === undefined) artifact.meta = {};
+	if (artifact.meta.tracker === undefined) artifact.meta.tracker = {};
+	if (workflow === 'tracker.push') {
+		const push = refs as TrackerPushRefs;
+		artifact.meta.tracker = {
+			...artifact.meta.tracker,
+			adapter:   'github',
+			epicRef:   push.epicRef,
+			storyRefs: push.storyRefs,
+			...(push.milestoneRef !== undefined ? { milestoneRef: push.milestoneRef } : {}),
+			labelsCreated: push.labelsCreated,
+			pushedAt:  new Date().toISOString(),
+		};
+	} else {
+		const sync = refs as TrackerSyncRefs;
+		artifact.meta.tracker = {
+			...artifact.meta.tracker,
+			epicStatus:   sync.epicStatus,
+			storyStatus:  sync.storyStatus,
+			lastSyncedAt: sync.syncedAt,
+		};
+	}
+	writeAtomic(paths.json, JSON.stringify(artifact, null, 2) + '\n');
+}
+
+// Kept as silences — referenced above for JSDoc navigation.
+export { readDefineArtifact as _readDefineArtifact };
