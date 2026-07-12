@@ -23,7 +23,47 @@ const QUERY_PREFIX =
 
 const BATCH_SIZE = 16;
 
+// ---------------------------------------------------------------------------
+// Timeouts on Ollama HTTP calls
+//
+// The `ollama` npm client wraps `undici` fetch with NO default timeout.
+// If Ollama stalls on a request (backpressure, GPU thrash, a specific
+// input that trips a server-side latent bug), the `await ollama.embed(...)`
+// never resolves and there's no `catch` because there's no rejection --
+// the whole indexer sits idle forever. Observed 2026-07-13 against
+// qwen3-embedding:0.6b on insrc-ide: indexer wedged on a specific
+// batch, 0 % CPU, no network activity, no error output. Restart put
+// the daemon right back into the same stuck state on the same file.
+//
+// Fix: race every embed call against a per-request timeout. On timeout
+// we log a warning + let the batch's embeddings stay empty; the reembed
+// job picks stragglers up next pass.
+//
+// Times: 60 s per BATCH_SIZE=16 embed is generous (normal is 200 ms on
+// GPU, ~5 s on CPU under load); 30 s for single-input calls.
+const OLLAMA_EMBED_BATCH_TIMEOUT_MS = 60_000;
+const OLLAMA_EMBED_SINGLE_TIMEOUT_MS = 30_000;
+
 const ollama = new Ollama({ host: _localDefaults.host });
+
+/** Race an Ollama call against a timeout. Rejection lets the outer
+ *  try/catch continue past the stuck request. The orphaned fetch
+ *  keeps running in the background until it dies or completes;
+ *  its result is discarded. */
+async function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label}: timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Backend selection
@@ -108,7 +148,11 @@ export async function embedEntities(
       const inputs = batch.map(formatDocument);
 
       try {
-        const result = await ollama.embed({ model: EMBEDDING_MODEL, input: inputs });
+        const result = await withTimeout(
+          ollama.embed({ model: EMBEDDING_MODEL, input: inputs }),
+          OLLAMA_EMBED_BATCH_TIMEOUT_MS,
+          `ollama.embed (batch=${inputs.length})`,
+        );
         for (let j = 0; j < batch.length; j++) {
           const entity    = batch[j];
           const embedding = result.embeddings[j];
@@ -117,8 +161,14 @@ export async function embedEntities(
             entity.embeddingModel = EMBEDDING_MODEL;
           }
         }
-      } catch {
-        // Ollama unavailable — leave embeddings empty; reembed job will backfill
+      } catch (err) {
+        // Timeout or transport error -- leave embeddings empty; reembed
+        // job backfills next pass. LOG so a persistent stall is visible
+        // (silent catch is what let the pre-timeout hang go unnoticed).
+        log.warn(
+          { err: (err as Error).message, batchSize: inputs.length, sampleName: batch[0]?.name, sampleFile: batch[0]?.file },
+          'ollama embedEntities batch failed; skipping batch',
+        );
       }
     }
     return;
@@ -157,12 +207,17 @@ export async function embedQuery(text: string): Promise<number[]> {
     catch (err) { log.warn({ err: (err as Error).message }, 'ONNX embedQuery failed'); return []; }
   }
   try {
-    const result = await ollama.embed({
-      model: EMBEDDING_MODEL,
-      input: formatQuery(text),
-    });
+    const result = await withTimeout(
+      ollama.embed({
+        model: EMBEDDING_MODEL,
+        input: formatQuery(text),
+      }),
+      OLLAMA_EMBED_SINGLE_TIMEOUT_MS,
+      'ollama.embed (query)',
+    );
     return result.embeddings[0] ?? [];
-  } catch {
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'ollama embedQuery failed');
     return [];
   }
 }
@@ -183,12 +238,17 @@ export async function embedText(text: string): Promise<number[]> {
   // Cap at ~8000 chars same as entity documents
   const input = text.length > 8_000 ? text.slice(0, 8_000) : text;
   try {
-    const result = await ollama.embed({
-      model: EMBEDDING_MODEL,
-      input,
-    });
+    const result = await withTimeout(
+      ollama.embed({
+        model: EMBEDDING_MODEL,
+        input,
+      }),
+      OLLAMA_EMBED_SINGLE_TIMEOUT_MS,
+      'ollama.embed (text)',
+    );
     return result.embeddings[0] ?? [];
-  } catch {
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'ollama embedText failed');
     return [];
   }
 }
