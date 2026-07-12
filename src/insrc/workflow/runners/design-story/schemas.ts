@@ -112,12 +112,60 @@ export const alternativesJudgeSchema = {
 // s4 — contract.detail
 // ---------------------------------------------------------------------------
 
+/** Optional slot the LLD step can use to PROPOSE an HLD change
+ *  discovered mid-flight. Kept as a `passthrough` object with a
+ *  required `type` discriminator so the framework's amendment
+ *  applier (which owns the strict schema) can pick it up.
+ *  Structure: `{ amendment, rationale, citations? }`. */
+export const amendmentProposalSlot = {
+	type: 'object',
+	required: ['amendment', 'rationale'],
+	additionalProperties: true,
+	properties: {
+		amendment: {
+			type: 'object',
+			required: ['type'],
+			properties: {
+				type: {
+					enum: [
+						'sharedContract.fieldAdd', 'sharedContract.fieldRemove',
+						'sharedContract.rename', 'sharedContract.methodAdd',
+						'storyBoundary.reassignOwnership', 'storyBoundary.addConsumer',
+						'nonFunctional.retarget',
+						'rollout.reorder', 'rollout.splitPhase', 'rollout.mergePhases',
+					],
+				},
+			},
+			additionalProperties: true,
+		},
+		rationale: { type: 'string', minLength: 1 },
+		citations: {
+			type: 'array',
+			items: {
+				type: 'object',
+				required: ['id', 'kind', 'ref'],
+				properties: {
+					id:   { type: 'string' },
+					kind: { type: 'string' },
+					ref:  { type: 'string' },
+				},
+				additionalProperties: true,
+			},
+		},
+	},
+} as const;
+
 export const contractDetailSchema = {
 	type: 'object',
 	required: ['surfaceLevel', 'api', 'dataModel', 'interactionWithShared'],
 	additionalProperties: false,
 	properties: {
 		surfaceLevel: { enum: ['internal', 'internal-shared', 'public'] },
+		hld: {
+			type: 'object',
+			additionalProperties: false,
+			properties: { amendmentProposal: amendmentProposalSlot },
+		},
 		api: {
 			type: 'array',
 			items: {
@@ -207,6 +255,11 @@ export const errorPathsSchema = {
 	required: ['errorCases', 'edgeCases', 'invariantsToPreserve'],
 	additionalProperties: false,
 	properties: {
+		hld: {
+			type: 'object',
+			additionalProperties: false,
+			properties: { amendmentProposal: amendmentProposalSlot },
+		},
 		errorCases: {
 			type: 'array',
 			items: {

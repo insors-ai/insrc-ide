@@ -262,6 +262,9 @@ const contractDetail = llmPauseRunner({
 				'- Every `interactionWithShared[].contractId` MUST be a real HLD sharedContract id.',
 				'- If role="implements", HLD must show this Story as the owner of that contract.',
 				'- `dataModel[].callSites` come from s1 analyze bundles.',
+				'',
+				'HLD AMENDMENT PROPOSAL (optional):',
+				'  If designing this contract reveals a small, localised HLD change (a shared contract needs one more field, a method signature needs to add a parameter, ownership of one contract needs to move between Stories, etc.), you MAY emit `hld.amendmentProposal` with `{ amendment: <typed>, rationale: <string>, citations: [] }`. Do NOT propose an amendment for a fundamental HLD rework — those need a back-flow, not an amendment. Rough threshold: if >30% of shared contracts would need changing, do NOT amend.',
 			].join('\n'),
 			userTurn: [
 				's1 LldContext:',
@@ -307,6 +310,9 @@ const errorPaths = llmPauseRunner({
 				'- `errorCases[].detection` describes HOW the code notices; not "the caller passes bad data".',
 				'- `errorCases` are distinct from `edgeCases` (errors = something went wrong; edges = valid but unusual input).',
 				`- For flavor="${epic.body.flavor}": ${epic.body.flavor === 'enhancement' ? 'invariantsToPreserve must cite an analyze bundle from s1 showing the invariant.' : 'invariantsToPreserve may be empty; no legacy behaviour to preserve.'}`,
+				'',
+				'HLD AMENDMENT PROPOSAL (optional):',
+				'  If an error path exposes a mismatch with HLD (e.g. HLD says a shared contract does not throw, but the Story genuinely needs to signal a specific failure), you MAY emit `hld.amendmentProposal` with `{ amendment: <typed>, rationale: <string>, citations: [] }`. Use `sharedContract.methodAdd` when you need to name a new error signal. Do NOT propose a wholesale rework; back-flow HLD instead.',
 			].join('\n'),
 			userTurn: [
 				's1 LldContext:',

@@ -62,7 +62,18 @@ import {
 	type LldArtifact,
 	type LldBody,
 } from './artifacts/lld.js';
-import { requireApprovedEpic, requireApprovedHld } from './gates.js';
+import { readBaseHld, requireApprovedEpic, requireApprovedHld } from './gates.js';
+import {
+	AmendmentApplyError,
+	applyAmendments,
+	getEffectiveHash,
+	listApprovedAmendments,
+	nextAmendmentId,
+	proposeAmendment,
+	type Amendment,
+	type AmendmentRecord,
+} from './amendments/index.js';
+import { isAmendment } from './amendments/types.js';
 
 const log = getLogger('workflow:orchestrator');
 
@@ -921,6 +932,16 @@ function finalizeDesignStory(
 		return { ok: false, failure: schemaFailure(`chosenAlternative '${body.chosenAlternative}' not in alternativesConsidered`) };
 	}
 
+	// LLD anchors to (a) the BASE HLD runId (not amendment applier's
+	// output) and (b) the ids of every approved amendment currently
+	// applied. Read base separately so we can capture the true
+	// runId — `requireApprovedHld` returns the effective view where
+	// meta.runId still equals base.runId, but read the disk copy to
+	// be sure.
+	const baseHld = readBaseHld(intent.repoPath, epicSlug);
+	const appliedAmendments = listApprovedAmendments(intent.repoPath, epicSlug);
+	const effectiveHash = getEffectiveHash(intent.repoPath, epicSlug, baseHld);
+
 	const artifact: LldArtifact = {
 		meta: {
 			workflow:      'design.story',
@@ -933,9 +954,9 @@ function finalizeDesignStory(
 			schemaVersion: LLD_SCHEMA_VERSION,
 			epicSlug,
 			storyId,
-			hldBaseRunId:         hld.meta.runId,
-			hldEffectiveHash:     computeHldEffectiveHash(hld.meta.runId, []),
-			hldAmendmentsApplied: [],
+			hldBaseRunId:         baseHld.meta.runId,
+			hldEffectiveHash:     effectiveHash,
+			hldAmendmentsApplied: appliedAmendments.map(a => a.id),
 		},
 		body,
 		citations,
@@ -945,8 +966,50 @@ function finalizeDesignStory(
 	if (!check.ok) return { ok: false, failure: check };
 	const renderedMd = renderedBody + renderCitationBlock(citations);
 	const renderedJson = JSON.stringify(artifact, null, 2) + '\n';
+
+	// Collect any amendment proposals from s4 / s5 outputs + persist
+	// them as pending AmendmentRecords. Dry-runs the applier against
+	// the CURRENT effective HLD to catch obviously-broken proposals
+	// before writing to disk — a proposal that even the applier
+	// refuses would never be approvable, so refusing at finalize is
+	// the right time.
+	const proposals = collectAmendmentProposals(stepOutputs);
+	const persisted: string[] = [];
+	if (proposals.length > 0) {
+		const currentEffective = applyAmendments(baseHld.body, appliedAmendments);
+		for (const p of proposals) {
+			try {
+				applyAmendments(currentEffective, [
+					{
+						id: 'dry-run', epicSlug, hldBaseRunId: baseHld.meta.runId,
+						amendment: p.amendment, rationale: p.rationale, citations: p.citations,
+						proposedBy: { workflow: 'design.story', runId, storyId, stepId: p.stepId },
+						proposedAt: new Date().toISOString(), status: 'approved',
+					},
+				]);
+			} catch (err) {
+				const msg = err instanceof AmendmentApplyError ? err.message : (err instanceof Error ? err.message : String(err));
+				return { ok: false, failure: schemaFailure(`amendment proposal from ${p.stepId} would fail applier: ${msg}`) };
+			}
+			const amendmentId = nextAmendmentId(intent.repoPath, epicSlug);
+			const record: AmendmentRecord = {
+				id:           amendmentId,
+				epicSlug,
+				hldBaseRunId: baseHld.meta.runId,
+				amendment:    p.amendment,
+				rationale:    p.rationale,
+				citations:    p.citations,
+				proposedBy:   { workflow: 'design.story', runId, storyId, stepId: p.stepId },
+				proposedAt:   new Date().toISOString(),
+				status:       'pending',
+			};
+			proposeAmendment(intent.repoPath, record);
+			persisted.push(amendmentId);
+		}
+	}
+
 	log.info(
-		{ workflow: 'design.story', runId, epicSlug, storyId, size: renderedMd.length, citations: citations.length },
+		{ workflow: 'design.story', runId, epicSlug, storyId, size: renderedMd.length, citations: citations.length, amendmentProposals: persisted.length },
 		'finalizeDesignStory: artifact ready',
 	);
 	return {
@@ -958,6 +1021,30 @@ function finalizeDesignStory(
 			artifact,
 		},
 	};
+}
+
+// Collect any amendment proposals from an LLD step-output map.
+// Returns an empty array when no step emitted a proposal.
+interface ProposalCarrier {
+	readonly stepId:    string;
+	readonly amendment: Amendment;
+	readonly rationale: string;
+	readonly citations: readonly import('./types.js').Citation[];
+}
+
+function collectAmendmentProposals(stepOutputs: Readonly<Record<string, unknown>>): readonly ProposalCarrier[] {
+	const out: ProposalCarrier[] = [];
+	for (const stepId of ['s4', 's5']) {
+		const step = stepOutputs[stepId] as { hld?: { amendmentProposal?: unknown } } | undefined;
+		if (step === undefined || typeof step !== 'object' || step.hld === undefined) continue;
+		const proposal = step.hld.amendmentProposal;
+		if (proposal === undefined || proposal === null || typeof proposal !== 'object') continue;
+		const p = proposal as { amendment?: unknown; rationale?: unknown; citations?: unknown };
+		if (!isAmendment(p.amendment) || typeof p.rationale !== 'string') continue;
+		const citations = Array.isArray(p.citations) ? (p.citations as import('./types.js').Citation[]) : [];
+		out.push({ stepId, amendment: p.amendment, rationale: p.rationale, citations });
+	}
+	return out;
 }
 
 function requireStoryId(intent: WorkflowIntent): string {

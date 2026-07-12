@@ -16,6 +16,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { getEffectiveHld } from './amendments/effective.js';
+import { makeStaleAck } from './amendments/staleness.js';
 import type { DefineArtifact } from './artifacts/define.js';
 import type { HldArtifact }    from './artifacts/hld.js';
 import { defineArtifactPaths, hldArtifactPaths, writeAtomic } from './storage.js';
@@ -83,7 +85,13 @@ export function readHldArtifact(repoPath: string, epicSlug: string): HldArtifact
 }
 
 /** Same as `readHldArtifact` but refuses when the artifact is not
- *  approved. LLD's s1 calls this. */
+ *  approved AND returns the EFFECTIVE HLD (base + approved
+ *  amendments). Downstream workflows must go through this — they
+ *  never see the raw base directly.
+ *
+ *  Amendments are only applied when the base is approved; a
+ *  pending or rejected base short-circuits with
+ *  `ArtifactNotApprovedError` as before. */
 export function requireApprovedHld(repoPath: string, epicSlug: string): HldArtifact {
 	const hld = readHldArtifact(repoPath, epicSlug);
 	if (hld.meta.approvedAt === undefined || hld.meta.approvedAt.length === 0) {
@@ -92,7 +100,37 @@ export function requireApprovedHld(repoPath: string, epicSlug: string): HldArtif
 			`HLD for Epic '${epicSlug}' is not approved. Run \`insrc workflow approve ${path}\` before starting design.story.`,
 		);
 	}
-	return hld;
+	return getEffectiveHld(repoPath, epicSlug, hld);
+}
+
+/** Read the BASE HLD (no amendments applied). Used by amendment
+ *  approval CLI + the effective-hash calculator + the staleness
+ *  scanner. Downstream workflows should call `requireApprovedHld`
+ *  instead. */
+export function readBaseHld(repoPath: string, epicSlug: string): HldArtifact {
+	return readHldArtifact(repoPath, epicSlug);
+}
+
+// ---------------------------------------------------------------------------
+// Stale-ack helper
+// ---------------------------------------------------------------------------
+
+/** Record a stale-ack override on an LLD artifact meta. Reads
+ *  `<lldJsonPath>`, adds `staleAckedAt` + `staleAckedReason`,
+ *  writes atomically. */
+export function ackStaleArtifact(jsonPath: string, reason: string): { readonly path: string; readonly ackedAt: string; readonly reason: string } {
+	if (!existsSync(jsonPath)) {
+		throw new ArtifactMissingError(`No artifact at ${jsonPath}`);
+	}
+	const raw = readFileSync(jsonPath, 'utf8');
+	const artifact = JSON.parse(raw) as { meta?: Record<string, unknown> };
+	if (typeof artifact.meta !== 'object' || artifact.meta === null) {
+		throw new Error(`Artifact at ${jsonPath} has no meta`);
+	}
+	const ack = makeStaleAck(reason);
+	const next = { ...artifact, meta: { ...artifact.meta, ...ack } };
+	writeAtomic(jsonPath, JSON.stringify(next, null, 2) + '\n');
+	return { path: jsonPath, ackedAt: ack.staleAckedAt, reason: ack.staleAckedReason };
 }
 
 // ---------------------------------------------------------------------------
