@@ -299,25 +299,31 @@ export function buildInsrcMcpServer(): McpServer {
 	);
 
 	// -------------------------------------------------------------------
-	// insrc_workflow_step — Phase A framework skeleton
-	// (plans/workflow-implementation.md §6.A). Same multi-turn shape as
+	// insrc_workflow_step — multi-turn workflow runner
+	// (plans/workflow-implementation.md). Same multi-turn shape as
 	// insrc_analyze_step: server holds state under a 22-char opaque
 	// token, hands prompts + schemas to the outer LLM turn by turn.
-	// Phase A only supports the `stub` workflow to exercise the wiring
-	// end-to-end. `define` / `design.epic` / `design.story` land in
-	// Phases B / C / D.
 	// -------------------------------------------------------------------
 	server.registerTool(
 		'insrc_workflow_step',
 		{
 			title: 'insrc workflow (multi-turn)',
 			description:
-				'Phase-driven multi-turn workflow runner. Currently supports the ' +
-				'`stub` workflow only (Phase A framework skeleton). Real ' +
-				'workflows (`define`, `design.epic`, `design.story`, and the ' +
-				'`tracker.*` utilities) land in later phases.\n\n' +
+				'Phase-driven multi-turn workflow runner. Supports:\n\n' +
+				'  - `define`        — Epic + Stories with citations (Phase B)\n' +
+				'  - `design.epic`   — HLD: framework + shared contracts + rollout (Phase C)\n' +
+				'  - `design.story`  — LLD: Story contract + tests + optional migration (Phase D)\n' +
+				'  - `tracker.push`  — push Epic+Stories to GitHub Issues (Phase F)\n' +
+				'  - `tracker.sync`  — pull GitHub Issue status back into artifact meta\n' +
+				'  - `tracker.post`  — post HLD/LLD/amendment summary as issue comment\n' +
+				'  - `stub`          — Phase A test workflow (echo/echo/echo)\n\n' +
+				'Chain: define → design.epic → design.story (per Story) → tracker.*.\n' +
+				'Each gate requires human approval via `insrc workflow approve <path>`.\n' +
+				'Amendments to the HLD are typed proposals from downstream steps; ' +
+				'review with `insrc workflow amend <slug> --list`. Use `insrc workflow ' +
+				'chain <slug>` at any time to see status + the exact next command.\n\n' +
 				'Multi-turn loop:\n\n' +
-				'  1. phase=\'start\' with { workflow, focus }. Server returns\n' +
+				'  1. phase=\'start\' with { workflow, focus, params? }. Server returns\n' +
 				'     { next: \'emit_plan\', prompt, schema, state }.\n' +
 				'  2. Emit the plan JSON matching the schema, then phase=\'plan\'\n' +
 				'     with plan=<your JSON> + state.\n' +
@@ -328,7 +334,16 @@ export function buildInsrcMcpServer(): McpServer {
 				'  4. Server returns { next: \'emit_synthesize\', prompt, schema, state }.\n' +
 				'     Emit the artifact JSON, then phase=\'synthesize\' with artifact + state.\n' +
 				'  5. Server returns { next: \'done\', path, markdown, artifact } once\n' +
-				'     the artifact has been written to disk.',
+				'     the artifact has been written to disk.\n\n' +
+				'Common params:\n' +
+				'  - design.epic:  { epicSlug }\n' +
+				'  - design.story: { epicSlug, storyId }\n' +
+				'  - tracker.push: { epicSlug, force? }\n' +
+				'  - tracker.sync: { epicSlug }\n' +
+				'  - tracker.post: { epicSlug, target: { kind: hld|lld|amendment, storyId?, amendmentId? } }\n\n' +
+				'The `guidance` field on each response explains what to do next in ' +
+				'one sentence; the `prompt` + `schema` fields are the authoritative ' +
+				'instructions. Preserve `state` verbatim between calls.',
 			annotations: {
 				readOnlyHint:   false,   // writes artifacts to disk
 				idempotentHint: false,

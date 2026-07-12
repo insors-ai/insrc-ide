@@ -114,3 +114,65 @@ If not passed, the tool uses `$INSRC_REPO` from the MCP server's
 environment. Explicit `repo` overrides it. The repo must be
 registered with the insrc daemon (`insrc repo add /path/to/repo`)
 and finished indexing.
+
+## Workflow authoring via `insrc_workflow_step` (insrc MCP server)
+
+Beyond code exploration, the insrc MCP server exposes a workflow
+runner that produces persistent, cited artifacts (Epic + Stories,
+HLD, LLD, GitHub tracker integration). Reach for
+`insrc_workflow_step` when the user asks you to:
+
+- **Define** what to build ("frame an Epic for X", "define stories
+  for Y") — runs `workflow=define`.
+- **Design HLD** ("HLD for tag filtering") — runs
+  `workflow=design.epic`. Requires an approved Define.
+- **Design LLD** ("LLD for Story s1") — runs
+  `workflow=design.story`. Requires an approved HLD.
+- **Push to GitHub** ("push Epic to GitHub", "sync tracker
+  status") — runs `workflow=tracker.push` / `tracker.sync` /
+  `tracker.post`. You invoke `gh` directly; the framework supplies
+  labels + task-list conventions.
+
+Every workflow produces a citation-grounded artifact that survives
+the session and downstream workflows read it as the authoritative
+source. Human approval gates run between phases via `insrc workflow
+approve <path>`.
+
+### Loop shape (mirrors analyze-step)
+
+```
+1. insrc_workflow_step({ phase: 'start', workflow: '...', focus: '...', params: {...} })
+   -> { next: 'emit_plan', prompt, schema, state }
+2. [emit the plan JSON matching schema]
+   insrc_workflow_step({ phase: 'plan', plan: <JSON>, state })
+   -> { next: 'emit_step', stepId, prompt, schema, state }
+3. [emit the step JSON matching schema]
+   insrc_workflow_step({ phase: 'step', stepId, response: <JSON>, state })
+   -> loop emit_step until you receive emit_synthesize
+4. [emit the artifact JSON matching schema]
+   insrc_workflow_step({ phase: 'synthesize', artifact: <JSON>, state })
+   -> { next: 'done', path, markdown, artifact } — the artifact is
+      written to disk; render `markdown` to the user
+```
+
+### Analyze vs workflow — decision heuristic
+
+- User asks a **question about the codebase** → analyze.
+- User asks you to **produce a document / decision / push** →
+  workflow.
+- User asks "does X exist?" during workflow → use analyze from
+  inside the workflow step's LLM turn (context.assemble prompts
+  explicitly call for `insrc_analyze_step` invocations).
+
+### `insrc workflow chain <slug>`
+
+If you're unsure what step comes next for an Epic, the CLI can
+answer:
+
+```
+insrc workflow chain <epic-slug>
+```
+
+Prints the current status of Define / HLD / LLDs / amendments /
+tracker + the exact next command to run.
+

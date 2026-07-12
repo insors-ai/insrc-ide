@@ -41,6 +41,7 @@ import { scanLldStaleness } from '../../workflow/amendments/staleness.js';
 import { deriveSlug } from '../../workflow/slug.js';
 import { WORKFLOW_NAMES } from '../../workflow/types.js';
 import { resolveGithubConfig } from '../../workflow/config/github.js';
+import { buildChainReport, formatChainReport } from '../../workflow/chain.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { defineArtifactPaths, writeAtomic as writeAtomicStorage } from '../../workflow/storage.js';
 
@@ -241,6 +242,24 @@ export function registerWorkflowCommands(program: Command): void {
 			try {
 				const cfg = resolveGithubConfig(opts.repo);
 				process.stdout.write(JSON.stringify(cfg, null, 2) + '\n');
+			} catch (err) {
+				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+				process.exit(1);
+			}
+		});
+
+	wf.command('chain <epic-slug>')
+		.description('report the current state of an Epic across the whole workflow chain + suggest the next action')
+		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
+		.option('--json', 'emit the report as JSON instead of formatted text')
+		.action((epicSlug: string, opts: { repo: string; json?: boolean }) => {
+			try {
+				const report = buildChainReport(opts.repo, epicSlug);
+				if (opts.json === true) {
+					process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+				} else {
+					process.stdout.write(formatChainReport(report));
+				}
 			} catch (err) {
 				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
 				process.exit(1);
