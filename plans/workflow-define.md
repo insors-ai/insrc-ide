@@ -14,10 +14,10 @@ ask and produces:
 That Epic + Stories shape is the shared backbone of the whole
 framework (meta doc §2). Everything downstream operates on it —
 `design` picks a Story, `plan` produces Tasks for a Story, `build`
-implements a Task, `test` verifies a Story. Trackers (GitHub /
-Jira / Linear) already model exactly this hierarchy so the
-framework can push the Epic + Stories out as issues after
-approval (meta doc §7.4).
+implements a Task, `test` verifies a Story. GitHub Issues gets
+an artificial Epic / Story hierarchy imposed via labels + task
+lists, so the framework can push the Epic + Stories out as
+issues after approval (meta doc §7.4).
 
 Pattern: **fine-grained recipe** (meta doc §3.10), four steps.
 
@@ -36,12 +36,12 @@ grades against criteria the author of the ask never confirmed.
 `define` breaks that chain by producing the Epic + Stories once,
 approved once, and read verbatim by every subsequent workflow.
 
-The Epic + Stories shape matches how issue trackers already model
-work, which is the second-order benefit: after approval, the
-framework can push the Epic to one tracker issue and each Story
-to a linked child issue, and pull status back into the artifact
-meta for the whole team to see progress without leaving the
-tracker.
+The Epic + Stories shape maps cleanly onto GitHub Issues via the
+artificial hierarchy conventions in `workflow-implementation.md`
+§6.F.1, which is the second-order benefit: after approval, the
+framework pushes the Epic as one issue and each Story as a
+linked child issue, and pulls status back into the artifact meta
+for the whole team to see progress without leaving GitHub.
 
 ## 2. Two flavors
 
@@ -393,9 +393,10 @@ interface DefineArtifact {
         priorEpicSlug?:    string;
         approvedAt?:       string;             // set by insrc workflow approve
         tracker?: {                            // set by insrc workflow push
-            adapter: 'github' | 'jira' | 'linear';
+            adapter: 'github';                 // GitHub only for now
             epicRef: string;                   // e.g. 'owner/repo#123'
             storyRefs: Record<string, string>; // storyId -> tracker ref
+            milestoneRef?: string;             // set when useMilestones=true
             lastSyncedAt?: string;
         };
         schemaVersion: 1;
@@ -511,18 +512,27 @@ re-run `define --reopen <epicSlug>` to iterate.
 ### Tracker push (post-approval)
 
 ```
-insrc workflow push <epic-slug> --tracker github
+insrc workflow push <epic-slug>
 ```
 
-Uses the `TrackerAdapter` (meta doc §7.4). Creates:
+Coarse handoff to the LLM (meta doc §7.4;
+`workflow-implementation.md` §6.F.1 for the conventions the
+LLM applies). The framework loads the approved artifact + the
+resolved GitHub config and hands both to the LLM with the push
+prompt; the LLM invokes `gh` directly to create:
 
-- One parent issue for the Epic (labelled `epic`) containing the
-  Epic body as its description.
-- One child issue per Story linked to the Epic. Story's
-  `userValue` + acceptance criteria become the issue body.
+- One parent Epic issue labelled `insrc:epic` + `epic:<slug>`
+  containing the Epic body as its description. Body includes a
+  GitHub task-list linking to each child Story issue.
+- One child Story issue per Story labelled `insrc:story` +
+  `epic:<slug>`, with `Epic: #<N>` back-reference in the body.
+  Story's `userValue` + acceptance criteria become the issue body.
 
-Updates the artifact meta with the tracker refs so
-`insrc workflow sync <epic-slug>` can pull status later.
+A `checklist.verify` step then re-reads the LLM's returned refs
+against the conventions and reopens execute on drift. Updates
+the artifact meta with the tracker refs so `insrc workflow sync
+<epic-slug>` can pull status later. No `--tracker` flag — GitHub
+is the only supported target.
 
 ### Tracker sync
 
@@ -530,11 +540,14 @@ Updates the artifact meta with the tracker refs so
 insrc workflow sync <epic-slug>
 ```
 
-Reads current status from the tracker (open / in-progress /
-blocked / closed) and writes it into `meta.tracker.lastSyncedAt`
-and per-Story status fields. Read-only — never edits tracker
-issues from local artifact changes (that would fight the team's
-tracker workflow).
+Same coarse-handoff shape. The framework loads the artifact's
+existing `meta.tracker` refs; the LLM reads current issue state
++ labels from GitHub via `gh issue view` and translates them
+per the status-mapping table (§6.F.1). Result is written into
+`meta.tracker.lastSyncedAt` and per-Story status fields.
+Read-only — the sync prompt explicitly forbids the LLM from
+editing GitHub issues (that would fight the team's tracker
+workflow).
 
 ### Back-flow inbound
 
@@ -568,11 +581,11 @@ Inherited from the meta framework:
   synchronously.
 - **Not auto-inferring stakeholders.** If a constraint's source is
   a stakeholder, the human names them.
-- **Not shipping Jira / Linear adapters in Phase B.** GitHub-only.
-  Others land as follow-ups.
+- **Not shipping any tracker other than GitHub.** No adapter
+  interface; direct integration only.
 - **Not implementing bidirectional tracker sync.** `push` and
-  `sync` are one-way each. Tracker → artifact updates are pulled
-  on demand; artifact → tracker updates require an explicit
+  `sync` are one-way each. GitHub → artifact updates are pulled
+  on demand; artifact → GitHub updates require an explicit
   `push --update` (deferred).
 
 ## 14. Open questions
@@ -589,4 +602,4 @@ Inherited from the meta framework:
   the tracker?** Migration story matters. Deferred to Phase B.
 - **How does `insrc workflow push` handle a repo whose GitHub
   remote isn't the intended tracker target?** Config in
-  `~/.insrc/trackers.json` per-repo. Details in Phase F.
+  `~/.insrc/github.json` per-repo. Details in Phase F.

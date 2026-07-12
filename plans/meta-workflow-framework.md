@@ -63,9 +63,10 @@ valuable slices does it break into", not for "define these names".
 It's the shortest available synonym for *problem-framing + story
 composition*.
 
-The hierarchy also matches how outside trackers (GitHub, Jira,
-Linear) already model work — so the framework can push and pull
-via a pluggable tracker adapter (§7.4).
+The Epic / Story shape maps cleanly onto GitHub Issues (see §7.4
+for the label + task-list conventions we use to impose the
+hierarchy artificially). GitHub is the only tracker integrated
+for now.
 
 ## 3. Shared primitives
 
@@ -528,58 +529,65 @@ one place the analyze framework's read-only bundle contract meets
 the workflow's write-side generation. Analyze bundles are cached
 per-run; workflow re-runs reuse them.
 
-### 7.4 Tracker integration
+### 7.4 Tracker integration (GitHub only)
 
-The Epic / Story / Task hierarchy maps 1:1 to what GitHub Issues,
-Jira, and Linear model. The framework ships a pluggable
-`TrackerAdapter` so approved Epics + Stories can be pushed to a
-tracker, and status changes there can be pulled back into artifact
-meta.
+GitHub Issues is the only tracker the framework integrates with.
+GitHub has no native Epic / Story concept — everything is an
+Issue — so the framework imposes the hierarchy artificially on
+top of Issues via label + task-list conventions. See
+`plans/workflow-implementation.md` §6.F.1 for the full mapping;
+the summary:
 
-```typescript
-interface TrackerAdapter {
-    readonly kind: 'github' | 'jira' | 'linear' | 'none';
-    pushEpic(epic: EpicRef):                       Promise<TrackerRef>;
-    pushStory(story: StoryRef, epic: TrackerRef):  Promise<TrackerRef>;
-    pushTask?(task: TaskRef,   story: TrackerRef): Promise<TrackerRef>;
-    pullStatus(refs: readonly TrackerRef[]):       Promise<StatusUpdate[]>;
-    linkPR?(pr: PrRef, task: TrackerRef):          Promise<void>;
-}
+- **Epic** → issue labeled `insrc:epic` + `epic:<slug>`. Its body
+  carries a GitHub task list linking to each child Story issue,
+  giving free progress tracking.
+- **Story** → issue labeled `insrc:story` + `epic:<slug>`. Body
+  starts with `Epic: #<N>` back-reference.
+- **Tasks** are NOT pushed as issues; they stay in the Story
+  issue body as a checkbox list until the `plan` workflow lands.
+- **Design docs** attach as comments — HLD on the Epic issue,
+  LLD on the corresponding Story issue.
+- **Status** = issue state + optional `insrc:in-progress` /
+  `insrc:blocked` labels.
+- **Auth is not ours to own.** `gh` must be installed and
+  authenticated (`gh auth login`). We never store tokens,
+  never call the GitHub REST API directly, never prompt for
+  credentials. Same principle as `CliProvider` for Claude /
+  Codex — the CLI owns its session, we invoke it.
 
-interface TrackerRef {
-    kind:      'github-issue' | 'jira-issue' | 'linear-issue';
-    ref:       string;                    // "owner/repo#123" | "PROJ-456"
-    url:       string;
-    parentRef?: string;                   // the epic issue for stories, story for tasks
-}
+There is no `TrackerAdapter` interface, and there is no `gh`
+wrapper module either. Tracker integration is a **coarse
+handoff** (same shape as `build` — meta doc §3.10): the
+framework loads the artifact + resolved GitHub config, hands
+both to the LLM with prompts spelling out the conventions
+above, and lets the LLM invoke `gh` directly. Every LLM the
+framework talks to (Claude, Codex, local qwen3-coder) already
+knows how to use `gh` — wrapping it would just re-implement
+what the LLM does natively. A `checklist.verify` step re-reads
+what the LLM did against the conventions and reopens execute
+on drift.
 
-interface StatusUpdate {
-    trackerRef: TrackerRef;
-    status:     'open' | 'in-progress' | 'blocked' | 'closed';
-    changedAt:  string;
-    assignee?:  string;
-}
-```
+If we ever add another tracker with a different native shape
+(Jira epics, Linear projects, whatever), we introduce the
+abstraction at that point — the artificial hierarchy for GitHub
+wouldn't generalise cleanly anyway.
 
-Configuration lives at `~/.insrc/trackers.json` — one entry per
-repo, plus a default. Auth is delegated: GitHub uses the local
-`gh` CLI's token (same one release publishing uses), Jira and
-Linear ask for API tokens at `insrc tracker connect` time and
-store them in the OS keychain. No secrets in the config file.
+Configuration lives at `~/.insrc/github.json` — one entry per
+repo, plus a default. See `plans/workflow-implementation.md`
+§6.F for the structure.
 
 Push direction is opt-in per Epic: after `define` approval, the
-user runs `insrc workflow push <epic-slug> --tracker github` to
-create the tracker issues. The artifact's `meta.tracker` records
-the tracker refs, so subsequent `pull` calls know which issues to
-watch.
+user runs `insrc workflow push <epic-slug>` to create the GitHub
+issues. The artifact's `meta.tracker` records the issue refs,
+so subsequent `sync` calls know which issues to watch.
 
 Pull direction is manual for v1: `insrc workflow sync <epic-slug>`
-reads current status from the tracker and updates the artifact
-meta. No polling, no webhooks — those are follow-ups.
+reads current status from GitHub and updates the artifact meta.
+No polling, no webhooks — those are follow-ups.
 
-The `TrackerAdapter` layer is dumb transport; it never talks to
-the LLM. Ship `github` first; `jira` and `linear` land as follow-ups
-once someone actually needs them.
+The tracker runners are pure coarse handoffs — the framework
+loads inputs + emits a prompt, the LLM does the work + returns
+structured refs, the framework verifies against the conventions.
 
 ### 7.5 Amendments
 
@@ -647,7 +655,7 @@ plans/
     └── <story-id>.json           # canonical, parsed by build
 
 ~/.insrc/
-├── trackers.json                 # tracker config (§7.4)
+├── github.json                   # GitHub tracker config (§7.4)
 └── workflow-runs/
     └── <epic-slug>/
         └── <workflow>-<runId>.jsonl   # full step log per run

@@ -664,21 +664,24 @@ Story). Each records its `hldRunId` so future HLD changes can be
 detected. LLD runs never contend on the same file — each writes
 to `<story-id>.md`.
 
-### 10.5 Tracker integration
+### 10.5 GitHub tracker integration
 
-Extends the tracker adapter (meta doc §7.4). After an HLD is
-approved, the framework can post its summary as a comment on the
-Epic issue. After an LLD is approved, its summary posts to the
-Story issue. Design docs don't get their OWN tracker issue —
-they attach to the Epic / Story issue the tracker push in
-`define` already created.
+Coarse handoff to the LLM (meta doc §7.4). After an HLD is
+approved, the framework hands the artifact + Epic issue ref to
+the LLM with the post prompt; the LLM invokes `gh issue
+comment` to attach the summary onto the Epic issue. After an
+LLD is approved, the same pattern posts the summary onto the
+corresponding Story issue. Design docs don't get their OWN
+issue — they attach to the Epic / Story issue that `define`'s
+push already created.
 
 ```
-insrc workflow post <path-to-design-artifact> --tracker github
+insrc workflow post <path-to-design-artifact>
 ```
 
-Read-only from tracker to artifact stays out-of-scope for design
-(status of a design doesn't map cleanly to tracker fields).
+No `--tracker` flag — GitHub is the only tracker. Read-only
+from tracker to artifact stays out-of-scope for design (status
+of a design doesn't map cleanly to issue state).
 
 ## 11. Amendments (HLD updates from downstream)
 
