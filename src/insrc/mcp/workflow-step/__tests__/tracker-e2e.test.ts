@@ -25,7 +25,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -50,13 +49,28 @@ function payload(env: Envelope): Record<string, unknown> {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/** Seed an approved Define artifact. Optionally also seed a git
- *  remote so the github config resolver succeeds via git-remote
- *  fallback (no ~/.insrc/github.json needed). */
-function seedApprovedEpic(repo: string, epicHash: string, opts: { withGitRemote: boolean }): void {
-	if (opts.withGitRemote) {
-		execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
-		execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:myorg/myrepo.git'], { cwd: repo, stdio: 'ignore' });
+/** Point the github config resolver at a temp `github.json` for the
+ *  test run. Returns a disposer that restores the prior env var. */
+function stubGithubConfig(repo: string, entry: unknown): () => void {
+	const dir = mkdtempSync(join(tmpdir(), 'insrc-gh-cfg-'));
+	const path = join(dir, 'github.json');
+	writeFileSync(path, JSON.stringify(entry, null, 2));
+	const prev = process.env['INSRC_GITHUB_CONFIG'];
+	process.env['INSRC_GITHUB_CONFIG'] = path;
+	return () => {
+		if (prev === undefined) delete process.env['INSRC_GITHUB_CONFIG'];
+		else process.env['INSRC_GITHUB_CONFIG'] = prev;
+		rmSync(dir, { recursive: true, force: true });
+	};
+}
+
+/** Seed an approved Define artifact. When `withGithubConfig` is set,
+ *  also points the resolver at a temp `github.json` with an owner+repo
+ *  so the tracker workflows resolve to a github target. */
+function seedApprovedEpic(repo: string, epicHash: string, opts: { withGithubConfig: boolean }): (() => void) | null {
+	let disposer: (() => void) | null = null;
+	if (opts.withGithubConfig) {
+		disposer = stubGithubConfig(repo, { default: { type: 'github', owner: 'myorg', repo: 'myrepo' } });
 	}
 	const paths = defineArtifactPaths(repo, epicHash);
 	mkdirSync(dirname(paths.json), { recursive: true });
@@ -77,6 +91,7 @@ function seedApprovedEpic(repo: string, epicHash: string, opts: { withGitRemote:
 		citations: [{ id: 'c1', kind: 'analyze-bundle', ref: 'todos module' }],
 	}, null, 2));
 	approveArtifactByJsonPath(path);
+	return disposer;
 }
 
 const PUSH_PLAN = {
@@ -193,8 +208,9 @@ test('tracker.push: happy path patches Epic meta.tracker with refs', async () =>
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
 	const slug = HASH;
+	let disposeCfg: (() => void) | null = null;
 	try {
-		seedApprovedEpic(repo, slug, { withGitRemote: true });
+		disposeCfg = seedApprovedEpic(repo, slug, { withGithubConfig: true });
 		const { done } = await walk(repo, slug, 'tracker.push', PUSH_EXEC_OK, PUSH_VERIFY_OK);
 		assert.equal(done['next'], 'done', JSON.stringify(done));
 
@@ -209,6 +225,7 @@ test('tracker.push: happy path patches Epic meta.tracker with refs', async () =>
 		assert.ok(outPath.includes('workflow-runs'), outPath);
 		assert.ok(existsSync(outPath));
 	} finally {
+		disposeCfg?.();
 		rmSync(repo, { recursive: true, force: true });
 	}
 });
@@ -218,8 +235,9 @@ test('tracker.push: checklist failure refuses synthesize + leaves meta untouched
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
 	const slug = HASH;
+	let disposeCfg: (() => void) | null = null;
 	try {
-		seedApprovedEpic(repo, slug, { withGitRemote: true });
+		disposeCfg = seedApprovedEpic(repo, slug, { withGithubConfig: true });
 		const { done } = await walk(repo, slug, 'tracker.push', PUSH_EXEC_OK, PUSH_VERIFY_FAIL);
 		assert.equal(done['next'], 'error', JSON.stringify(done));
 		assert.match((done['error'] as { message: string }).message, /storyLabelled/);
@@ -236,8 +254,9 @@ test('tracker.sync: happy path merges status + lastSyncedAt into meta.tracker', 
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
 	const slug = HASH;
+	let disposeCfg: (() => void) | null = null;
 	try {
-		seedApprovedEpic(repo, slug, { withGitRemote: true });
+		disposeCfg = seedApprovedEpic(repo, slug, { withGithubConfig: true });
 		// First push so sync has refs to work off of.
 		await walk(repo, slug, 'tracker.push', PUSH_EXEC_OK, PUSH_VERIFY_OK);
 		// Then sync.
@@ -260,8 +279,9 @@ test('tracker.sync: refuses when Epic has no prior tracker refs', async () => {
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
 	const slug = HASH;
+	let disposeCfg: (() => void) | null = null;
 	try {
-		seedApprovedEpic(repo, slug, { withGitRemote: true });
+		disposeCfg = seedApprovedEpic(repo, slug, { withGithubConfig: true });
 		// Skip push. sync's s1 should throw.
 		const startOut = payload(await handleWorkflowStep({
 			phase: 'start', workflow: 'tracker.sync', focus: 'sync', repo,
@@ -274,6 +294,7 @@ test('tracker.sync: refuses when Epic has no prior tracker refs', async () => {
 		assert.equal(planOut['next'], 'error');
 		assert.match((planOut['error'] as { message: string }).message, /no tracker refs/);
 	} finally {
+		disposeCfg?.();
 		rmSync(repo, { recursive: true, force: true });
 	}
 });
@@ -298,9 +319,8 @@ test('tracker.push: refuses when Epic is unapproved', async () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
 	const slug = HASH;
 	try {
-		execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
-		execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:myorg/myrepo.git'], { cwd: repo, stdio: 'ignore' });
-		// Seed but do NOT approve.
+		// Seed but do NOT approve. The approval check fires before
+		// the github-config check, so we don't need to stub either.
 		const _def=defineArtifactPaths(repo, slug); mkdirSync(dirname(_def.json), { recursive: true });
 		writeFileSync(_def.json, JSON.stringify({
 			meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1 },

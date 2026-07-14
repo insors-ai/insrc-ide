@@ -21,7 +21,7 @@ import { readAmendment } from '../../amendments/store.js';
 import { readBaseHld, readDefineArtifact, requireApprovedEpic } from '../../gates.js';
 import { readLldArtifact } from '../../artifacts/lld-io.js';
 import { renderTrackerHldSummary, renderTrackerLldSummary, renderTrackerAmendmentSummary } from './summaries.js';
-import { resolveGithubConfig } from '../../config/github.js';
+import { resolveGithubConfig, type ResolvedGithubConfig } from '../../config/github.js';
 import { assertEpicHash } from '../../hash.js';
 import type { StepRunnerContext } from '../../types.js';
 import type { PostContext, PushContext, SyncContext } from './schemas.js';
@@ -34,7 +34,7 @@ export function assemblePushContext(ctx: StepRunnerContext): PushContext {
 	const epicHash = requireEpicHash(ctx);
 	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
 	const epicSlug = epic.meta.epicSlug ?? epicHash;
-	const gh   = resolveGithubConfig(ctx.intent.repoPath);
+	const gh   = requireGithubAdapter(resolveGithubConfig(ctx.intent.repoPath), ctx.intent.workflow);
 	const force = ctx.intent.params['force'] === true;
 
 	// Compose Epic issue body from the define artifact.
@@ -83,7 +83,7 @@ export function assembleSyncContext(ctx: StepRunnerContext): SyncContext {
 	const epicHash = requireEpicHash(ctx);
 	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
 	const epicSlug = epic.meta.epicSlug ?? epicHash;
-	const gh   = resolveGithubConfig(ctx.intent.repoPath);
+	const gh   = requireGithubAdapter(resolveGithubConfig(ctx.intent.repoPath), ctx.intent.workflow);
 	const trackerMeta = (epic.meta as { tracker?: { epicRef?: string; storyRefs?: Record<string, string>; milestoneRef?: string } }).tracker;
 	if (trackerMeta === undefined || typeof trackerMeta.epicRef !== 'string' || typeof trackerMeta.storyRefs !== 'object') {
 		throw new Error(
@@ -113,7 +113,7 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 	const epicHash = requireEpicHash(ctx);
 	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
 	const epicSlug = epic.meta.epicSlug ?? epicHash;
-	const gh   = resolveGithubConfig(ctx.intent.repoPath);
+	const gh   = requireGithubAdapter(resolveGithubConfig(ctx.intent.repoPath), ctx.intent.workflow);
 	const targetKind = (ctx.intent.params['target'] as { kind?: unknown } | undefined)?.kind;
 	if (targetKind !== 'hld' && targetKind !== 'lld' && targetKind !== 'amendment') {
 		throw new Error(`tracker.post: params.target.kind must be 'hld' | 'lld' | 'amendment'`);
@@ -168,6 +168,19 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Narrow the resolved config to the github adapter or throw a clear
+ *  refuse-message. Callers use this to reject `tracker.*` MCP flows
+ *  when the user has opted out via `"type": "none"`. */
+function requireGithubAdapter(cfg: ResolvedGithubConfig, workflow: string): Extract<ResolvedGithubConfig, { type: 'github' }> {
+	if (cfg.type === 'none') {
+		throw new Error(
+			`${workflow}: tracker is disabled via config (type: none, source: ${cfg.source}). ` +
+			`Remove or change the entry in ~/.insrc/github.json to enable.`,
+		);
+	}
+	return cfg;
+}
 
 function requireEpicHash(ctx: StepRunnerContext): string {
 	const hash = ctx.intent.params['epicHash'];

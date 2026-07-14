@@ -135,6 +135,14 @@ insrc workflow approve docs/defines/DEF-<h16>.md
 
 Downstream workflows refuse to run until this happens.
 
+> **Auto tracker.** Approving an HLD or LLD automatically pushes the
+> corresponding GitHub issue (Epic for HLD, Story for LLD) via `gh`
+> and patches the artifact's meta with the resulting ref. Repeat
+> approves are idempotent — a second run detects the existing ref
+> and skips. Use `--no-tracker` on the approve command to opt out
+> for one call; you can push manually later via the batch
+> `tracker.push` workflow.
+
 ### 3. Design the HLD
 
 > Use `insrc_workflow_step` to run design.epic for
@@ -170,14 +178,21 @@ Output: `docs/designs/LLD-<h16>-s1.md`. Approve.
 
 ### 5. Push to GitHub (optional)
 
-If you want the tracker integration:
+**The tracker is opt-in.** When `~/.insrc/github.json` is absent or
+no entry matches, `resolveGithubConfig` returns `{ type: 'none' }` —
+the approve-time auto-push short-circuits with
+`skipped (tracker disabled ...)`, and the manual `tracker.push` /
+`tracker.sync` / `tracker.post` MCP workflows refuse with a clear
+message. Even a repo whose git origin points at github is not
+auto-enabled; you must explicitly opt in via config.
+
+To enable the GitHub adapter:
 
 ```
-# Optional: override the auto-detected owner/repo
 mkdir -p ~/.insrc
 cat > ~/.insrc/github.json <<'JSON'
 {
-  "default": { "owner": "myorg", "repo": "myrepo", "useMilestones": false }
+  "default": { "type": "github", "owner": "myorg", "repo": "myrepo", "useMilestones": false }
 }
 JSON
 
@@ -186,6 +201,29 @@ insrc workflow gh-config
 
 # Push Epic + Stories via the MCP tool
 ```
+
+The `type` field selects the tracker adapter:
+
+- `"type": "github"` — push to GitHub Issues via `gh`.
+- `"type": "none"` — explicit opt-out. Same effect as omitting the
+  entry entirely; the explicit form is useful when you want to
+  override an inherited `default` on a specific repo.
+
+Per-repo overrides win over the `default` entry:
+
+```
+{
+  "default": { "type": "github", "owner": "myorg", "repo": "shared" },
+  "repos": {
+    "/path/to/local-only-repo": { "type": "none" }
+  }
+}
+```
+
+For a `default: { type: "github" }` entry without owner/repo, the
+resolver auto-detects the target from `git remote get-url origin`.
+This shortcut requires the `type: "github"` opt-in — the resolver
+never auto-detects when the entry is missing or empty.
 
 Then from your client:
 

@@ -46,9 +46,22 @@ import { PATHS } from '../../shared/paths.js';
 // Types
 // ---------------------------------------------------------------------------
 
+/** Adapter type. `'github'` uses the `gh` CLI; `'none'` disables all
+ *  tracker integration (approve-time auto-push AND manual
+ *  `tracker.*` MCP workflows). The default when no matching entry
+ *  is found (including when `~/.insrc/github.json` is absent) is
+ *  `'none'` — the tracker is opt-in. Set `"type": "github"` with an
+ *  owner + repo (or rely on the entry-level owner/repo for
+ *  back-compat) to enable. */
+export type TrackerAdapter = 'github' | 'none';
+
 export interface GithubEntry {
-	readonly owner:         string;
-	readonly repo:          string;
+	/** Adapter selector. If omitted, defaults to `'github'`. Set to
+	 *  `'none'` to disable the tracker for this entry — owner/repo
+	 *  then become irrelevant and can be omitted. */
+	readonly type?:         TrackerAdapter;
+	readonly owner?:        string;
+	readonly repo?:         string;
 	readonly epicLabel?:    string;      // default 'insrc:epic'
 	readonly storyLabel?:   string;      // default 'insrc:story'
 	readonly useMilestones?: boolean;    // default false
@@ -59,18 +72,26 @@ export interface GithubConfigFile {
 	readonly repos?:   Readonly<Record<string, GithubEntry>>;
 }
 
-/** Resolved config for a specific repo. All optional label fields
- *  are filled in with the built-in defaults. */
-export interface ResolvedGithubConfig {
-	readonly owner:         string;
-	readonly repo:          string;
-	readonly epicLabel:     string;
-	readonly storyLabel:    string;
-	readonly useMilestones: boolean;
-	/** How the owner/repo were resolved. Surfaced to the user so
-	 *  they can trace surprising pushes. */
-	readonly source:        'per-repo-config' | 'default-config' | 'git-remote';
-}
+export type ResolvedGithubConfigSource = 'per-repo-config' | 'default-config' | 'git-remote';
+
+/** Discriminated by `type`.
+ *   - `type: 'github'` carries owner/repo/labels (guaranteed non-empty).
+ *   - `type: 'none'`   carries no repo target; every tracker call
+ *                      short-circuits with a clear skip / refuse. */
+export type ResolvedGithubConfig =
+	| {
+		readonly type:          'github';
+		readonly owner:         string;
+		readonly repo:          string;
+		readonly epicLabel:     string;
+		readonly storyLabel:    string;
+		readonly useMilestones: boolean;
+		readonly source:        ResolvedGithubConfigSource;
+	}
+	| {
+		readonly type:          'none';
+		readonly source:        ResolvedGithubConfigSource;
+	};
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -83,7 +104,12 @@ const DEFAULT_STORY_LABEL: string = 'insrc:story';
 // Config path
 // ---------------------------------------------------------------------------
 
+/** Resolves the config file location. Honors `INSRC_GITHUB_CONFIG`
+ *  when set — used by tests to keep the resolver away from the user's
+ *  real `~/.insrc/github.json`. */
 export function githubConfigPath(): string {
+	const override = process.env['INSRC_GITHUB_CONFIG'];
+	if (typeof override === 'string' && override.length > 0) return override;
 	return join(PATHS.insrc, 'github.json');
 }
 
@@ -91,11 +117,10 @@ export function githubConfigPath(): string {
 // Loader
 // ---------------------------------------------------------------------------
 
-export function loadGithubConfigFile(): GithubConfigFile {
-	const path = githubConfigPath();
-	if (!existsSync(path)) return {};
+export function loadGithubConfigFile(configPath: string = githubConfigPath()): GithubConfigFile {
+	if (!existsSync(configPath)) return {};
 	try {
-		const raw = readFileSync(path, 'utf8');
+		const raw = readFileSync(configPath, 'utf8');
 		const parsed = JSON.parse(raw) as unknown;
 		if (typeof parsed !== 'object' || parsed === null) return {};
 		return parsed as GithubConfigFile;
@@ -118,48 +143,90 @@ export class GithubConfigError extends Error {
 /** Resolve the effective config for a repo. Precedence:
  *   1. `github.json` `repos.<repoPath>` entry
  *   2. `github.json` `default` entry
- *   3. `git remote get-url origin` parsed to owner/repo
+ *   3. Implicit default: `{ type: 'none' }`
  *
- *  Throws `GithubConfigError` when no path resolves. */
-export function resolveGithubConfig(repoPath: string): ResolvedGithubConfig {
-	const file = loadGithubConfigFile();
+ *  The result is a discriminated union on `type`:
+ *   - `{ type: 'github', owner, repo, ... }` — a real tracker target.
+ *   - `{ type: 'none' }` — no tracker. This is the DEFAULT when no
+ *     matching entry resolves (including when the config file is
+ *     absent). Tracker operations short-circuit cleanly.
+ *
+ *  Enable `github` explicitly by either:
+ *   - `{ type: "github", owner: "...", repo: "..." }` (recommended), OR
+ *   - `{ owner: "...", repo: "..." }` (implicit github, back-compat), OR
+ *   - `{ type: "github" }` alone — auto-detects owner/repo from
+ *     `git remote get-url origin`. Throws `GithubConfigError` if the
+ *     remote can't be parsed.
+ *
+ *  Throws `GithubConfigError` only when the matched entry explicitly
+ *  asked for github but no owner/repo could be resolved. */
+export function resolveGithubConfig(repoPath: string, configPath: string = githubConfigPath()): ResolvedGithubConfig {
+	const file = loadGithubConfigFile(configPath);
 	const perRepo = file.repos?.[repoPath];
-	if (perRepo !== undefined && perRepo.owner.length > 0 && perRepo.repo.length > 0) {
+	if (perRepo !== undefined) {
+		const resolved = resolveEntry(perRepo, file.default, repoPath, 'per-repo-config');
+		if (resolved !== null) return resolved;
+	}
+	if (file.default !== undefined) {
+		const resolved = resolveEntry(file.default, undefined, repoPath, 'default-config');
+		if (resolved !== null) return resolved;
+	}
+	// Implicit default: none. The user hasn't opted in.
+	return { type: 'none', source: 'default-config' };
+}
+
+/** Resolve a single entry into a config value.
+ *   - `type: 'none'` → none.
+ *   - Entry has owner AND repo → github (type defaults to github when omitted).
+ *   - Explicit `type: 'github'` with missing owner/repo → git-remote fallback,
+ *     throwing `GithubConfigError` when that fails.
+ *   - Empty / partial entries → null (caller falls through to the next tier). */
+function resolveEntry(
+	entry: GithubEntry,
+	fallbackDefaults: GithubEntry | undefined,
+	repoPath: string,
+	source: ResolvedGithubConfigSource,
+): ResolvedGithubConfig | null {
+	if (entry.type === 'none') {
+		return { type: 'none', source };
+	}
+	const hasOwner = typeof entry.owner === 'string' && entry.owner.length > 0;
+	const hasRepo  = typeof entry.repo  === 'string' && entry.repo.length  > 0;
+	if (hasOwner && hasRepo) {
 		return {
-			owner:         perRepo.owner,
-			repo:          perRepo.repo,
-			epicLabel:     perRepo.epicLabel  ?? file.default?.epicLabel  ?? DEFAULT_EPIC_LABEL,
-			storyLabel:    perRepo.storyLabel ?? file.default?.storyLabel ?? DEFAULT_STORY_LABEL,
-			useMilestones: perRepo.useMilestones ?? file.default?.useMilestones ?? false,
-			source:        'per-repo-config',
+			type:          'github',
+			owner:         entry.owner!,
+			repo:          entry.repo!,
+			epicLabel:     entry.epicLabel  ?? fallbackDefaults?.epicLabel  ?? DEFAULT_EPIC_LABEL,
+			storyLabel:    entry.storyLabel ?? fallbackDefaults?.storyLabel ?? DEFAULT_STORY_LABEL,
+			useMilestones: entry.useMilestones ?? fallbackDefaults?.useMilestones ?? false,
+			source,
 		};
 	}
-	if (file.default !== undefined && file.default.owner.length > 0 && file.default.repo.length > 0) {
+	if (entry.type === 'github') {
+		// User explicitly asked for github but did not name a target.
+		// Fall back to the git origin remote, or throw with a
+		// specific reason so the misconfiguration surfaces.
+		const remote = parseGitRemoteOwnerRepo(repoPath);
+		if (remote === null) {
+			throw new GithubConfigError(
+				`GitHub tracker requested (type: 'github') for repo '${repoPath}' but no ` +
+				`owner/repo is set and 'git remote get-url origin' could not be parsed. ` +
+				`Add owner + repo to the entry in ${githubConfigPath()}.`,
+			);
+		}
 		return {
-			owner:         file.default.owner,
-			repo:          file.default.repo,
-			epicLabel:     file.default.epicLabel  ?? DEFAULT_EPIC_LABEL,
-			storyLabel:    file.default.storyLabel ?? DEFAULT_STORY_LABEL,
-			useMilestones: file.default.useMilestones ?? false,
-			source:        'default-config',
+			type:          'github',
+			owner:         remote.owner,
+			repo:          remote.repo,
+			epicLabel:     entry.epicLabel  ?? fallbackDefaults?.epicLabel  ?? DEFAULT_EPIC_LABEL,
+			storyLabel:    entry.storyLabel ?? fallbackDefaults?.storyLabel ?? DEFAULT_STORY_LABEL,
+			useMilestones: entry.useMilestones ?? fallbackDefaults?.useMilestones ?? false,
+			source:        'git-remote',
 		};
 	}
-	// git remote fallback
-	const remote = parseGitRemoteOwnerRepo(repoPath);
-	if (remote === null) {
-		throw new GithubConfigError(
-			`No GitHub config for repo '${repoPath}'. Add an entry to ` +
-			`${githubConfigPath()} or ensure the repo has a GitHub origin remote.`,
-		);
-	}
-	return {
-		owner:         remote.owner,
-		repo:          remote.repo,
-		epicLabel:     DEFAULT_EPIC_LABEL,
-		storyLabel:    DEFAULT_STORY_LABEL,
-		useMilestones: false,
-		source:        'git-remote',
-	};
+	// Empty entry with no `type`, no owner, no repo — nothing to do; let the caller fall through.
+	return null;
 }
 
 /** Parse `git remote get-url origin` for a GitHub owner/repo pair.

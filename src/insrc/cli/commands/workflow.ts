@@ -48,6 +48,7 @@ import { WORKFLOW_NAMES } from '../../workflow/types.js';
 import { resolveGithubConfig } from '../../workflow/config/github.js';
 import { buildChainReport, formatChainReport } from '../../workflow/chain.js';
 import { defineArtifactPaths, writeAtomic as writeAtomicStorage } from '../../workflow/storage.js';
+import { autoPushEpicOnHld, autoPushStoryOnLld, type AutoPushResult } from '../../workflow/tracker-auto.js';
 
 export function registerWorkflowCommands(program: Command): void {
 	const wf = program
@@ -101,12 +102,26 @@ export function registerWorkflowCommands(program: Command): void {
 		});
 
 	wf.command('approve <artifact-path>')
-		.description('mark a workflow artifact approved (sets meta.approvedAt)')
-		.action((artifactPath: string) => {
+		.description('mark a workflow artifact approved (sets meta.approvedAt). HLD approves auto-create a GitHub Epic issue; LLD approves auto-create Story issues (opt out with --no-tracker).')
+		.option('--no-tracker', 'skip the automatic GitHub tracker push on approve')
+		.action((artifactPath: string, opts: { tracker: boolean }) => {
 			try {
 				const jsonPath = jsonPathForMd(artifactPath);
 				const r = approveArtifactByJsonPath(jsonPath);
 				process.stdout.write(`approved ${r.workflow}: ${r.path} at ${r.approvedAt}\n`);
+				if (opts.tracker === false) {
+					process.stdout.write(`(tracker push skipped: --no-tracker)\n`);
+					return;
+				}
+				let push: AutoPushResult | undefined;
+				if (r.workflow === 'design.epic') {
+					push = autoPushEpicOnHld(r.path);
+				} else if (r.workflow === 'design.story') {
+					push = autoPushStoryOnLld(r.path);
+				}
+				if (push !== undefined) {
+					reportAutoPushResult(push);
+				}
 			} catch (err) {
 				process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
 				process.exit(1);
@@ -268,6 +283,35 @@ export function registerWorkflowCommands(program: Command): void {
 				process.exit(1);
 			}
 		});
+
+	function reportAutoPushResult(r: AutoPushResult): void {
+		switch (r.status) {
+			case 'created': {
+				if (r.epicRef !== undefined) {
+					process.stdout.write(`tracker: created Epic ${r.epicRef}\n`);
+				}
+				if (r.storyRef !== undefined) {
+					process.stdout.write(`tracker: created Story ${r.storyRef}\n`);
+				}
+				if (r.labelsCreated !== undefined && r.labelsCreated.length > 0) {
+					process.stdout.write(`tracker: labels ensured: ${r.labelsCreated.join(', ')}\n`);
+				}
+				return;
+			}
+			case 'already-exists': {
+				const ref = r.epicRef ?? r.storyRef ?? '?';
+				process.stdout.write(`tracker: already linked to ${ref}\n`);
+				return;
+			}
+			case 'skipped':
+				process.stdout.write(`tracker: skipped (${r.reason})\n`);
+				return;
+			case 'failed':
+				process.stderr.write(`tracker: FAILED (${r.reason})\n`);
+				process.stderr.write(`tracker: approve is still committed on disk; push manually via 'insrc workflow' tracker later\n`);
+				return;
+		}
+	}
 
 	wf.command('unlink <epic-hash>')
 		.description('clear tracker meta from the local Epic artifact (does NOT touch GitHub)')
