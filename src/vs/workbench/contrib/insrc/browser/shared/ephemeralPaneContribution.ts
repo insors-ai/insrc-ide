@@ -18,7 +18,7 @@ const EPHEMERAL_TMP_SUBPATH = ['.insrc', 'tmp'] as const;
 /**
  * Resolve the URI of the ephemeral-pane temp directory
  * (`<localUserHome>/.insrc/tmp/`). Mirrors `PATHS.tmp` from
- * `src/insrc/shared/paths.ts` -- the daemon side imports that
+ * `insors-ai/insrc:src/shared/paths.ts` -- the daemon side imports that
  * constant directly; the workbench side computes the URI from
  * `IPathService.userHome({ preferLocal: true })` because the
  * workbench can't depend on node:os/node:path at this layer.

@@ -16,8 +16,12 @@ import { ILogService } from '../../log/common/log.js';
 // Defaults when no configuration is supplied. Actual values should come
 // from the caller via insrc.daemon.repoUrl / insrc.daemon.repoBranch so
 // forks and private mirrors can point the installer elsewhere.
-const DEFAULT_REPO_URL = 'https://github.com/insors-ai/insrc-ide.git';
-const DEFAULT_REPO_BRANCH = 'release/1.96';
+//
+// The daemon lives in its own repo (`insors-ai/insrc`) since the split
+// from `insors-ai/insrc-ide`. Repo root layout there: package.json at
+// top level, `src/`, `out/` -- no wrapping `src/insrc/` sub-tree.
+const DEFAULT_REPO_URL = 'https://github.com/insors-ai/insrc.git';
+const DEFAULT_REPO_BRANCH = 'main';
 
 const INSRC_DIR = join(homedir(), '.insrc');
 export const DAEMON_DIR = join(INSRC_DIR, 'daemon');
@@ -33,8 +37,10 @@ function resolveRepoConfig(config: DaemonRepoConfig | undefined): DaemonRepoConf
 		repoBranch: config?.repoBranch || DEFAULT_REPO_BRANCH,
 	};
 }
-const DAEMON_SRC = join(DAEMON_DIR, 'src', 'insrc');
-const DAEMON_OUT = join(DAEMON_DIR, 'out', 'insrc');
+// Daemon repo root == DAEMON_DIR: npm install / npm run build both run
+// against the clone's top-level package.json.
+const DAEMON_SRC = DAEMON_DIR;
+const DAEMON_OUT = join(DAEMON_DIR, 'out');
 const DAEMON_ENTRY_CLONED = join(DAEMON_OUT, 'daemon', 'index.js');
 
 const INSTALL_PROCESS_TIMEOUT_MS = 30 * 60_000;  // 30 min cap for clone/install/build
@@ -45,13 +51,12 @@ const UPDATE_LOG_HEAD = '[insrc-installer]';
 // ---------------------------------------------------------------------------
 
 /**
- * The daemon always runs from the cloned install at ~/.insrc/daemon/. The
- * install path runs `linkNodeModules` so node_modules is reachable from
- * the compiled entry; the local out/insrc/ build is for compile-checking
- * only and shouldn't be spawned (gulp doesn't populate node_modules
- * there). The shape stays a discriminated `{ path, isDev }` so callers
- * that distinguish dev from cloned (logging, error messages) keep
- * compiling.
+ * The daemon always runs from the cloned install at ~/.insrc/daemon/.
+ * The install path runs `linkNodeModules` so node_modules is reachable
+ * from the compiled entry. There is no in-tree daemon source in this
+ * repo since the split -- the daemon lives at insors-ai/insrc. The
+ * shape stays a discriminated `{ path, isDev }` so callers that
+ * distinguish dev from cloned (logging, error messages) keep compiling.
  */
 export function resolveDaemonEntry(): { path: string; isDev: boolean } {
 	return { path: DAEMON_ENTRY_CLONED, isDev: false };
@@ -382,7 +387,8 @@ async function cleanupLockFiles(): Promise<void> {
 /**
  * ESM resolution can't be swayed by NODE_PATH, so ensure the daemon's
  * node_modules is reachable via the normal upward walk from the compiled
- * entry. Symlink out/insrc/node_modules -> ../../src/insrc/node_modules.
+ * entry. Symlink out/node_modules -> ../node_modules (the repo root's
+ * node_modules that `npm install` produces).
  */
 async function linkNodeModules(logService: ILogService): Promise<void> {
 	const link = join(DAEMON_OUT, 'node_modules');

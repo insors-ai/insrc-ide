@@ -95,13 +95,13 @@ configurationRegistry.registerConfiguration({
 		},
 		'insrc.daemon.repoUrl': {
 			type: 'string',
-			default: 'https://github.com/insors-ai/insrc-ide.git',
-			description: localize('insrc.daemon.repoUrl', 'Git URL to clone the daemon source from.'),
+			default: 'https://github.com/insors-ai/insrc.git',
+			description: localize('insrc.daemon.repoUrl', 'Git URL to clone the daemon source from. Defaults to the standalone insrc backend repo; existing installs on the old insrc-ide URL keep their setting.'),
 			scope: ConfigurationScope.MACHINE,
 		},
 		'insrc.daemon.repoBranch': {
 			type: 'string',
-			default: 'release/1.96',
+			default: 'main',
 			description: localize('insrc.daemon.repoBranch', 'Branch of the daemon repo to clone and track.'),
 			scope: ConfigurationScope.MACHINE,
 		},

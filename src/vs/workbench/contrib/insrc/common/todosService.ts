@@ -11,7 +11,7 @@ import type { Event } from '../../../../base/common/event.js';
  * (plans/todo-framework.md Phase 4).
  *
  * Types here mirror the shapes defined in the daemon's
- * `src/insrc/shared/todos.ts`. They are intentionally duplicated
+ * `insors-ai/insrc:src/shared/todos.ts`. They are intentionally duplicated
  * (not imported across the project boundary) because the workbench
  * contrib and the daemon are compiled with separate tsconfigs; the
  * wire format is the contract.
@@ -36,7 +36,7 @@ export type TodoListStatus =
 
 /**
  * Agent family id -- mirror of the `AgentFamily` union in
- * `src/insrc/shared/agent-registry.ts`. Kept loose (string) so UI
+ * `insors-ai/insrc:src/shared/agent-registry.ts`. Kept loose (string) so UI
  * code doesn't break when the daemon registry gains a new family;
  * the badge renderer falls back to the raw id string if it doesn't
  * recognise the value.

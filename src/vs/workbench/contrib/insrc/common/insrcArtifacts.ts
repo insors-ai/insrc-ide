@@ -16,7 +16,7 @@ import type { TodoItem, TodoList } from './todosService.js';
  * fields the browser cares about.
  *
  * The canonical shape lives in the daemon at
- * `src/insrc/shared/artifacts.ts` (`ArtifactItemMeta`). Types here
+ * `insors-ai/insrc:src/shared/artifacts.ts` (`ArtifactItemMeta`). Types here
  * mirror that subset -- same duplication pattern
  * `todosService.ts` uses for TodoItem / TodoList. The wire format is
  * the contract; no cross-boundary imports.

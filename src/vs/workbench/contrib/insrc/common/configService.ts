@@ -63,7 +63,7 @@ export interface IInsrcConfigService {
 }
 
 // ---------------------------------------------------------------------------
-// Shared DTOs (mirror src/insrc/daemon/providers.ts over the wire)
+// Shared DTOs (mirror insors-ai/insrc:src/daemon/providers.ts over the wire)
 // ---------------------------------------------------------------------------
 
 export type ProviderName = 'local' | 'openai' | 'anthropic' | 'gemini' | 'mistral';

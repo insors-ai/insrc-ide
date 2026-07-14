@@ -2,7 +2,9 @@
 #
 # Control script for the insrc daemon installed at ~/.insrc/daemon.
 #
-# The daemon lives in a git checkout of insrc-ide at ~/.insrc/daemon.
+# The daemon lives in a git checkout of insors-ai/insrc at ~/.insrc/daemon
+# (moved out of insors-ai/insrc-ide in the 2026-07-14 split; repo root
+# now carries package.json + src/ + out/ directly, no wrapping src/insrc/).
 # Between edits: push commits to origin from your working tree, then
 # run `daemon-ctl.sh restart` from either checkout -- this script
 # targets ~/.insrc/daemon regardless of where you invoke it from.
@@ -37,7 +39,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 DAEMON_ROOT="${INSRC_DAEMON_ROOT:-$HOME/.insrc/daemon}"
-DAEMON_SRC="$DAEMON_ROOT/src/insrc"
+# npm install / build run at the repo root (where package.json is).
+DAEMON_SRC="$DAEMON_ROOT"
 LOG_DIR="${INSRC_CTL_LOG_DIR:-/tmp/insrc}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/daemon-ctl-$(date +%Y%m%d-%H%M%S)-$$.log"
@@ -50,8 +53,9 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG_FILE"; }
 die() { log "ERROR: $*"; exit "${2:-1}"; }
 
 require_daemon_dir() {
-	[ -d "$DAEMON_ROOT/.git"  ] || die "not a git checkout: $DAEMON_ROOT" 2
-	[ -d "$DAEMON_SRC"        ] || die "missing src tree: $DAEMON_SRC" 2
+	[ -d "$DAEMON_ROOT/.git"        ] || die "not a git checkout: $DAEMON_ROOT" 2
+	[ -f "$DAEMON_ROOT/package.json" ] || die "missing package.json at $DAEMON_ROOT (post-split, repo root should carry it)" 2
+	[ -d "$DAEMON_ROOT/src"         ] || die "missing src/ tree at $DAEMON_ROOT" 2
 }
 
 usage() {
@@ -97,7 +101,7 @@ sync_repo() {
 npm_install_if_needed() {
 	local lock_before="${SYNC_LOCK_HASH_BEFORE:-}"
 	local lock_after
-	lock_after=$(git -C "$DAEMON_ROOT" hash-object src/insrc/package-lock.json 2>/dev/null || echo "")
+	lock_after=$(git -C "$DAEMON_ROOT" hash-object package-lock.json 2>/dev/null || echo "")
 
 	# Force install on first run or when the lock changed via the pull.
 	if [ -z "$lock_before" ] || [ "$lock_before" != "$lock_after" ] || [ ! -d "$DAEMON_SRC/node_modules" ]; then
@@ -115,8 +119,9 @@ npm_build() {
 
 daemon_cli() {
 	# `insrc` is not on PATH in most setups; drive the CLI via tsx from
-	# the same source tree we just built.
-	( cd "$DAEMON_SRC" && npx --no-install tsx cli/index.ts "$@" )
+	# the same source tree we just built. Post-split, the CLI entry is
+	# at $DAEMON_ROOT/src/cli/index.ts.
+	( cd "$DAEMON_ROOT" && npx --no-install tsx src/cli/index.ts "$@" )
 }
 
 # Poll for the daemon pid file to disappear, meaning the daemon has
@@ -181,7 +186,7 @@ cmd_start() {
 	require_daemon_dir
 	local branch="${BRANCH:-$(git -C "$DAEMON_ROOT" rev-parse --abbrev-ref HEAD)}"
 	local lock_before
-	lock_before=$(git -C "$DAEMON_ROOT" hash-object src/insrc/package-lock.json 2>/dev/null || echo "")
+	lock_before=$(git -C "$DAEMON_ROOT" hash-object package-lock.json 2>/dev/null || echo "")
 	SYNC_LOCK_HASH_BEFORE="$lock_before"
 
 	[ "$SKIP_SYNC"    -eq 1 ] || sync_repo "$branch"
@@ -233,7 +238,7 @@ cmd_update() {
 	require_daemon_dir
 	local branch="${BRANCH:-$(git -C "$DAEMON_ROOT" rev-parse --abbrev-ref HEAD)}"
 	local lock_before
-	lock_before=$(git -C "$DAEMON_ROOT" hash-object src/insrc/package-lock.json 2>/dev/null || echo "")
+	lock_before=$(git -C "$DAEMON_ROOT" hash-object package-lock.json 2>/dev/null || echo "")
 	SYNC_LOCK_HASH_BEFORE="$lock_before"
 
 	[ "$SKIP_SYNC"    -eq 1 ] || sync_repo "$branch"

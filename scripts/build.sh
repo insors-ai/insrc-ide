@@ -7,12 +7,15 @@
 # heap to 8 GB and routes through gulp's compile task.
 #
 # Usage:
-#   scripts/build.sh              # IDE + daemon (default)
-#   scripts/build.sh ide          # IDE only (VSCode workbench)
-#   scripts/build.sh daemon       # daemon only (src/insrc -> out/insrc)
-#   scripts/build.sh watch        # incremental watcher (IDE only)
-#   scripts/build.sh clean        # remove out/ and out-build/ then full build
+#   scripts/build.sh              # IDE compile (VSCode workbench)
+#   scripts/build.sh ide          # alias for the default
+#   scripts/build.sh watch        # incremental watcher
+#   scripts/build.sh clean        # remove out/ and out-build/ then rebuild
 #   HEAP_MB=12288 scripts/build.sh # override heap size
+#
+# Note: the daemon lives in the sibling repo insors-ai/insrc since the
+# 2026-07-14 split -- build it there with `cd ../insrc && npm run build`.
+# This script only handles the IDE (VSCode fork + insrc contributions).
 #
 # Each invocation writes a timestamped log to
 #   /tmp/insrc/build-YYYYMMDD-HHMMSS-<pid>.log
@@ -66,61 +69,30 @@ build_ide() {
 	npm run compile
 }
 
-build_daemon() {
-	install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
-	echo "[insrc-build] daemon compile (tsc -> out/insrc)"
-	( cd src/insrc && npm run build )
-	# tsc only emits .ts -> .js; non-code assets (HTML templates, JSON
-	# metadata, etc.) need to be mirrored into out/insrc so the daemon
-	# can read them at runtime via paths relative to import.meta.url.
-	if [ -d "src/insrc/assets" ]; then
-		echo "[insrc-build] copying daemon assets"
-		mkdir -p out/insrc/assets
-		# -a preserves timestamps so incremental builds stay cheap.
-		cp -a src/insrc/assets/. out/insrc/assets/
-	fi
-	# Mirror src/insrc/prompts/ to out/insrc/prompts/. The analyze
-	# Context Builder + future per-target task templates load prompt
-	# .md files at runtime via paths relative to import.meta.url
-	# (resolved to <insrcRoot>/prompts/...), so the .md files must
-	# live next to the compiled .js. tsc does not copy .md files;
-	# rsync handles it deterministically.
-	if [ -d "src/insrc/prompts" ]; then
-		echo "[insrc-build] copying daemon prompt files"
-		mkdir -p out/insrc/prompts
-		rsync -a --delete src/insrc/prompts/ out/insrc/prompts/
-	fi
-}
-
-cmd="${1:-all}"
+cmd="${1:-ide}"
 shift || true
 
 case "$cmd" in
-	all|""|compile)
-		install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
-		build_ide
-		build_daemon
-		;;
-	ide)
+	all|""|compile|ide)
 		build_ide
 		;;
 	daemon)
-		build_daemon
+		echo "[insrc-build] daemon lives in the sibling repo insors-ai/insrc since the 2026-07-14 split." >&2
+		echo "[insrc-build]   cd ../insrc && npm run build" >&2
+		exit 2
 		;;
 	watch)
-		echo "[insrc-build] IDE watch (heap=${HEAP_MB}MB) -- run 'scripts/build.sh daemon' separately after daemon-side edits"
+		echo "[insrc-build] IDE watch (heap=${HEAP_MB}MB)"
 		exec npm run watch "$@"
 		;;
 	clean)
 		echo "[insrc-build] clean"
 		rm -rf out out-build
-		install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
 		build_ide
-		build_daemon
 		;;
 	*)
 		echo "Unknown command: $cmd" >&2
-		echo "Usage: $0 [all|ide|daemon|watch|clean]" >&2
+		echo "Usage: $0 [ide|watch|clean]  (daemon lives in ../insrc now)" >&2
 		exit 2
 		;;
 esac

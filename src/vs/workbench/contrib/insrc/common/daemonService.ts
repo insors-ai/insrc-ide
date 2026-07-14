@@ -118,7 +118,7 @@ export type DaemonStreamMessage =
 	 * 9-variant `HandoffEvent` union onward to the chat widget.
 	 *
 	 * The wire shape mirrors the daemon's `HandoffEvent` in
-	 * `src/insrc/handoff/types.ts`. Variants are carried opaquely as
+	 * `insors-ai/insrc:src/handoff/types.ts`. Variants are carried opaquely as
 	 * `event: unknown` here -- the workbench-side discriminated union lives
 	 * in `common/handoffService.ts` so it can be exhaustively typed there
 	 * without coupling daemonService.ts to handoff-specific shapes.
@@ -132,7 +132,7 @@ export type DaemonStreamMessage =
 	 * bridges Layer 3 pending-confirm events to this stream so the
 	 * IDE can render the chat-inline toast (M1.6.c). The payload
 	 * mirrors `AssertionConfirmStreamFrame` from
-	 * src/insrc/daemon/prefs-confirm.ts -- key, turnId, subject,
+	 * insors-ai/insrc:src/daemon/prefs-confirm.ts -- key, turnId, subject,
 	 * canonicalText (the LLM's best guess at the user's intent),
 	 * rawSpan (the raw user text), confidence, polarity, scope.
 	 */

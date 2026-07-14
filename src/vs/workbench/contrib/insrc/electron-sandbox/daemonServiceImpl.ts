@@ -12,7 +12,7 @@ import type { IChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { IInsrcDaemonService, type DaemonStreamMessage, type IInsrcStreamHandle } from '../common/daemonService.js';
 
 // ---------------------------------------------------------------------------
-// IPC protocol types (mirrors src/insrc/shared/types.ts)
+// IPC protocol types (mirrors insors-ai/insrc:src/shared/types.ts)
 // ---------------------------------------------------------------------------
 
 interface IpcRequest {

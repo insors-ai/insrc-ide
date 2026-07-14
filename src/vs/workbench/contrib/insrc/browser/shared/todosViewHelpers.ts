@@ -119,7 +119,7 @@ export function formatListMeta(list: TodoList): string {
 /**
  * Owners whose lists hide the per-item "+ Add comment" affordance on
  * the todos pane. Mirrors `AgentFamilyMeta.suppressTodoComments` from
- * `src/insrc/shared/agent-registry.ts` -- the workbench keeps the
+ * `insors-ai/insrc:src/shared/agent-registry.ts` -- the workbench keeps the
  * type loose (string) on purpose and doesn't import the daemon-side
  * registry, so any family that sets `suppressTodoComments: true` on
  * its registry row needs to be added here too.

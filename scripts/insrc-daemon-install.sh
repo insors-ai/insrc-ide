@@ -4,11 +4,13 @@
 #
 # What this script does:
 #   1. Verify prerequisites (Node.js >= 20, git).
-#   2. Clone insors-ai/insrc-ide.git into ~/.insrc/daemon (configurable).
+#   2. Clone insors-ai/insrc.git into ~/.insrc/daemon (configurable).
+#      (Since the 2026-07-14 split, the daemon lives in its own repo;
+#       repo root carries package.json + src/ + out/ directly.)
 #   3. Fast-forward the checkout to the configured branch head.
-#   4. npm install + npm run build in src/insrc.
-#   5. Symlink out/insrc/node_modules -> ../../src/insrc/node_modules so the
-#      compiled MCP binary resolves its deps.
+#   4. npm install + npm run build at the repo root.
+#   5. Symlink out/node_modules -> ../node_modules so the compiled MCP
+#      binary at out/bin/insrc-mcp.js resolves its deps.
 #   6. Start the daemon (unless --no-start).
 #   7. Print next-step guidance (MCP registration, docs pointer).
 #
@@ -30,7 +32,7 @@
 #   ./insrc-daemon-install.sh --help
 #
 # One-liner:
-#   curl -fsSL https://github.com/insors-ai/insrc-ide/releases/download/daemon-v0.1.0/insrc-daemon-install.sh | bash
+#   curl -fsSL https://github.com/insors-ai/insrc/releases/download/daemon-v0.1.0/insrc-daemon-install.sh | bash
 #
 # Exit codes:
 #   0 success
@@ -45,8 +47,8 @@ set -euo pipefail
 # Defaults + argv
 # ---------------------------------------------------------------------------
 
-DEFAULT_REPO_URL='https://github.com/insors-ai/insrc-ide.git'
-DEFAULT_BRANCH='release/1.96'
+DEFAULT_REPO_URL='https://github.com/insors-ai/insrc.git'
+DEFAULT_BRANCH='main'
 DEFAULT_TARGET="$HOME/.insrc/daemon"
 NODE_MIN_MAJOR=20
 
@@ -119,7 +121,8 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-DAEMON_SRC="$INSTALL_ROOT/src/insrc"
+# npm install / build run at the repo root (where package.json is).
+DAEMON_SRC="$INSTALL_ROOT"
 LOG_DIR="/tmp/insrc"
 mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
 LOG_FILE="$LOG_DIR/daemon-install-$(date +%Y%m%d-%H%M%S)-$$.log"
@@ -214,16 +217,17 @@ done
 ok "build done"
 
 # ---------------------------------------------------------------------------
-# Step 4: symlink out/insrc/node_modules -> ../../src/insrc/node_modules
+# Step 4: symlink out/node_modules -> ../node_modules
 # ---------------------------------------------------------------------------
 
-# The compiled binary at out/insrc/bin/insrc-mcp.js needs node_modules
-# resolvable from out/insrc/. tsc doesn't copy them, and creating a symlink
-# is the least-fragile fix. See memory: [[out-insrc-node-modules-symlink]].
-OUT_DIR="$INSTALL_ROOT/out/insrc"
+# The compiled binary at out/bin/insrc-mcp.js needs node_modules resolvable
+# from out/. tsc doesn't copy them, and creating a symlink is the
+# least-fragile fix. Post-split (2026-07-14) the repo root is $INSTALL_ROOT,
+# and node_modules sits directly at $INSTALL_ROOT/node_modules.
+OUT_DIR="$INSTALL_ROOT/out"
 if [ -d "$OUT_DIR" ] && [ ! -e "$OUT_DIR/node_modules" ]; then
-	ln -sf ../../src/insrc/node_modules "$OUT_DIR/node_modules"
-	ok "symlinked out/insrc/node_modules -> src/insrc/node_modules"
+	ln -sf ../node_modules "$OUT_DIR/node_modules"
+	ok "symlinked out/node_modules -> ../node_modules"
 fi
 
 # ---------------------------------------------------------------------------
@@ -416,16 +420,16 @@ cat <<EOF
 
 claude mcp add insrc \\
 	-e INSRC_REPO=/absolute/path/to/repo \\
-	-- node $INSTALL_ROOT/out/insrc/bin/insrc-mcp.js
+	-- node $INSTALL_ROOT/out/bin/insrc-mcp.js
 
 codex mcp add insrc \\
 	--env INSRC_REPO=/absolute/path/to/repo \\
-	-- node $INSTALL_ROOT/out/insrc/bin/insrc-mcp.js
+	-- node $INSTALL_ROOT/out/bin/insrc-mcp.js
 
 2. Add repos to the index:
 
-cd $DAEMON_SRC
-npx --no-install tsx cli/index.ts repo add /path/to/your/code
+cd $INSTALL_ROOT
+npx --no-install tsx src/cli/index.ts repo add /path/to/your/code
 
 3. Manage the daemon:
 

@@ -38,60 +38,13 @@ The daemon currently boots, indexes repos, serves the infrastructure IPC surface
 
 ## Project structure
 
-```
-src/insrc/
-  shared/          Core types, paths, logger
-    types.ts       Entity / Relation / LLMProvider / Tool / etc.
-    paths.ts       ~/.insrc/ directory layout
-    logger.ts      pino-based logging
-  indexer/         Tree-sitter parsing + graph construction
-    parser/        per-language tree-sitter parsers
-    manifest.ts    dependency manifest parsing
-    resolver.ts    import resolution
-    embedder.ts    Ollama embedding generation
-    watcher.ts     @parcel/watcher file watcher
-  db/              Storage (LMDB graph + Lance vectors)
-    client.ts      Sentinel DbClient
-    graph/         Custom LMDB-backed graph layer (store, keys, codec, edges, traversal)
-    lance/         LanceDB tables (entity-vec, session-vec, turn-vec, artifact-vec, config-vec, ...)
-    entities.ts    Entity CRUD
-    relations.ts   Resolved + unresolved edges
-    repos.ts       Repo registry
-    conversations.ts  Session + turn persistence
-    search.ts      Graph + ANN search wrappers
-  daemon/          Background daemon process
-    index.ts       Entry point + IPC handler registry
-    server.ts      Unix-socket JSON-RPC server
-    lifecycle.ts   PID, socket, embedding bootstrap
-    queue.ts       Index job queue
-    session.ts     Minimal ChatSession (id + repoPath)
-    chat-sessions.ts  Session pool (transport only)
-    chat-handler.ts   chat.* RPC handlers (transport only)
-    todos-rpc.ts   TODO framework RPC
-    artifacts-rpc.ts  Template management RPC
-    db-rpc.ts      Data-driver RPC
-    artifacts/     Template loader + offline-bundle helpers
-    db/            DuckDB pool + driver registry + per-format converters
-    tools/         Tool registry + executor + ~110 built-in capability wrappers
-  config/
-    local.ts       Infra-only config (Ollama host, embedding model + dim, core model)
-    store.ts       On-disk config storage (templates, feedback)
-    search.ts, paths.ts, frontmatter.ts, feedback.ts, templates.ts
-  agent/
-    providers/
-      ollama.ts            Local provider (LLM + embeddings)
-      cli-provider.ts      Subprocess wrapper for claude + codex CLI binaries
-      structured-output.ts ajv + retry helpers (still used by ollama)
-      __tests__/           Live integration tests (gated behind INSRC_LIVE_TESTS=1)
-  cli/
-    index.ts       commander setup (daemon + repo commands; setup wizard)
-    commands/
-      daemon.ts
-      repo.ts
-      setup.ts
-  bin/
-    daemon.ts      Daemon entry binary
+Since the 2026-07-14 split, this repo owns only the VSCode fork and the
+insrc IDE contributions. The daemon / backend lives in a sibling repo:
+[`insors-ai/insrc`](https://github.com/insors-ai/insrc)
+(local clone: `/Users/subhagho/work/projects/insors/insrc/`). See
+[plans/daemon-split-out.md](plans/daemon-split-out.md) for the migration.
 
+```
 src/vs/workbench/contrib/insrc/
   common/          Service interfaces (daemonService, sessionService, workspaceService, repoService, agentRunService, chatService stub, configService, keychainService, lspToolService, todosService, artifactsService, dbConnectionsService, insrcArtifacts, insrcConfiguration)
   browser/         Workbench contributions
@@ -110,16 +63,23 @@ src/vs/workbench/contrib/insrc/
     toolSettingsBridge.ts  Pushes insrc.tools.* settings to daemon
     toolSecretCommands.ts  Palette commands for tool credentials
   electron-sandbox/  Service implementations (daemonService, sessionService, ..., chatService stub)
+
+src/vs/platform/insrc/electron-main/
+  insrcDaemonInstaller.ts   Clones insors-ai/insrc into ~/.insrc/daemon,
+                             builds it, spawns out/daemon/index.js
+  insrcDaemonMainService.ts Daemon lifecycle + IPC bridge
 ```
+
+The daemon-side layout (`agent/`, `analyze/`, `daemon/`, `db/`,
+`indexer/`, `mcp/`, `shared/`, `workflow/`, `cli/`, `config/`, `bin/`,
+`prompts/`, `assets/`) lives at `src/…` in the sibling repo. Its
+`CLAUDE.md` covers daemon conventions in detail.
 
 ## Build and run
 
-```bash
-cd src/insrc && npm install                 # install backend deps
-cd src/insrc && npm run build               # tsc
-INSRC_LIVE_TESTS=1 npx tsx --test \
-  src/insrc/agent/providers/__tests__/cli-provider.live.test.ts
-```
+- **IDE side (this repo):** `scripts/build.sh` runs the VSCode compile with a bumped heap. The daemon subcommand is disabled — build the daemon in the sibling repo.
+- **Daemon side:** `cd /Users/subhagho/work/projects/insors/insrc && npm run build`. Tests: `npx tsx --test 'src/workflow/**/*.test.ts' 'src/mcp/**/*.test.ts'` (or broader).
+- **End-to-end iteration:** push daemon changes to `insors-ai/insrc:main`; the IDE's `insrc.daemon.autoUpdate` pulls + rebuilds on next start. Never write directly into `~/.insrc/daemon/`.
 
 ## Code conventions
 
