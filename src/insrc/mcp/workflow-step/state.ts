@@ -30,7 +30,9 @@ export type WorkflowStepStage =
 export interface WorkflowStepStatePayload {
 	readonly version:  typeof STATE_VERSION;
 	readonly runId:    string;
-	readonly slug:     string;
+	/** Trace-log directory key. Epic-scoped workflows key by the
+	 *  16-char Epic hash; `stub` uses a display slug from the focus. */
+	readonly epicKey:  string;
 	readonly startedAtMs: number;
 	readonly intent:   WorkflowIntent;
 	/** Full executor state; kept as an ExecutorState so resume /

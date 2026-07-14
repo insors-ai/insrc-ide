@@ -53,14 +53,16 @@ export interface WorkflowIntent {
 	 *  mid-run. Null when the repo is unindexed / non-git. */
 	readonly repoIndexedAt: number | null;
 	/** Freeform per-workflow parameters. `define` uses `{ flavor? }`,
-	 *  `design.epic` uses `{ epicSlug }`, `design.story` uses
-	 *  `{ epicSlug, storyId }`, `tracker.push` uses
-	 *  `{ epicSlug, force? }`, etc. Runners validate their own
+	 *  `design.epic` uses `{ epicHash }`, `design.story` uses
+	 *  `{ epicHash, storyId }`, `tracker.push` uses
+	 *  `{ epicHash, force? }`, etc. Runners validate their own
 	 *  slice.
 	 *
 	 *  Kept as `Record<string, unknown>` at the intent layer so the
 	 *  MCP tool + CLI don't have to know every workflow's params
-	 *  shape. */
+	 *  shape. Epic-scoped workflows carry `params.epicHash` (16-char
+	 *  hex — see `workflow/hash.ts`); the display slug lives in the
+	 *  finalized artifact's `meta.epicSlug`. */
 	readonly params: Record<string, unknown>;
 }
 
@@ -253,6 +255,15 @@ export interface ArtifactMetaBase {
 	/** ISO 8601 timestamp + reason set by `insrc workflow reject`. */
 	readonly rejectedAt?:  string;
 	readonly rejectReason?: string;
+	/** Canonical 16-char Epic hash. Populated on every Epic-scoped
+	 *  artifact (`define` / `design.epic` / `design.story` /
+	 *  `tracker.*`). Absent on `stub`. Every downstream artifact for
+	 *  an Epic reuses the SAME hash — see `workflow/hash.ts`. */
+	readonly epicHash?:    string;
+	/** Human-readable Epic slug, derived from the Define focus. Kept
+	 *  in meta for display in prompts / titles / CLI hints. Files
+	 *  are named by hash, never by slug. */
+	readonly epicSlug?:    string;
 }
 
 /** A citation grounds a claim in the artifact body against a step

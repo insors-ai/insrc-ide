@@ -11,32 +11,40 @@
  * pending amendment / all approved) and asserts the returned
  * next-action.
  *
+ * Every Epic is addressed by a 16-char hash under the new layout;
+ * markdown lives in `docs/`, canonical JSON in `.insrc/artifacts/`.
+ *
  * Run:
  *   npx tsx --test src/insrc/workflow/__tests__/chain.test.ts
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { approveArtifactByJsonPath } from '../gates.js';
-import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths } from '../storage.js';
+import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths, writeAtomic } from '../storage.js';
 import { buildChainReport, formatChainReport } from '../chain.js';
 import { computeHldEffectiveHash } from '../artifacts/lld.js';
 import { proposeAmendment } from '../amendments/store.js';
 import type { AmendmentRecord } from '../amendments/types.js';
 
+const HASH = 'a3f4b8c9d1e2f3a4';
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function writeDefine(repo: string, slug: string, opts: { stories: string[] } = { stories: ['s1', 's2'] }): string {
-	const paths = defineArtifactPaths(repo, slug);
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	writeFileSync(paths.json, JSON.stringify({
-		meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1 },
+function writeDefine(repo: string, epicHash: string, opts: { stories: string[] } = { stories: ['s1', 's2'] }): string {
+	const paths = defineArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	writeAtomic(paths.json, JSON.stringify({
+		meta: {
+			workflow: 'define', runId: 'def-1', schemaVersion: 1,
+			epicHash, epicSlug: 'test-epic',
+		},
 		body: {
 			flavor: 'enhancement',
 			problem: 'x', nonGoals: [], assumptions: [], constraints: [],
@@ -50,11 +58,14 @@ function writeDefine(repo: string, slug: string, opts: { stories: string[] } = {
 	return paths.json;
 }
 
-function writeHld(repo: string, slug: string, runId: string): { path: string; runId: string } {
-	const paths = hldArtifactPaths(repo, slug);
-	mkdirSync(paths.dir, { recursive: true });
-	writeFileSync(paths.json, JSON.stringify({
-		meta: { workflow: 'design.epic', runId, schemaVersion: 1 },
+function writeHld(repo: string, epicHash: string, runId: string): { path: string; runId: string } {
+	const paths = hldArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	writeAtomic(paths.json, JSON.stringify({
+		meta: {
+			workflow: 'design.epic', runId, schemaVersion: 1,
+			epicHash, epicSlug: 'test-epic',
+		},
 		body: {
 			frameworkSummary: 'x', architectureShape: 'x',
 			sharedContracts: [],
@@ -68,12 +79,13 @@ function writeHld(repo: string, slug: string, runId: string): { path: string; ru
 	return { path: paths.json, runId };
 }
 
-function writeLld(repo: string, slug: string, storyId: string, hldRunId: string, effectiveHash: string): string {
-	const paths = lldArtifactPaths(repo, slug, storyId);
-	writeFileSync(paths.json, JSON.stringify({
+function writeLld(repo: string, epicHash: string, storyId: string, hldRunId: string, effectiveHash: string): string {
+	const paths = lldArtifactPaths(repo, epicHash, storyId);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	writeAtomic(paths.json, JSON.stringify({
 		meta: {
 			workflow: 'design.story', runId: `lld-${storyId}`, schemaVersion: 1,
-			epicSlug: slug, storyId,
+			epicHash, epicSlug: 'test-epic', storyId,
 			hldBaseRunId: hldRunId, hldEffectiveHash: effectiveHash, hldAmendmentsApplied: [],
 		},
 		body: {
@@ -88,9 +100,9 @@ function writeLld(repo: string, slug: string, storyId: string, hldRunId: string,
 	return paths.json;
 }
 
-function pendingAmendment(slug: string, id: string, baseRunId: string): AmendmentRecord {
+function pendingAmendment(epicHash: string, id: string, baseRunId: string): AmendmentRecord {
 	return {
-		id, epicSlug: slug, hldBaseRunId: baseRunId,
+		id, epicHash, epicSlug: 'test-epic', hldBaseRunId: baseRunId,
 		amendment: {
 			type: 'sharedContract.fieldAdd', contractId: 'sc1',
 			field: { name: 'x', type: 'string', optional: true, purpose: 'x' }, breaking: false,
@@ -109,7 +121,7 @@ function pendingAmendment(slug: string, id: string, baseRunId: string): Amendmen
 test('chain: no artifacts → next-action run-define', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		const r = buildChainReport(repo, 'no-op');
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'run-define');
 		assert.equal(r.define.exists, false);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -118,8 +130,8 @@ test('chain: no artifacts → next-action run-define', () => {
 test('chain: unapproved Define → approve-define', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		writeDefine(repo, 'x');
-		const r = buildChainReport(repo, 'x');
+		writeDefine(repo, HASH);
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'approve-define');
 		assert.equal(r.define.exists, true);
 		assert.equal(r.define.approved, false);
@@ -129,9 +141,9 @@ test('chain: unapproved Define → approve-define', () => {
 test('chain: approved Define, no HLD → run-hld', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		const path = writeDefine(repo, 'x');
+		const path = writeDefine(repo, HASH);
 		approveArtifactByJsonPath(path);
-		const r = buildChainReport(repo, 'x');
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'run-hld');
 		assert.equal(r.define.approved, true);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -140,9 +152,9 @@ test('chain: approved Define, no HLD → run-hld', () => {
 test('chain: unapproved HLD → approve-hld', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		approveArtifactByJsonPath(writeDefine(repo, 'x'));
-		writeHld(repo, 'x', 'hld-1');
-		const r = buildChainReport(repo, 'x');
+		approveArtifactByJsonPath(writeDefine(repo, HASH));
+		writeHld(repo, HASH, 'hld-1');
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'approve-hld');
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
@@ -150,9 +162,9 @@ test('chain: unapproved HLD → approve-hld', () => {
 test('chain: approved HLD, no LLDs → run-lld for first Story', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		approveArtifactByJsonPath(writeDefine(repo, 'x'));
-		approveArtifactByJsonPath(writeHld(repo, 'x', 'hld-1').path);
-		const r = buildChainReport(repo, 'x');
+		approveArtifactByJsonPath(writeDefine(repo, HASH));
+		approveArtifactByJsonPath(writeHld(repo, HASH, 'hld-1').path);
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'run-lld');
 		if (r.nextAction.kind === 'run-lld') {
 			assert.equal(r.nextAction.storyId, 's1');
@@ -163,11 +175,11 @@ test('chain: approved HLD, no LLDs → run-lld for first Story', () => {
 test('chain: unapproved LLD blocks the chain → approve-lld', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		approveArtifactByJsonPath(writeDefine(repo, 'x'));
-		approveArtifactByJsonPath(writeHld(repo, 'x', 'hld-1').path);
+		approveArtifactByJsonPath(writeDefine(repo, HASH));
+		approveArtifactByJsonPath(writeHld(repo, HASH, 'hld-1').path);
 		const hash = computeHldEffectiveHash('hld-1', []);
-		writeLld(repo, 'x', 's1', 'hld-1', hash);
-		const r = buildChainReport(repo, 'x');
+		writeLld(repo, HASH, 's1', 'hld-1', hash);
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'approve-lld');
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
@@ -175,12 +187,10 @@ test('chain: unapproved LLD blocks the chain → approve-lld', () => {
 test('chain: pending amendment surfaces before further LLDs', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		approveArtifactByJsonPath(writeDefine(repo, 'x'));
-		approveArtifactByJsonPath(writeHld(repo, 'x', 'hld-1').path);
-		// Pending amendment on Epic before LLD runs.
-		mkdirSync(join(repo, 'docs/designs/x/_hld-amendments'), { recursive: true });
-		proposeAmendment(repo, pendingAmendment('x', 'amend-x-1', 'hld-1'));
-		const r = buildChainReport(repo, 'x');
+		approveArtifactByJsonPath(writeDefine(repo, HASH));
+		approveArtifactByJsonPath(writeHld(repo, HASH, 'hld-1').path);
+		proposeAmendment(repo, pendingAmendment(HASH, `AMD-${HASH}-1`, 'hld-1'));
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'review-amendment');
 		assert.equal(r.amendments.pending, 1);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -189,11 +199,11 @@ test('chain: pending amendment surfaces before further LLDs', () => {
 test('chain: all Stories approved, no tracker → push-tracker', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		approveArtifactByJsonPath(writeDefine(repo, 'x', { stories: ['s1'] }));
-		approveArtifactByJsonPath(writeHld(repo, 'x', 'hld-1').path);
+		approveArtifactByJsonPath(writeDefine(repo, HASH, { stories: ['s1'] }));
+		approveArtifactByJsonPath(writeHld(repo, HASH, 'hld-1').path);
 		const hash = computeHldEffectiveHash('hld-1', []);
-		approveArtifactByJsonPath(writeLld(repo, 'x', 's1', 'hld-1', hash));
-		const r = buildChainReport(repo, 'x');
+		approveArtifactByJsonPath(writeLld(repo, HASH, 's1', 'hld-1', hash));
+		const r = buildChainReport(repo, HASH);
 		assert.equal(r.nextAction.kind, 'push-tracker');
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
@@ -205,9 +215,9 @@ test('chain: all Stories approved, no tracker → push-tracker', () => {
 test('formatChainReport prints all section headers', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-chain-'));
 	try {
-		const r = buildChainReport(repo, 'x');
+		const r = buildChainReport(repo, HASH);
 		const md = formatChainReport(r);
-		assert.ok(md.includes('# Chain status: x'));
+		assert.ok(md.includes(`# Chain status: ${HASH}`));
 		assert.ok(md.includes('## Define'));
 		assert.ok(md.includes('## HLD'));
 		assert.ok(md.includes('## Amendments'));

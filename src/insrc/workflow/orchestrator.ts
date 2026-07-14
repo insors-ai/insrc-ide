@@ -89,6 +89,8 @@ import {
 	type AmendmentRecord,
 } from './amendments/index.js';
 import { isAmendment } from './amendments/types.js';
+import { assertEpicHash, computeEpicHash } from './hash.js';
+import { deriveSlug } from './slug.js';
 
 const log = getLogger('workflow:orchestrator');
 
@@ -502,6 +504,12 @@ function finalizeDefine(
 	if (coverageIssues.length > 0) {
 		return { ok: false, failure: { ok: false, kind: 'schema', message: 'Constraint coverage broken', details: coverageIssues } };
 	}
+	// Every Define artifact mints the canonical Epic hash (deterministic
+	// from the runId minted at start-time) + carries the display slug
+	// derived from the focus. Both flow through the meta so downstream
+	// workflows can look up their Epic by hash and display the slug.
+	const epicHash = computeEpicHash(runId);
+	const epicSlug = safeDeriveSlug(intent.focus);
 	const artifact: DefineArtifact = {
 		meta: {
 			workflow:      'define',
@@ -512,6 +520,8 @@ function finalizeDefine(
 			elapsedMs,
 			repoIndexedAt: intent.repoIndexedAt,
 			schemaVersion: DEFINE_SCHEMA_VERSION,
+			epicHash,
+			epicSlug,
 		},
 		body,
 		citations,
@@ -541,7 +551,7 @@ function finalizeDefine(
 // ---------------------------------------------------------------------------
 
 function designEpicDecomposer(intent: WorkflowIntent): DecomposerPrompt {
-	const epicSlug = requireEpicSlug(intent);
+	const epicHash = requireEpicHash(intent);
 	const systemPrompt = [
 		'You are the workflow decomposer for the `design.epic` (HLD) workflow.',
 		'',
@@ -555,7 +565,7 @@ function designEpicDecomposer(intent: WorkflowIntent): DecomposerPrompt {
 		'',
 		'Params are `{}` on every step; the runners read prior step outputs via the executor.',
 	].join('\n');
-	const userTurn = `Focus: ${intent.focus}\nEpic slug: ${epicSlug}\nEmit the plan JSON now.`;
+	const userTurn = `Focus: ${intent.focus}\nEpic hash: ${epicHash}\nEmit the plan JSON now.`;
 	const schema = {
 		type: 'object',
 		required: ['workflow', 'steps'],
@@ -686,9 +696,10 @@ function finalizeDesignEpic(
 	}
 
 	// Cross-artifact invariants — HLD must fit the approved Epic.
-	const epicSlug = requireEpicSlug(intent);
-	const epic = requireApprovedEpic(intent.repoPath, epicSlug);
+	const epicHash = requireEpicHash(intent);
+	const epic = requireApprovedEpic(intent.repoPath, epicHash);
 	const epicStoryIds = epic.body.stories.map(s => s.id);
+	const epicSlug = epic.meta.epicSlug ?? safeDeriveSlug(intent.focus);
 
 	const coverIssues = checkStoryCoverage(body, epicStoryIds);
 	if (coverIssues.length > 0) {
@@ -722,6 +733,8 @@ function finalizeDesignEpic(
 			elapsedMs,
 			repoIndexedAt: intent.repoIndexedAt,
 			schemaVersion: HLD_SCHEMA_VERSION,
+			epicHash,
+			epicSlug,
 		},
 		body,
 		citations,
@@ -746,12 +759,19 @@ function finalizeDesignEpic(
 	};
 }
 
-function requireEpicSlug(intent: WorkflowIntent): string {
-	const slug = intent.params['epicSlug'];
-	if (typeof slug !== 'string' || slug.length === 0) {
-		throw new Error(`design.epic requires intent.params.epicSlug`);
-	}
-	return slug;
+/** Epic-scoped workflows carry `params.epicHash` (16-char hex). */
+function requireEpicHash(intent: WorkflowIntent): string {
+	const hash = intent.params['epicHash'];
+	assertEpicHash(hash, `${intent.workflow} requires intent.params.epicHash`);
+	return hash;
+}
+
+/** Best-effort slug derivation for display. If the focus is too
+ *  short / all-stopwords, fall back to the runId prefix so we
+ *  always populate meta.epicSlug with something readable. */
+function safeDeriveSlug(focus: string): string {
+	try { return deriveSlug(focus); }
+	catch { return focus.slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'epic'; }
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +779,7 @@ function requireEpicSlug(intent: WorkflowIntent): string {
 // ---------------------------------------------------------------------------
 
 function designStoryDecomposer(intent: WorkflowIntent): DecomposerPrompt {
-	const epicSlug = requireEpicSlug(intent);
+	const epicHash = requireEpicHash(intent);
 	const storyId  = requireStoryId(intent);
 	const systemPrompt = [
 		'You are the workflow decomposer for the `design.story` (LLD) workflow.',
@@ -776,7 +796,7 @@ function designStoryDecomposer(intent: WorkflowIntent): DecomposerPrompt {
 		'',
 		'Params are `{}` on every step. Runners read prior step outputs via the executor.',
 	].join('\n');
-	const userTurn = `Focus: ${intent.focus}\nEpic slug: ${epicSlug}   Story: ${storyId}\nEmit the plan JSON now.`;
+	const userTurn = `Focus: ${intent.focus}\nEpic hash: ${epicHash}   Story: ${storyId}\nEmit the plan JSON now.`;
 	const schema = {
 		type: 'object',
 		required: ['workflow', 'steps'],
@@ -809,9 +829,9 @@ function designStorySynthesizer(
 	intent:      WorkflowIntent,
 	stepOutputs: Readonly<Record<string, unknown>>,
 ): SynthesizerPrompt {
-	const epicSlug = requireEpicSlug(intent);
+	const epicHash = requireEpicHash(intent);
 	const storyId  = requireStoryId(intent);
-	const hld = requireApprovedHld(intent.repoPath, epicSlug);
+	const hld = requireApprovedHld(intent.repoPath, epicHash);
 	const hldSlice = extractHldContextSlice(hld, storyId);
 	const s7 = stepOutputs['s7'] as { skipped?: boolean } | undefined;
 	const migrationOptional = s7 !== undefined && s7.skipped === true;
@@ -835,7 +855,7 @@ function designStorySynthesizer(
 		'- Citation ids `cN` reference `citations[]`; every claim in body cites at least one.',
 	].join('\n');
 	const userTurn = [
-		`Focus: ${intent.focus}   Epic: ${epicSlug}   Story: ${storyId}`,
+		`Focus: ${intent.focus}   Epic: ${epicHash}   Story: ${storyId}`,
 		'',
 		'HLD context slice (verbatim into body.hldContextSlice):',
 		'```json',
@@ -926,13 +946,14 @@ function finalizeDesignStory(
 	}
 
 	// Cross-artifact invariants — LLD must fit approved Epic + HLD.
-	const epicSlug = requireEpicSlug(intent);
+	const epicHash = requireEpicHash(intent);
 	const storyId  = requireStoryId(intent);
-	const epic     = requireApprovedEpic(intent.repoPath, epicSlug);
-	const hld      = requireApprovedHld(intent.repoPath, epicSlug);
+	const epic     = requireApprovedEpic(intent.repoPath, epicHash);
+	const hld      = requireApprovedHld(intent.repoPath, epicHash);
+	const epicSlug = epic.meta.epicSlug ?? safeDeriveSlug(intent.focus);
 	const story    = epic.body.stories.find(s => s.id === storyId);
 	if (story === undefined) {
-		return { ok: false, failure: schemaFailure(`Story '${storyId}' not found in Epic '${epicSlug}'`) };
+		return { ok: false, failure: schemaFailure(`Story '${storyId}' not found in Epic '${epicHash}'`) };
 	}
 
 	// Migration conditional consistency.
@@ -965,9 +986,9 @@ function finalizeDesignStory(
 	// runId — `requireApprovedHld` returns the effective view where
 	// meta.runId still equals base.runId, but read the disk copy to
 	// be sure.
-	const baseHld = readBaseHld(intent.repoPath, epicSlug);
-	const appliedAmendments = listApprovedAmendments(intent.repoPath, epicSlug);
-	const effectiveHash = getEffectiveHash(intent.repoPath, epicSlug, baseHld);
+	const baseHld = readBaseHld(intent.repoPath, epicHash);
+	const appliedAmendments = listApprovedAmendments(intent.repoPath, epicHash);
+	const effectiveHash = getEffectiveHash(intent.repoPath, epicHash, baseHld);
 
 	const artifact: LldArtifact = {
 		meta: {
@@ -979,6 +1000,7 @@ function finalizeDesignStory(
 			elapsedMs,
 			repoIndexedAt: intent.repoIndexedAt,
 			schemaVersion: LLD_SCHEMA_VERSION,
+			epicHash,
 			epicSlug,
 			storyId,
 			hldBaseRunId:         baseHld.meta.runId,
@@ -1008,7 +1030,7 @@ function finalizeDesignStory(
 			try {
 				applyAmendments(currentEffective, [
 					{
-						id: 'dry-run', epicSlug, hldBaseRunId: baseHld.meta.runId,
+						id: 'dry-run', epicHash, epicSlug, hldBaseRunId: baseHld.meta.runId,
 						amendment: p.amendment, rationale: p.rationale, citations: p.citations,
 						proposedBy: { workflow: 'design.story', runId, storyId, stepId: p.stepId },
 						proposedAt: new Date().toISOString(), status: 'approved',
@@ -1018,9 +1040,10 @@ function finalizeDesignStory(
 				const msg = err instanceof AmendmentApplyError ? err.message : (err instanceof Error ? err.message : String(err));
 				return { ok: false, failure: schemaFailure(`amendment proposal from ${p.stepId} would fail applier: ${msg}`) };
 			}
-			const amendmentId = nextAmendmentId(intent.repoPath, epicSlug);
+			const amendmentId = nextAmendmentId(intent.repoPath, epicHash);
 			const record: AmendmentRecord = {
 				id:           amendmentId,
+				epicHash,
 				epicSlug,
 				hldBaseRunId: baseHld.meta.runId,
 				amendment:    p.amendment,
@@ -1036,7 +1059,7 @@ function finalizeDesignStory(
 	}
 
 	log.info(
-		{ workflow: 'design.story', runId, epicSlug, storyId, size: renderedMd.length, citations: citations.length, amendmentProposals: persisted.length },
+		{ workflow: 'design.story', runId, epicHash, storyId, size: renderedMd.length, citations: citations.length, amendmentProposals: persisted.length },
 		'finalizeDesignStory: artifact ready',
 	);
 	return {
@@ -1200,15 +1223,16 @@ function finalizeTracker(
 	}
 
 	// Read gh config from the s1 output (deterministic bundle).
-	const s1 = stepOutputs['s1'] as { gh?: { owner?: string; repo?: string }; epicSlug?: string } | undefined;
-	if (s1 === undefined || typeof s1.gh !== 'object' || typeof s1.gh.owner !== 'string' || typeof s1.gh.repo !== 'string' || typeof s1.epicSlug !== 'string') {
-		return { ok: false, failure: schemaFailure(`s1 context bundle is missing gh + epicSlug`) };
+	const s1 = stepOutputs['s1'] as { gh?: { owner?: string; repo?: string }; epicHash?: string; epicSlug?: string } | undefined;
+	if (s1 === undefined || typeof s1.gh !== 'object' || typeof s1.gh.owner !== 'string' || typeof s1.gh.repo !== 'string' || typeof s1.epicHash !== 'string') {
+		return { ok: false, failure: schemaFailure(`s1 context bundle is missing gh + epicHash`) };
 	}
-	const epicSlug = s1.epicSlug;
+	const epicHash = s1.epicHash;
+	const epicSlug = typeof s1.epicSlug === 'string' ? s1.epicSlug : epicHash;
 
 	// Mutate the Epic artifact's meta.tracker for push + sync.
 	try {
-		mutateEpicTrackerMeta(intent.repoPath, epicSlug, intent.workflow, typedRefs);
+		mutateEpicTrackerMeta(intent.repoPath, epicHash, intent.workflow, typedRefs);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		return { ok: false, failure: schemaFailure(`failed to patch Epic tracker meta: ${msg}`) };
@@ -1224,6 +1248,7 @@ function finalizeTracker(
 			elapsedMs,
 			repoIndexedAt: intent.repoIndexedAt,
 			schemaVersion: TRACKER_SCHEMA_VERSION,
+			epicHash,
 			epicSlug,
 		},
 		body: {
@@ -1240,7 +1265,7 @@ function finalizeTracker(
 	const renderedMd   = renderTrackerMarkdown(artifact);
 	const renderedJson = JSON.stringify(artifact, null, 2) + '\n';
 	log.info(
-		{ workflow: intent.workflow, runId, epicSlug, refs: Object.keys(typedRefs).length },
+		{ workflow: intent.workflow, runId, epicHash, refs: Object.keys(typedRefs).length },
 		'finalizeTracker: artifact ready',
 	);
 	return {
@@ -1262,12 +1287,12 @@ function finalizeTracker(
  *  design artifact meta since that would fragment the surface). */
 function mutateEpicTrackerMeta(
 	repoPath:   string,
-	epicSlug:   string,
+	epicHash:   string,
 	workflow:   string,
 	refs:       TrackerPushRefs | TrackerSyncRefs | TrackerPostRefs,
 ): void {
 	if (workflow === 'tracker.post') return;   // no-op for post
-	const paths = defineArtifactPaths(repoPath, epicSlug);
+	const paths = defineArtifactPaths(repoPath, epicHash);
 	const raw = readFileSync(paths.json, 'utf8');
 	const artifact = JSON.parse(raw) as { meta?: { tracker?: Record<string, unknown> } };
 	if (artifact.meta === undefined) artifact.meta = {};

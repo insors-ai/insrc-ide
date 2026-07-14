@@ -25,7 +25,7 @@ import { listApprovedAmendments } from './store.js';
 // Public entry
 // ---------------------------------------------------------------------------
 
-/** Given a base HLD artifact + its Epic slug, return the effective
+/** Given a base HLD artifact + its Epic hash, return the effective
  *  HLD: base + every approved amendment applied in approvedAt order.
  *
  *  The meta of the returned artifact stays anchored to the BASE
@@ -33,11 +33,11 @@ import { listApprovedAmendments } from './store.js';
  *  the base + can re-derive the same body deterministically from
  *  the amendment set. */
 export function getEffectiveHld(
-	repoPath: string,
-	epicSlug: string,
+	repoPath:     string,
+	epicHash:     string,
 	baseArtifact: HldArtifact,
 ): HldArtifact {
-	const amendments = listApprovedAmendments(repoPath, epicSlug);
+	const amendments = listApprovedAmendments(repoPath, epicHash);
 	if (amendments.length === 0) return baseArtifact;
 	return {
 		...baseArtifact,
@@ -48,11 +48,11 @@ export function getEffectiveHld(
 /** Compute the current effective hash for the Epic. Reads the
  *  approved-amendment list from disk. */
 export function getEffectiveHash(
-	repoPath: string,
-	epicSlug: string,
+	repoPath:     string,
+	epicHash:     string,
 	baseArtifact: HldArtifact,
 ): string {
-	const amendments = listApprovedAmendments(repoPath, epicSlug);
+	const amendments = listApprovedAmendments(repoPath, epicHash);
 	return computeHldEffectiveHash(baseArtifact.meta.runId, amendments.map(a => a.id));
 }
 

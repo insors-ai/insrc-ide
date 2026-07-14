@@ -6,8 +6,8 @@
 /**
  * On-disk store for HLD amendments.
  *
- * Layout:
- *   docs/designs/<epic-slug>/_hld-amendments/<amendment-id>.json
+ * Layout (post-hash migration):
+ *   .insrc/artifacts/AMD-<epicHash>-<n>.json     — one file per amendment
  *
  * Each record is written once when proposed. The immutability
  * contract:
@@ -21,7 +21,12 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { writeAtomic } from '../storage.js';
+import {
+	amendmentArtifactPath,
+	amendmentFilenamePrefix,
+	amendmentsRootDir,
+	writeAtomic,
+} from '../storage.js';
 import { isAmendmentRecord } from './types.js';
 import type { AmendmentRecord, AmendmentStatus } from './types.js';
 
@@ -29,12 +34,9 @@ import type { AmendmentRecord, AmendmentStatus } from './types.js';
 // Paths
 // ---------------------------------------------------------------------------
 
-export function amendmentsDir(repoPath: string, epicSlug: string): string {
-	return join(repoPath, 'docs/designs', epicSlug, '_hld-amendments');
-}
-
-export function amendmentPath(repoPath: string, epicSlug: string, amendmentId: string): string {
-	return join(amendmentsDir(repoPath, epicSlug), `${amendmentId}.json`);
+/** Path to a single amendment's canonical JSON. */
+export function amendmentPath(repoPath: string, amendmentId: string): string {
+	return amendmentArtifactPath(repoPath, amendmentId);
 }
 
 // ---------------------------------------------------------------------------
@@ -57,25 +59,21 @@ export class AmendmentIdConflictError extends Error {
 // ID generation
 // ---------------------------------------------------------------------------
 
-/** Mint the next amendment id for an Epic. Scans the existing
- *  records to find the highest `amend-<slug>-<n>` counter. */
-export function nextAmendmentId(repoPath: string, epicSlug: string): string {
-	const dir = amendmentsDir(repoPath, epicSlug);
-	if (!existsSync(dir)) return `amend-${epicSlug}-1`;
+/** Mint the next amendment id for an Epic. Scans the existing records
+ *  to find the highest `AMD-<epicHash>-<n>` counter. */
+export function nextAmendmentId(repoPath: string, epicHash: string): string {
+	const dir = amendmentsRootDir(repoPath);
+	const prefix = amendmentFilenamePrefix(epicHash);
+	if (!existsSync(dir)) return `${prefix}1`;
 	let max = 0;
 	for (const name of readdirSync(dir)) {
 		if (!name.endsWith('.json')) continue;
-		const m = new RegExp(`^amend-${escapeRegex(epicSlug)}-(\\d+)\\.json$`).exec(name);
-		if (m !== null) {
-			const n = Number(m[1]);
-			if (Number.isInteger(n) && n > max) max = n;
-		}
+		if (!name.startsWith(prefix)) continue;
+		const rest = name.slice(prefix.length, -'.json'.length);
+		const n = Number(rest);
+		if (Number.isInteger(n) && n > max) max = n;
 	}
-	return `amend-${epicSlug}-${max + 1}`;
-}
-
-function escapeRegex(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	return `${prefix}${max + 1}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +83,7 @@ function escapeRegex(s: string): string {
 /** Propose an amendment. Fails if an amendment with the same id
  *  already exists on disk. */
 export function proposeAmendment(repoPath: string, record: AmendmentRecord): void {
-	const path = amendmentPath(repoPath, record.epicSlug, record.id);
+	const path = amendmentPath(repoPath, record.id);
 	if (existsSync(path)) {
 		throw new AmendmentIdConflictError(
 			`amendment '${record.id}' already exists at ${path}; ids are single-use`,
@@ -101,12 +99,11 @@ export function proposeAmendment(repoPath: string, record: AmendmentRecord): voi
 
 /** Mark an amendment approved. Refuses if it's already resolved. */
 export function approveAmendment(
-	repoPath:   string,
-	epicSlug:   string,
+	repoPath:    string,
 	amendmentId: string,
-	approvedBy: string,
+	approvedBy:  string,
 ): AmendmentRecord {
-	return transition(repoPath, epicSlug, amendmentId, prev => {
+	return transition(repoPath, amendmentId, prev => {
 		if (prev.status !== 'pending') {
 			throw new AmendmentImmutabilityError(
 				`amendment '${amendmentId}' is ${prev.status}; cannot transition to approved`,
@@ -123,15 +120,14 @@ export function approveAmendment(
 
 /** Mark an amendment rejected. Refuses if it's already resolved. */
 export function rejectAmendment(
-	repoPath:   string,
-	epicSlug:   string,
+	repoPath:    string,
 	amendmentId: string,
-	reason:     string,
+	reason:      string,
 ): AmendmentRecord {
 	if (typeof reason !== 'string' || reason.trim().length === 0) {
 		throw new Error(`rejectAmendment: reason is required`);
 	}
-	return transition(repoPath, epicSlug, amendmentId, prev => {
+	return transition(repoPath, amendmentId, prev => {
 		if (prev.status !== 'pending') {
 			throw new AmendmentImmutabilityError(
 				`amendment '${amendmentId}' is ${prev.status}; cannot transition to rejected`,
@@ -148,11 +144,10 @@ export function rejectAmendment(
 
 function transition(
 	repoPath:    string,
-	epicSlug:    string,
 	amendmentId: string,
 	mutate:      (prev: AmendmentRecord) => AmendmentRecord,
 ): AmendmentRecord {
-	const path = amendmentPath(repoPath, epicSlug, amendmentId);
+	const path = amendmentPath(repoPath, amendmentId);
 	if (!existsSync(path)) {
 		throw new AmendmentNotFoundError(`amendment '${amendmentId}' not found at ${path}`);
 	}
@@ -161,7 +156,6 @@ function transition(
 	if (!isAmendmentRecord(prev)) {
 		throw new AmendmentImmutabilityError(`file at ${path} is not a valid AmendmentRecord`);
 	}
-	// Immutability check on the frozen fields:
 	const next = mutate(prev);
 	assertFrozen(prev, next);
 	writeAtomic(path, JSON.stringify(next, null, 2) + '\n');
@@ -169,7 +163,7 @@ function transition(
 }
 
 function assertFrozen(prev: AmendmentRecord, next: AmendmentRecord): void {
-	const frozen: (keyof AmendmentRecord)[] = ['id', 'epicSlug', 'hldBaseRunId', 'amendment', 'rationale', 'citations', 'proposedBy', 'proposedAt', 'sideEffects'];
+	const frozen: (keyof AmendmentRecord)[] = ['id', 'epicHash', 'epicSlug', 'hldBaseRunId', 'amendment', 'rationale', 'citations', 'proposedBy', 'proposedAt', 'sideEffects'];
 	for (const k of frozen) {
 		if (JSON.stringify(prev[k]) !== JSON.stringify(next[k])) {
 			throw new AmendmentImmutabilityError(`amendment field '${String(k)}' cannot change`);
@@ -181,12 +175,8 @@ function assertFrozen(prev: AmendmentRecord, next: AmendmentRecord): void {
 // Reads
 // ---------------------------------------------------------------------------
 
-export function readAmendment(
-	repoPath:    string,
-	epicSlug:    string,
-	amendmentId: string,
-): AmendmentRecord {
-	const path = amendmentPath(repoPath, epicSlug, amendmentId);
+export function readAmendment(repoPath: string, amendmentId: string): AmendmentRecord {
+	const path = amendmentPath(repoPath, amendmentId);
 	if (!existsSync(path)) {
 		throw new AmendmentNotFoundError(`amendment '${amendmentId}' not found at ${path}`);
 	}
@@ -200,18 +190,20 @@ export function readAmendment(
 
 export function listAmendments(
 	repoPath: string,
-	epicSlug: string,
+	epicHash: string,
 ): readonly AmendmentRecord[] {
-	const dir = amendmentsDir(repoPath, epicSlug);
+	const dir = amendmentsRootDir(repoPath);
 	if (!existsSync(dir)) return [];
+	const prefix = amendmentFilenamePrefix(epicHash);
 	const out: AmendmentRecord[] = [];
 	for (const name of readdirSync(dir)) {
 		if (!name.endsWith('.json')) continue;
+		if (!name.startsWith(prefix)) continue;
 		const raw = readFileSync(join(dir, name), 'utf8');
 		const rec = JSON.parse(raw) as unknown;
 		if (isAmendmentRecord(rec)) out.push(rec);
 	}
-	// Deterministic order: `amend-<slug>-<n>` sorted by n ascending.
+	// Deterministic order: `AMD-<hash>-<n>` sorted by n ascending.
 	return out.sort((a, b) => amendmentSuffixNum(a.id) - amendmentSuffixNum(b.id));
 }
 
@@ -219,9 +211,9 @@ export function listAmendments(
  *  Same order the applier consumes them in. */
 export function listApprovedAmendments(
 	repoPath: string,
-	epicSlug: string,
+	epicHash: string,
 ): readonly AmendmentRecord[] {
-	return listAmendments(repoPath, epicSlug)
+	return listAmendments(repoPath, epicHash)
 		.filter(a => a.status === 'approved' && typeof a.approvedAt === 'string')
 		.sort((a, b) => (a.approvedAt ?? '').localeCompare(b.approvedAt ?? ''));
 }

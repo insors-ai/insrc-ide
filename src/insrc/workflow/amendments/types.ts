@@ -156,8 +156,9 @@ export interface AmendmentSideEffects {
 }
 
 export interface AmendmentRecord {
-	readonly id:           string;                  // 'amend-<epicSlug>-<n>'
-	readonly epicSlug:     string;
+	readonly id:           string;                  // 'AMD-<epicHash>-<n>'
+	readonly epicHash:     string;                  // canonical Epic hash
+	readonly epicSlug:     string;                  // display slug (from Define)
 	readonly hldBaseRunId: string;                  // base HLD this applies to
 	readonly amendment:    Amendment;
 	readonly rationale:    string;
@@ -204,6 +205,7 @@ export function isAmendmentRecord(v: unknown): v is AmendmentRecord {
 	if (typeof v !== 'object' || v === null) return false;
 	const r = v as Record<string, unknown>;
 	if (typeof r['id']           !== 'string') return false;
+	if (typeof r['epicHash']     !== 'string') return false;
 	if (typeof r['epicSlug']     !== 'string') return false;
 	if (typeof r['hldBaseRunId'] !== 'string') return false;
 	if (!isAmendment(r['amendment']))          return false;

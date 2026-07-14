@@ -541,24 +541,46 @@ compares against every LLD's stored hash. Mismatches get marked
 
 ## 8. Storage layout
 
+Every workflow artifact carries a 16-char Epic hash (see
+`workflow/hash.ts`). Filenames are typed by workflow (`DEF-`,
+`HLD-`, `LLD-`, `AMD-`, `TRK-`) followed by the hash. The hash
+is the same across every artifact belonging to one Epic, so
+`grep -l a3f4b8c9d1e2f3a4 .insrc/artifacts/` returns every file
+for that Epic.
+
+Human-facing markdown lives under `docs/`; canonical JSON lives
+under `.insrc/artifacts/` (hidden, git-tracked) so `docs/` stays
+clean of machine-serialized content.
+
 ```
-docs/designs/<epic-slug>/
-├── _hld.md              # HLD, human-readable
-├── _hld.json            # canonical HLD
-├── _hld-runs/
-│   └── <runId>.jsonl    # per-run log
-├── s1.md                # LLD for Story s1
-├── s1.json
-├── s1-runs/
-│   └── <runId>.jsonl
-├── s2.md
-├── s2.json
-└── ...
+<repo>/
+├── docs/                                # human-facing markdown only
+│   ├── defines/
+│   │   └── DEF-<h16>.md
+│   └── designs/
+│       ├── HLD-<h16>.md
+│       ├── LLD-<h16>-s1.md
+│       └── LLD-<h16>-s2.md
+│
+└── .insrc/artifacts/                    # canonical JSON, hidden, git-tracked
+    ├── DEF-<h16>.json
+    ├── HLD-<h16>.json
+    ├── LLD-<h16>-s1.json
+    ├── LLD-<h16>-s2.json
+    ├── AMD-<h16>-1.json                 # amendments, one file each
+    └── AMD-<h16>-2.json
+
+~/.insrc/workflow-runs/<h16>/            # jsonl trace logs, OUTSIDE the repo
+    ├── define-<runId>.jsonl
+    ├── design.epic-<runId>.jsonl
+    ├── design.story-<runId>.jsonl
+    └── tracker.push-<runId>.jsonl
 ```
 
-Underscore prefix on `_hld` sorts it first in listings and
-signals it's the umbrella. Every LLD file is named after its
-Story id (`s1`, `s2`, ... — same ids the Epic uses).
+The Epic hash is derived from the Define workflow's runId
+(`sha256(defineRunId).slice(0, 16)`) at start time. The
+human-readable slug derived from the focus stays in
+`meta.epicSlug` for display; it never appears in filenames.
 
 ## 9. Verification checklists
 

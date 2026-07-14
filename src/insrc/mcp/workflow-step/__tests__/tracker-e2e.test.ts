@@ -28,7 +28,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { defineArtifactPaths } from '../../../workflow/storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
+const MISSING_HASH = '0000000000000000';
 
 import { handleWorkflowStep } from '../handler.js';
 import { registerWorkflowRunners } from '../../../workflow/index.js';
@@ -49,15 +53,16 @@ function payload(env: Envelope): Record<string, unknown> {
 /** Seed an approved Define artifact. Optionally also seed a git
  *  remote so the github config resolver succeeds via git-remote
  *  fallback (no ~/.insrc/github.json needed). */
-function seedApprovedEpic(repo: string, slug: string, opts: { withGitRemote: boolean }): void {
+function seedApprovedEpic(repo: string, epicHash: string, opts: { withGitRemote: boolean }): void {
 	if (opts.withGitRemote) {
 		execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
 		execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:myorg/myrepo.git'], { cwd: repo, stdio: 'ignore' });
 	}
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	const path = join(repo, 'docs/defines', `${slug}.json`);
+	const paths = defineArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	const path = paths.json;
 	writeFileSync(path, JSON.stringify({
-		meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1 },
+		meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			flavor: 'enhancement',
 			problem: 'Users cannot filter todos by tag.',
@@ -137,7 +142,7 @@ async function walk(
 ): Promise<{ done: Record<string, unknown> }> {
 	const startOut = payload(await handleWorkflowStep({
 		phase: 'start', workflow, focus: `${workflow} for ${slug}`, repo,
-		params: { epicSlug: slug },
+		params: { epicHash: slug },
 	}));
 	assert.equal(startOut['next'], 'emit_plan', JSON.stringify(startOut));
 	let state = startOut['state'] as string;
@@ -187,13 +192,13 @@ test('tracker.push: happy path patches Epic meta.tracker with refs', async () =>
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedEpic(repo, slug, { withGitRemote: true });
 		const { done } = await walk(repo, slug, 'tracker.push', PUSH_EXEC_OK, PUSH_VERIFY_OK);
 		assert.equal(done['next'], 'done', JSON.stringify(done));
 
-		const epic = JSON.parse(readFileSync(join(repo, 'docs/defines', `${slug}.json`), 'utf8'));
+		const epic = JSON.parse(readFileSync(defineArtifactPaths(repo, slug).json, 'utf8'));
 		assert.equal(epic.meta.tracker.adapter, 'github');
 		assert.equal(epic.meta.tracker.epicRef, 'myorg/myrepo#100');
 		assert.deepEqual(epic.meta.tracker.storyRefs, { s1: 'myorg/myrepo#101', s2: 'myorg/myrepo#102' });
@@ -212,14 +217,14 @@ test('tracker.push: checklist failure refuses synthesize + leaves meta untouched
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedEpic(repo, slug, { withGitRemote: true });
 		const { done } = await walk(repo, slug, 'tracker.push', PUSH_EXEC_OK, PUSH_VERIFY_FAIL);
 		assert.equal(done['next'], 'error', JSON.stringify(done));
 		assert.match((done['error'] as { message: string }).message, /storyLabelled/);
 
-		const epic = JSON.parse(readFileSync(join(repo, 'docs/defines', `${slug}.json`), 'utf8'));
+		const epic = JSON.parse(readFileSync(defineArtifactPaths(repo, slug).json, 'utf8'));
 		assert.equal(epic.meta.tracker, undefined);
 	} finally {
 		rmSync(repo, { recursive: true, force: true });
@@ -230,7 +235,7 @@ test('tracker.sync: happy path merges status + lastSyncedAt into meta.tracker', 
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedEpic(repo, slug, { withGitRemote: true });
 		// First push so sync has refs to work off of.
@@ -239,7 +244,7 @@ test('tracker.sync: happy path merges status + lastSyncedAt into meta.tracker', 
 		const { done } = await walk(repo, slug, 'tracker.sync', SYNC_EXEC_OK, SYNC_VERIFY_OK);
 		assert.equal(done['next'], 'done', JSON.stringify(done));
 
-		const epic = JSON.parse(readFileSync(join(repo, 'docs/defines', `${slug}.json`), 'utf8'));
+		const epic = JSON.parse(readFileSync(defineArtifactPaths(repo, slug).json, 'utf8'));
 		assert.deepEqual(epic.meta.tracker.storyStatus, { s1: 'in-progress', s2: 'open' });
 		assert.equal(epic.meta.tracker.epicStatus, 'in-progress');
 		assert.equal(epic.meta.tracker.lastSyncedAt, '2026-07-12T02:00:00Z');
@@ -254,13 +259,13 @@ test('tracker.sync: refuses when Epic has no prior tracker refs', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedEpic(repo, slug, { withGitRemote: true });
 		// Skip push. sync's s1 should throw.
 		const startOut = payload(await handleWorkflowStep({
 			phase: 'start', workflow: 'tracker.sync', focus: 'sync', repo,
-			params: { epicSlug: slug },
+			params: { epicHash: slug },
 		}));
 		const state = startOut['state'] as string;
 		const planOut = payload(await handleWorkflowStep({
@@ -273,7 +278,7 @@ test('tracker.sync: refuses when Epic has no prior tracker refs', async () => {
 	}
 });
 
-test('tracker.push: refuses without epicSlug param', async () => {
+test('tracker.push: refuses without epicHash param', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
@@ -291,13 +296,13 @@ test('tracker.push: refuses when Epic is unapproved', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-tracker-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		execFileSync('git', ['init'], { cwd: repo, stdio: 'ignore' });
 		execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:myorg/myrepo.git'], { cwd: repo, stdio: 'ignore' });
 		// Seed but do NOT approve.
-		mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-		writeFileSync(join(repo, 'docs/defines', `${slug}.json`), JSON.stringify({
+		const _def=defineArtifactPaths(repo, slug); mkdirSync(dirname(_def.json), { recursive: true });
+		writeFileSync(_def.json, JSON.stringify({
 			meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1 },
 			body: {
 				flavor: 'enhancement', problem: 'x', nonGoals: [], assumptions: [], constraints: [],
@@ -309,7 +314,7 @@ test('tracker.push: refuses when Epic is unapproved', async () => {
 
 		const startOut = payload(await handleWorkflowStep({
 			phase: 'start', workflow: 'tracker.push', focus: 'push', repo,
-			params: { epicSlug: slug },
+			params: { epicHash: slug },
 		}));
 		const state = startOut['state'] as string;
 		const planOut = payload(await handleWorkflowStep({

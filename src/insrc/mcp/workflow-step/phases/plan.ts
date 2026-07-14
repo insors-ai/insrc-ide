@@ -46,7 +46,7 @@ export async function handlePlan(
 		return errorResult('empty-plan', `plan.steps is empty`, false);
 	}
 
-	const tick = await startRun(state.intent, input.plan, state.runId, state.slug);
+	const tick = await startRun(state.intent, input.plan, state.runId, state.epicKey);
 	log.info(
 		{ runId: state.runId, workflow: state.intent.workflow, tickType: tick.type },
 		'insrc_workflow_step[plan]: executor tick',
@@ -60,7 +60,7 @@ export async function handlePlan(
 		const next: WorkflowStepStatePayload = {
 			version:     STATE_VERSION,
 			runId:       state.runId,
-			slug:        state.slug,
+			epicKey:     state.epicKey,
 			startedAtMs: state.startedAtMs,
 			intent:      state.intent,
 			executor:    tick.state,
@@ -85,7 +85,7 @@ export async function handlePlan(
 	const next: WorkflowStepStatePayload = {
 		version:     STATE_VERSION,
 		runId:       state.runId,
-		slug:        state.slug,
+		epicKey:     state.epicKey,
 		startedAtMs: state.startedAtMs,
 		intent:      state.intent,
 		stepOutputs: tick.stepOutputs,

@@ -4,11 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * LLD staleness scan — Phase E.
+ * LLD staleness scan — Phase E (post-hash migration).
  *
- * Given an Epic, walk every LLD under `docs/designs/<slug>/*.json`
- * (excluding `_hld.json`), read the meta, and compare each LLD's
- * stored `hldEffectiveHash` against the current effective hash.
+ * Given an Epic (by hash), walk every LLD under
+ * `.insrc/artifacts/LLD-<epicHash>-<storyId>.json`, read the meta,
+ * and compare each LLD's stored `hldEffectiveHash` against the
+ * current effective hash.
  *
  * Staleness reasons (workflow-design.md §11.6):
  *   - `hld-rerun`         — the base HLD was re-run
@@ -25,11 +26,12 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 import type { HldArtifact } from '../artifacts/hld.js';
 import type { LldArtifact } from '../artifacts/lld.js';
 import { computeHldEffectiveHash } from '../artifacts/lld.js';
+import { amendmentsRootDir, lldFilenamePrefix } from '../storage.js';
 import { listApprovedAmendments } from './store.js';
 
 // ---------------------------------------------------------------------------
@@ -50,26 +52,27 @@ export interface StaleLldEntry {
 // Scanner
 // ---------------------------------------------------------------------------
 
-/** Scan every LLD under `docs/designs/<epicSlug>/*.json` (skipping
- *  `_hld.json`) and return one entry per LLD.
+/** Scan every LLD under `.insrc/artifacts/LLD-<epicHash>-*.json`
+ *  and return one entry per LLD.
  *
  *  Does not throw when an LLD is missing metadata; instead marks
  *  it stale with `reason='malformed'`. */
 export function scanLldStaleness(
-	repoPath:      string,
-	epicSlug:      string,
-	baseHld:       HldArtifact,
+	repoPath: string,
+	epicHash: string,
+	baseHld:  HldArtifact,
 ): readonly StaleLldEntry[] {
-	const dir = join(repoPath, 'docs/designs', epicSlug);
+	const dir = amendmentsRootDir(repoPath);   // same root as amendments
 	if (!existsSync(dir)) return [];
-	const amendments = listApprovedAmendments(repoPath, epicSlug);
+	const prefix = lldFilenamePrefix(epicHash);
+	const amendments = listApprovedAmendments(repoPath, epicHash);
 	const currentEffective = computeHldEffectiveHash(baseHld.meta.runId, amendments.map(a => a.id));
 
 	const out: StaleLldEntry[] = [];
 	for (const name of readdirSync(dir)) {
 		if (!name.endsWith('.json')) continue;
-		if (name === '_hld.json')    continue;
-		if (name.startsWith('_'))    continue;   // any other internal file
+		if (!name.startsWith(prefix)) continue;
+		const storyIdFromName = name.slice(prefix.length, -'.json'.length);
 		const path = join(dir, name);
 		let raw: string;
 		try {
@@ -79,20 +82,20 @@ export function scanLldStaleness(
 		try {
 			doc = JSON.parse(raw);
 		} catch {
-			out.push({ path, storyId: basename(name, '.json'), stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
+			out.push({ path, storyId: storyIdFromName, stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
 			continue;
 		}
 		const artifact = doc as LldArtifact;
 		if (typeof artifact !== 'object' || artifact === null || typeof artifact.meta !== 'object' || artifact.meta === null) {
-			out.push({ path, storyId: basename(name, '.json'), stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
+			out.push({ path, storyId: storyIdFromName, stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
 			continue;
 		}
 		const meta = artifact.meta;
 		if (typeof meta.hldEffectiveHash !== 'string' || typeof meta.hldBaseRunId !== 'string') {
-			out.push({ path, storyId: meta.storyId ?? basename(name, '.json'), stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
+			out.push({ path, storyId: meta.storyId ?? storyIdFromName, stale: true, staleReason: 'malformed', currentEffective, storedEffective: '' });
 			continue;
 		}
-		const storyId = meta.storyId ?? basename(name, '.json');
+		const storyId = meta.storyId ?? storyIdFromName;
 		const metaExt = meta as unknown as { staleAckedAt?: string; staleAckedReason?: string };
 		const ackedStale = metaExt.staleAckedAt !== undefined
 			? { at: metaExt.staleAckedAt, reason: metaExt.staleAckedReason ?? '' }
@@ -106,8 +109,6 @@ export function scanLldStaleness(
 		if (meta.hldBaseRunId !== baseHld.meta.runId) {
 			reason = 'hld-rerun';
 		} else {
-			// Find the first approved amendment whose id isn't in
-			// meta.hldAmendmentsApplied — that's the change to catch up on.
 			const applied = new Set(meta.hldAmendmentsApplied ?? []);
 			const missing = amendments.find(a => !applied.has(a.id));
 			reason = missing !== undefined ? `amendment-${missing.id}` : 'unknown';

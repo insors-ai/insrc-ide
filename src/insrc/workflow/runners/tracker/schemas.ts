@@ -97,6 +97,7 @@ export const trackerChecklistSchema = {
 
 export interface PushContext {
 	readonly kind: 'push';
+	readonly epicHash: string;
 	readonly epicSlug: string;
 	readonly gh: { readonly owner: string; readonly repo: string; readonly epicLabel: string; readonly storyLabel: string; readonly useMilestones: boolean };
 	readonly epicTitle: string;
@@ -115,6 +116,7 @@ export interface PushContext {
 
 export interface SyncContext {
 	readonly kind: 'sync';
+	readonly epicHash: string;
 	readonly epicSlug: string;
 	readonly gh: { readonly owner: string; readonly repo: string; readonly epicLabel: string; readonly storyLabel: string; readonly useMilestones: boolean };
 	readonly refs: { readonly epicRef: string; readonly storyRefs: Readonly<Record<string, string>>; readonly milestoneRef?: string };
@@ -122,6 +124,7 @@ export interface SyncContext {
 
 export interface PostContext {
 	readonly kind: 'post';
+	readonly epicHash: string;
 	readonly epicSlug: string;
 	readonly gh: { readonly owner: string; readonly repo: string; readonly epicLabel: string; readonly storyLabel: string; readonly useMilestones: boolean };
 	readonly target: {

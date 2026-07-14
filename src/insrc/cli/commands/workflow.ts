@@ -4,22 +4,26 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * `insrc workflow` CLI. Phase A ships:
+ * `insrc workflow` CLI.
  *
  *   - `insrc workflow list`   — enumerate registered workflows.
  *   - `insrc workflow runs`   — list workflow-runs log entries.
  *   - `insrc workflow derive-slug <focus>` — pure helper for tests.
+ *   - `insrc workflow approve|reject <artifact-path>` — set meta.
+ *   - `insrc workflow status <epic-hash>` — amendments + LLD staleness.
+ *   - `insrc workflow amend <epic-hash>` — CRUD on amendments.
+ *   - `insrc workflow chain <epic-hash>` — full lifecycle status + next-action.
+ *   - `insrc workflow ack-stale`, `insrc workflow gh-config`, `insrc workflow unlink`.
  *
  * The actual workflow-start path lives behind the `insrc_workflow_step`
- * MCP tool (Claude Code / Codex drive it), not a CLI command. A CLI
- * `start` command that would try to drive the LLM turns here would
- * either re-implement the state loop or hard-code an LLM provider
- * — both bad. In Phase B+ the CLI grows `approve`, `reject`,
- * `push`, `sync`, `post` — those are deterministic and don't need
- * the outer LLM.
+ * MCP tool (Claude Code / Codex drive it), not a CLI command.
+ *
+ * Every Epic-scoped command takes the 16-char Epic hash (see
+ * `workflow/hash.ts`). The human-readable slug lives in the Define
+ * artifact's meta and shows up in the command output for context.
  */
 
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { Command } from 'commander';
@@ -39,10 +43,10 @@ import {
 } from '../../workflow/amendments/store.js';
 import { scanLldStaleness } from '../../workflow/amendments/staleness.js';
 import { deriveSlug } from '../../workflow/slug.js';
+import { assertEpicHash } from '../../workflow/hash.js';
 import { WORKFLOW_NAMES } from '../../workflow/types.js';
 import { resolveGithubConfig } from '../../workflow/config/github.js';
 import { buildChainReport, formatChainReport } from '../../workflow/chain.js';
-import { readFileSync, writeFileSync } from 'node:fs';
 import { defineArtifactPaths, writeAtomic as writeAtomicStorage } from '../../workflow/storage.js';
 
 export function registerWorkflowCommands(program: Command): void {
@@ -60,24 +64,24 @@ export function registerWorkflowCommands(program: Command): void {
 
 	wf.command('runs')
 		.description('list workflow-run log directories under ~/.insrc/workflow-runs/')
-		.option('--slug <slug>', 'only show runs for one slug')
-		.action((opts: { slug?: string }) => {
+		.option('--epic <hash>', 'only show runs for one Epic hash')
+		.action((opts: { epic?: string }) => {
 			const root = join(PATHS.insrc, 'workflow-runs');
 			if (!existsSync(root)) {
 				process.stdout.write('no workflow runs yet\n');
 				return;
 			}
-			const slugs = opts.slug === undefined
+			const keys = opts.epic === undefined
 				? readdirSync(root, { withFileTypes: true })
 					.filter(d => d.isDirectory())
 					.map(d => d.name)
-				: [opts.slug];
-			for (const slug of slugs) {
-				const slugDir = join(root, slug);
-				if (!existsSync(slugDir)) continue;
-				const entries = readdirSync(slugDir, { withFileTypes: true })
+				: [opts.epic];
+			for (const key of keys) {
+				const dir = join(root, key);
+				if (!existsSync(dir)) continue;
+				const entries = readdirSync(dir, { withFileTypes: true })
 					.filter(d => d.isFile() && d.name.endsWith('.jsonl'));
-				process.stdout.write(`## ${slug}\n`);
+				process.stdout.write(`## ${key}\n`);
 				for (const e of entries) {
 					process.stdout.write(`  ${e.name}\n`);
 				}
@@ -85,7 +89,7 @@ export function registerWorkflowCommands(program: Command): void {
 		});
 
 	wf.command('derive-slug <focus...>')
-		.description('derive the slug the framework would use for a focus (helper)')
+		.description('derive the display slug the framework would use for a focus (helper)')
 		.action((parts: string[]) => {
 			const focus = parts.join(' ');
 			try {
@@ -124,29 +128,30 @@ export function registerWorkflowCommands(program: Command): void {
 		});
 
 	// ---------------------------------------------------------------
-	// Amendments (Phase E)
+	// Amendments
 	// ---------------------------------------------------------------
 
-	wf.command('status <epic-slug>')
+	wf.command('status <epic-hash>')
 		.description('show pending amendments + stale LLDs for an Epic')
 		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
-		.action((epicSlug: string, opts: { repo: string }) => {
+		.action((epicHash: string, opts: { repo: string }) => {
 			try {
+				assertEpicHash(epicHash);
 				const repoPath = opts.repo;
-				const amendments = listAmendments(repoPath, epicSlug);
+				const amendments = listAmendments(repoPath, epicHash);
 				const pending = amendments.filter(a => a.status === 'pending');
 				const approved = amendments.filter(a => a.status === 'approved');
 				const rejected = amendments.filter(a => a.status === 'rejected');
-				process.stdout.write(`## Amendments for '${epicSlug}'\n`);
+				process.stdout.write(`## Amendments for '${epicHash}'\n`);
 				process.stdout.write(`  pending: ${pending.length}   approved: ${approved.length}   rejected: ${rejected.length}\n`);
 				for (const a of pending) {
 					process.stdout.write(`  - ${a.id}  (${a.amendment.type})  proposedBy=${a.proposedBy.workflow}:${a.proposedBy.storyId ?? '?'}:${a.proposedBy.stepId}\n`);
 				}
 				process.stdout.write(`\n## LLDs staleness\n`);
 				let base;
-				try { base = readBaseHld(repoPath, epicSlug); }
+				try { base = readBaseHld(repoPath, epicHash); }
 				catch { process.stdout.write('  (no HLD yet)\n'); return; }
-				const entries = scanLldStaleness(repoPath, epicSlug, base);
+				const entries = scanLldStaleness(repoPath, epicHash, base);
 				if (entries.length === 0) { process.stdout.write('  (no LLDs)\n'); return; }
 				for (const e of entries) {
 					const acked = e.ackedStale !== undefined ? ' [ACKED]' : '';
@@ -162,7 +167,7 @@ export function registerWorkflowCommands(program: Command): void {
 			}
 		});
 
-	const amend = wf.command('amend <epic-slug>')
+	const amend = wf.command('amend <epic-hash>')
 		.description('list / show / approve / reject HLD amendments for an Epic')
 		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
 		.option('--list', 'list every amendment for this Epic')
@@ -171,14 +176,15 @@ export function registerWorkflowCommands(program: Command): void {
 		.option('--reject <amendmentId>', 'reject a pending amendment')
 		.option('--notes <text>', 'reason (required with --reject)')
 		.option('--approved-by <name>', 'approver id / name (defaults to $USER)', process.env['USER'] ?? 'unknown');
-	amend.action((epicSlug: string, opts: {
+	amend.action((epicHash: string, opts: {
 		repo: string; list?: boolean; show?: string;
 		approve?: string; reject?: string; notes?: string; approvedBy: string;
 	}) => {
 		try {
+			assertEpicHash(epicHash);
 			const repoPath = opts.repo;
 			if (opts.list === true) {
-				const rows = listAmendments(repoPath, epicSlug);
+				const rows = listAmendments(repoPath, epicHash);
 				if (rows.length === 0) { process.stdout.write('(no amendments)\n'); return; }
 				for (const a of rows) {
 					const detail = a.status === 'approved' ? ` approvedAt=${a.approvedAt}` :
@@ -188,12 +194,12 @@ export function registerWorkflowCommands(program: Command): void {
 				return;
 			}
 			if (opts.show !== undefined) {
-				const rec = readAmendment(repoPath, epicSlug, opts.show);
+				const rec = readAmendment(repoPath, opts.show);
 				process.stdout.write(JSON.stringify(rec, null, 2) + '\n');
 				return;
 			}
 			if (opts.approve !== undefined) {
-				const rec = approveAmendment(repoPath, epicSlug, opts.approve, opts.approvedBy);
+				const rec = approveAmendment(repoPath, opts.approve, opts.approvedBy);
 				process.stdout.write(`approved ${rec.id} at ${rec.approvedAt}\n`);
 				return;
 			}
@@ -202,7 +208,7 @@ export function registerWorkflowCommands(program: Command): void {
 				if (typeof reason !== 'string' || reason.length === 0) {
 					throw new Error(`--reject requires --notes <reason>`);
 				}
-				const rec = rejectAmendment(repoPath, epicSlug, opts.reject, reason);
+				const rec = rejectAmendment(repoPath, opts.reject, reason);
 				process.stdout.write(`rejected ${rec.id} at ${rec.rejectedAt}\n`);
 				return;
 			}
@@ -228,11 +234,7 @@ export function registerWorkflowCommands(program: Command): void {
 		});
 
 	// ---------------------------------------------------------------
-	// GitHub tracker (Phase F)
-	//
-	// push/sync/post themselves run through the MCP tool
-	// (`insrc_workflow_step`) — those are LLM-driven. The CLI only
-	// carries the deterministic supporting commands.
+	// GitHub tracker
 	// ---------------------------------------------------------------
 
 	wf.command('gh-config')
@@ -248,13 +250,14 @@ export function registerWorkflowCommands(program: Command): void {
 			}
 		});
 
-	wf.command('chain <epic-slug>')
+	wf.command('chain <epic-hash>')
 		.description('report the current state of an Epic across the whole workflow chain + suggest the next action')
 		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
 		.option('--json', 'emit the report as JSON instead of formatted text')
-		.action((epicSlug: string, opts: { repo: string; json?: boolean }) => {
+		.action((epicHash: string, opts: { repo: string; json?: boolean }) => {
 			try {
-				const report = buildChainReport(opts.repo, epicSlug);
+				assertEpicHash(epicHash);
+				const report = buildChainReport(opts.repo, epicHash);
 				if (opts.json === true) {
 					process.stdout.write(JSON.stringify(report, null, 2) + '\n');
 				} else {
@@ -266,12 +269,13 @@ export function registerWorkflowCommands(program: Command): void {
 			}
 		});
 
-	wf.command('unlink <epic-slug>')
+	wf.command('unlink <epic-hash>')
 		.description('clear tracker meta from the local Epic artifact (does NOT touch GitHub)')
 		.option('--repo <path>', 'repo path (defaults to cwd)', process.cwd())
-		.action((epicSlug: string, opts: { repo: string }) => {
+		.action((epicHash: string, opts: { repo: string }) => {
 			try {
-				const paths = defineArtifactPaths(opts.repo, epicSlug);
+				assertEpicHash(epicHash);
+				const paths = defineArtifactPaths(opts.repo, epicHash);
 				const raw = readFileSync(paths.json, 'utf8');
 				const artifact = JSON.parse(raw) as { meta?: Record<string, unknown> };
 				if (artifact.meta === undefined || (artifact.meta as { tracker?: unknown }).tracker === undefined) {

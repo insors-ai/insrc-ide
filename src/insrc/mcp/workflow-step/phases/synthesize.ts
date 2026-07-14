@@ -9,14 +9,25 @@
  * The client emitted the artifact JSON. We:
  *   1. Validate JSON shape + citations + boundary via
  *      `finalizeArtifact`.
- *   2. Write the artifact (md + json) atomically.
- *   3. Release the state token + return `next: 'done'`.
+ *   2. Resolve the on-disk paths from the finalized artifact's meta
+ *      (which carries `epicHash` for every Epic-scoped workflow).
+ *   3. Write the artifact (md + json) atomically.
+ *   4. Release the state token + return `next: 'done'`.
  */
+
+import { join } from 'node:path';
 
 import { getLogger } from '../../../shared/logger.js';
 import { finalizeArtifact } from '../../../workflow/orchestrator.js';
-import { defineArtifactPaths, hldArtifactPaths, lldArtifactPaths, runsDirFor, stubArtifactPaths, writeAtomic, appendRunLog } from '../../../workflow/storage.js';
-import { join } from 'node:path';
+import {
+	appendRunLog,
+	defineArtifactPaths,
+	hldArtifactPaths,
+	lldArtifactPaths,
+	runsDirFor,
+	stubArtifactPaths,
+	writeAtomic,
+} from '../../../workflow/storage.js';
 import type { WorkflowIntent } from '../../../workflow/types.js';
 import { assertStage, decodeState } from '../state.js';
 import { releaseState } from '../state-store.js';
@@ -54,10 +65,14 @@ export async function handleSynthesize(
 		const code = failure.ok ? 'synthesize-unknown' : `synthesize-${failure.kind}`;
 		return errorResult(code, formatFailure(failure), true);
 	}
-	const paths = pathsForWorkflow(state.intent, state.slug, state.runId);
+	// The finalized artifact carries the definitive epicHash in its
+	// meta (Define mints it; downstream workflows echo it). Read it
+	// back to pick paths, so we never diverge from the artifact.
+	const finalizedMeta = (result.finalized.artifact as { meta?: { epicHash?: string } }).meta ?? {};
+	const paths = pathsForWorkflow(state.intent, state.epicKey, state.runId, finalizedMeta.epicHash);
 	writeAtomic(paths.md,   result.finalized.renderedMd);
 	writeAtomic(paths.json, result.finalized.renderedJson);
-	appendRunLog(state.slug, state.intent.workflow, state.runId, {
+	appendRunLog(state.epicKey, state.intent.workflow, state.runId, {
 		ts:    new Date().toISOString(),
 		event: 'artifact-written',
 		md:    paths.md,
@@ -78,27 +93,31 @@ export async function handleSynthesize(
 }
 
 function pathsForWorkflow(
-	intent: WorkflowIntent,
-	slug:   string,
-	runId:  string,
+	intent:   WorkflowIntent,
+	epicKey:  string,
+	runId:    string,
+	epicHash: string | undefined,
 ): { readonly md: string; readonly json: string } {
 	const { workflow, repoPath } = intent;
-	if (workflow === 'stub')        return stubArtifactPaths(repoPath, slug);
-	if (workflow === 'define')      return defineArtifactPaths(repoPath, slug);
-	if (workflow === 'design.epic') {
-		const { md, json } = hldArtifactPaths(repoPath, slug);
-		return { md, json };
+	if (workflow === 'stub') return stubArtifactPaths(repoPath, epicKey);
+	// Every Epic-scoped workflow reads the hash from the finalized
+	// artifact's meta. `epicKey` is the trace-log dir key — for
+	// Epic-scoped workflows it equals the Epic hash, but we prefer
+	// the meta value so the two can't diverge.
+	if (epicHash === undefined) {
+		throw new Error(`pathsForWorkflow: workflow '${workflow}' finalized without meta.epicHash`);
 	}
+	if (workflow === 'define')      return defineArtifactPaths(repoPath, epicHash);
+	if (workflow === 'design.epic') return hldArtifactPaths(repoPath, epicHash);
 	if (workflow === 'design.story') {
 		const storyId = intent.params['storyId'];
 		if (typeof storyId !== 'string' || storyId.length === 0) {
 			throw new Error(`design.story synthesize requires params.storyId`);
 		}
-		const { md, json } = lldArtifactPaths(repoPath, slug, storyId);
-		return { md, json };
+		return lldArtifactPaths(repoPath, epicHash, storyId);
 	}
 	if (workflow === 'tracker.push' || workflow === 'tracker.sync' || workflow === 'tracker.post') {
-		const dir = runsDirFor(slug);
+		const dir = runsDirFor(epicHash);
 		return {
 			md:   join(dir, `${workflow}-${runId}.md`),
 			json: join(dir, `${workflow}-${runId}.json`),
@@ -114,7 +133,6 @@ function formatFailure(f: import('../../../workflow/synthesizer.js').ValidationR
 }
 
 function inputStateToken(state: string): string {
-	// The token is the whole `state` string; no envelope.
 	return state;
 }
 

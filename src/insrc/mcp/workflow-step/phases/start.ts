@@ -7,14 +7,24 @@
  * `insrc_workflow_step` phase='start' handler.
  *
  * 1. Resolve the repo path (explicit param > INSRC_REPO env).
- * 2. Build a WorkflowIntent from focus + workflow + params.
- * 3. Look up the workflow's decomposer prompt + schema.
- * 4. Seed the state (stage='awaiting_plan').
- * 5. Return emit_plan.
+ * 2. Mint a runId.
+ * 3. Derive the Epic hash key that groups this run's trace log:
+ *    - `define`  → hash the freshly-minted runId (this Define IS the
+ *      Epic; its hash becomes the canonical Epic identity).
+ *    - `design.epic` / `design.story` / `tracker.*` → read
+ *      `params.epicHash` (must be present; every downstream workflow
+ *      addresses its Epic by hash).
+ *    - `stub` → derive a display slug from the focus for the trace
+ *      dir (stub has no Epic scope).
+ * 4. Build a WorkflowIntent from focus + workflow + params.
+ * 5. Look up the workflow's decomposer prompt + schema.
+ * 6. Seed the state (stage='awaiting_plan').
+ * 7. Return emit_plan.
  */
 
 import { getLogger } from '../../../shared/logger.js';
 import { deriveSlug } from '../../../workflow/slug.js';
+import { assertEpicHash, computeEpicHash } from '../../../workflow/hash.js';
 import type { WorkflowIntent } from '../../../workflow/types.js';
 import { prepareDecompose } from '../../../workflow/orchestrator.js';
 import { encodeState, STATE_VERSION, type WorkflowStepStatePayload } from '../state.js';
@@ -33,19 +43,14 @@ export async function handleStart(
 		);
 	}
 	const runId = `wf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-	// Slug source per workflow:
-	//   - `define` / `stub` derive from focus (new artifact tree).
-	//   - `design.epic` / `design.story` reuse the Epic's slug — the
-	//     HLD + LLDs live under `docs/designs/<epicSlug>/`. Requires
-	//     intent.params.epicSlug.
 	const params = input.params ?? {};
-	const slug   = slugFor(input.workflow, input.focus, params);
+	const epicKey = epicKeyFor(input.workflow, input.focus, params, runId);
 
 	const intent: WorkflowIntent = {
 		workflow:      input.workflow,
 		focus:         input.focus,
 		repoPath,
-		repoIndexedAt: null,   // Phase A: no repo-indexedAt lookup; wire in Phase B via analyze.
+		repoIndexedAt: null,
 		params,
 	};
 
@@ -54,14 +59,14 @@ export async function handleStart(
 	const state: WorkflowStepStatePayload = {
 		version:     STATE_VERSION,
 		runId,
-		slug,
+		epicKey,
 		startedAtMs: Date.now(),
 		intent,
 		stage:       'awaiting_plan',
 	};
 
 	log.info(
-		{ runId, workflow: intent.workflow, slug, focus: input.focus.slice(0, 80) },
+		{ runId, workflow: intent.workflow, epicKey, focus: input.focus.slice(0, 80) },
 		'insrc_workflow_step[start]: emitting decomposer prompt',
 	);
 
@@ -85,19 +90,25 @@ function resolveRepoPath(explicit: string | undefined): string | undefined {
 	return undefined;
 }
 
-function slugFor(
+/** Key that groups this run's trace log under `~/.insrc/workflow-runs/`.
+ *  Epic-scoped workflows key by the 16-char Epic hash so every
+ *  workflow for the same Epic writes into the same trace dir.
+ *  `define` mints its own hash from the runId (the Define IS the
+ *  Epic). `stub` has no Epic scope so it derives a display slug. */
+function epicKeyFor(
 	workflow: string,
 	focus:    string,
 	params:   Record<string, unknown>,
+	runId:    string,
 ): string {
-	if (workflow === 'design.epic' || workflow === 'design.story') {
-		const s = params['epicSlug'];
-		if (typeof s !== 'string' || s.length === 0) {
-			throw new Error(
-				`insrc_workflow_step[start]: workflow '${workflow}' requires params.epicSlug.`,
-			);
-		}
-		return s;
+	if (workflow === 'define') {
+		return computeEpicHash(runId);
+	}
+	if (workflow === 'design.epic' || workflow === 'design.story' ||
+	    workflow === 'tracker.push' || workflow === 'tracker.sync' || workflow === 'tracker.post') {
+		const h = params['epicHash'];
+		assertEpicHash(h, `insrc_workflow_step[start]: workflow '${workflow}' requires params.epicHash`);
+		return h;
 	}
 	return deriveSlug(focus);
 }

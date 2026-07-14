@@ -21,6 +21,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { defineArtifactPaths } from '../../../workflow/storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
+const MISSING_HASH = '0000000000000000';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -41,11 +46,11 @@ function payload(env: Envelope): Record<string, unknown> {
 // Fixture: pre-seed an approved Define artifact
 // ---------------------------------------------------------------------------
 
-function seedApprovedDefine(repo: string, slug: string): void {
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	const path = join(repo, 'docs/defines', `${slug}.json`);
-	writeFileSync(path, JSON.stringify({
-		meta: { workflow: 'define', runId: 'define-1', schemaVersion: 1 },
+function seedApprovedDefine(repo: string, epicHash: string): void {
+	const paths = defineArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	writeFileSync(paths.json, JSON.stringify({
+		meta: { workflow: 'define', runId: 'define-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			flavor: 'enhancement',
 			problem: 'Users cannot filter todos by tag. This blocks triage.',
@@ -60,7 +65,7 @@ function seedApprovedDefine(repo: string, slug: string): void {
 		},
 		citations: [{ id: 'c1', kind: 'analyze-bundle', ref: 'todos module' }],
 	}, null, 2));
-	approveArtifactByJsonPath(path);
+	approveArtifactByJsonPath(paths.json);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +163,7 @@ const artifactJson = {
 
 async function walkToSynthesize(
 	repo:     string,
-	epicSlug: string,
+	epicHash: string,
 	s6:       Record<string, unknown>,
 ): Promise<string> {
 	const startOut = payload(await handleWorkflowStep({
@@ -166,7 +171,7 @@ async function walkToSynthesize(
 		workflow: 'design.epic',
 		focus:    'design HLD for tag filtering',
 		repo,
-		params:   { epicSlug },
+		params:   { epicHash },
 	}));
 	assert.equal(startOut['next'], 'emit_plan', JSON.stringify(startOut));
 	let state = startOut['state'] as string;
@@ -216,7 +221,7 @@ test('design.epic: happy path writes _hld.md under docs/designs/<slug>/', async 
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-hld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedDefine(repo, slug);
 		const state = await walkToSynthesize(repo, slug, s6PassedVerdict);
@@ -227,7 +232,7 @@ test('design.epic: happy path writes _hld.md under docs/designs/<slug>/', async 
 		}));
 		assert.equal(done['next'], 'done', JSON.stringify(done));
 		const outPath = done['path'] as string;
-		assert.ok(outPath.endsWith('/docs/designs/tag-filtering/_hld.md'), outPath);
+		assert.ok(outPath.endsWith(`/docs/designs/HLD-${HASH}.md`), outPath);
 		assert.ok(existsSync(outPath));
 		const md = readFileSync(outPath, 'utf8');
 		assert.ok(md.includes('## Framework summary'));
@@ -248,7 +253,7 @@ test('design.epic: refuses to start without an approved Define', async () => {
 			workflow: 'design.epic',
 			focus:    'x',
 			repo,
-			params:   { epicSlug: 'missing-slug' },
+			params:   { epicHash: MISSING_HASH },
 		}));
 		// Start itself just prepares the decomposer prompt — the gate
 		// fires when s1 runs. Walk to s1 execution:
@@ -277,7 +282,7 @@ test('design.epic: refuses to start without an approved Define', async () => {
 	}
 });
 
-test('design.epic: refuses without epicSlug param', async () => {
+test('design.epic: refuses without epicHash param', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-hld-e2e-'));
@@ -298,7 +303,7 @@ test('design.epic: s6 sbdry1=missed forces synthesize hard-fail', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-hld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedDefine(repo, slug);
 		const state = await walkToSynthesize(repo, slug, s6BoundaryFailVerdict);
@@ -319,7 +324,7 @@ test('design.epic: refuses when a Story from Epic is missing from storyBoundarie
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-hld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedDefine(repo, slug);
 		const state = await walkToSynthesize(repo, slug, s6PassedVerdict);
@@ -347,7 +352,7 @@ test('design.epic: refuses when interfaceSketch contains a return', async () => 
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-hld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seedApprovedDefine(repo, slug);
 		const state = await walkToSynthesize(repo, slug, s6PassedVerdict);

@@ -22,6 +22,7 @@ import { readBaseHld, readDefineArtifact, requireApprovedEpic } from '../../gate
 import { readLldArtifact } from '../../artifacts/lld-io.js';
 import { renderTrackerHldSummary, renderTrackerLldSummary, renderTrackerAmendmentSummary } from './summaries.js';
 import { resolveGithubConfig } from '../../config/github.js';
+import { assertEpicHash } from '../../hash.js';
 import type { StepRunnerContext } from '../../types.js';
 import type { PostContext, PushContext, SyncContext } from './schemas.js';
 
@@ -30,8 +31,9 @@ import type { PostContext, PushContext, SyncContext } from './schemas.js';
 // ---------------------------------------------------------------------------
 
 export function assemblePushContext(ctx: StepRunnerContext): PushContext {
-	const epicSlug = requireEpicSlug(ctx);
-	const epic = requireApprovedEpic(ctx.intent.repoPath, epicSlug);
+	const epicHash = requireEpicHash(ctx);
+	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
+	const epicSlug = epic.meta.epicSlug ?? epicHash;
 	const gh   = resolveGithubConfig(ctx.intent.repoPath);
 	const force = ctx.intent.params['force'] === true;
 
@@ -62,6 +64,7 @@ export function assemblePushContext(ctx: StepRunnerContext): PushContext {
 
 	return {
 		kind: 'push',
+		epicHash,
 		epicSlug,
 		gh: { owner: gh.owner, repo: gh.repo, epicLabel: gh.epicLabel, storyLabel: gh.storyLabel, useMilestones: gh.useMilestones },
 		epicTitle: firstSentence(epic.body.problem),
@@ -77,13 +80,14 @@ export function assemblePushContext(ctx: StepRunnerContext): PushContext {
 // ---------------------------------------------------------------------------
 
 export function assembleSyncContext(ctx: StepRunnerContext): SyncContext {
-	const epicSlug = requireEpicSlug(ctx);
-	const epic = requireApprovedEpic(ctx.intent.repoPath, epicSlug);
+	const epicHash = requireEpicHash(ctx);
+	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
+	const epicSlug = epic.meta.epicSlug ?? epicHash;
 	const gh   = resolveGithubConfig(ctx.intent.repoPath);
 	const trackerMeta = (epic.meta as { tracker?: { epicRef?: string; storyRefs?: Record<string, string>; milestoneRef?: string } }).tracker;
 	if (trackerMeta === undefined || typeof trackerMeta.epicRef !== 'string' || typeof trackerMeta.storyRefs !== 'object') {
 		throw new Error(
-			`tracker.sync: Epic '${epicSlug}' has no tracker refs to sync. ` +
+			`tracker.sync: Epic '${epicSlug}' (${epicHash}) has no tracker refs to sync. ` +
 			`Run \`tracker.push\` first.`,
 		);
 	}
@@ -94,6 +98,7 @@ export function assembleSyncContext(ctx: StepRunnerContext): SyncContext {
 	};
 	return {
 		kind: 'sync',
+		epicHash,
 		epicSlug,
 		gh: { owner: gh.owner, repo: gh.repo, epicLabel: gh.epicLabel, storyLabel: gh.storyLabel, useMilestones: gh.useMilestones },
 		refs,
@@ -105,8 +110,9 @@ export function assembleSyncContext(ctx: StepRunnerContext): SyncContext {
 // ---------------------------------------------------------------------------
 
 export function assemblePostContext(ctx: StepRunnerContext): PostContext {
-	const epicSlug = requireEpicSlug(ctx);
-	const epic = requireApprovedEpic(ctx.intent.repoPath, epicSlug);
+	const epicHash = requireEpicHash(ctx);
+	const epic = requireApprovedEpic(ctx.intent.repoPath, epicHash);
+	const epicSlug = epic.meta.epicSlug ?? epicHash;
 	const gh   = resolveGithubConfig(ctx.intent.repoPath);
 	const targetKind = (ctx.intent.params['target'] as { kind?: unknown } | undefined)?.kind;
 	if (targetKind !== 'hld' && targetKind !== 'lld' && targetKind !== 'amendment') {
@@ -116,13 +122,13 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 	// Pull Epic's tracker refs (must already exist).
 	const trackerMeta = (epic.meta as { tracker?: { epicRef?: string; storyRefs?: Record<string, string> } }).tracker;
 	if (trackerMeta === undefined || typeof trackerMeta.epicRef !== 'string') {
-		throw new Error(`tracker.post: Epic '${epicSlug}' has no tracker refs. Run \`tracker.push\` first.`);
+		throw new Error(`tracker.post: Epic '${epicSlug}' (${epicHash}) has no tracker refs. Run \`tracker.push\` first.`);
 	}
 
 	let issueRef: string;
 	let summaryMd: string;
 	if (targetKind === 'hld') {
-		const hld = readBaseHld(ctx.intent.repoPath, epicSlug);
+		const hld = readBaseHld(ctx.intent.repoPath, epicHash);
 		issueRef  = trackerMeta.epicRef;
 		summaryMd = renderTrackerHldSummary(hld);
 	} else if (targetKind === 'lld') {
@@ -134,7 +140,7 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 		if (typeof storyRef !== 'string') {
 			throw new Error(`tracker.post: no tracker ref for Story '${storyId}' (Epic may need a re-push)`);
 		}
-		const lld = readLldArtifact(ctx.intent.repoPath, epicSlug, storyId);
+		const lld = readLldArtifact(ctx.intent.repoPath, epicHash, storyId);
 		issueRef  = storyRef;
 		summaryMd = renderTrackerLldSummary(lld);
 	} else {
@@ -142,7 +148,7 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 		if (typeof amendmentId !== 'string' || amendmentId.length === 0) {
 			throw new Error(`tracker.post: target.kind='amendment' requires target.amendmentId`);
 		}
-		const rec = readAmendment(ctx.intent.repoPath, epicSlug, amendmentId);
+		const rec = readAmendment(ctx.intent.repoPath, amendmentId);
 		if (rec.status !== 'approved') {
 			throw new Error(`tracker.post: amendment '${amendmentId}' has status '${rec.status}'; only approved amendments post to the tracker`);
 		}
@@ -152,6 +158,7 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 
 	return {
 		kind: 'post',
+		epicHash,
 		epicSlug,
 		gh: { owner: gh.owner, repo: gh.repo, epicLabel: gh.epicLabel, storyLabel: gh.storyLabel, useMilestones: gh.useMilestones },
 		target: { kind: targetKind, issueRef, summaryMd },
@@ -162,12 +169,10 @@ export function assemblePostContext(ctx: StepRunnerContext): PostContext {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function requireEpicSlug(ctx: StepRunnerContext): string {
-	const slug = ctx.intent.params['epicSlug'];
-	if (typeof slug !== 'string' || slug.length === 0) {
-		throw new Error(`tracker.${ctx.intent.workflow.split('.')[1] ?? 'x'} requires intent.params.epicSlug`);
-	}
-	return slug;
+function requireEpicHash(ctx: StepRunnerContext): string {
+	const hash = ctx.intent.params['epicHash'];
+	assertEpicHash(hash, `tracker.${ctx.intent.workflow.split('.')[1] ?? 'x'} requires intent.params.epicHash`);
+	return hash;
 }
 
 function firstSentence(s: string): string {

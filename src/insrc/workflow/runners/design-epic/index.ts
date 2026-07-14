@@ -23,6 +23,7 @@
 
 import { registerRunner } from '../../executor.js';
 import { requireApprovedEpic } from '../../gates.js';
+import { assertEpicHash } from '../../hash.js';
 import type { StepRunner, StepRunnerContext } from '../../types.js';
 import {
 	alternativesEnumerateSchema,
@@ -64,19 +65,15 @@ function llmPauseRunner(spec: {
 // Helper: pull the approved Epic body once + reuse in every prompt
 // ---------------------------------------------------------------------------
 
-function epicSlugFrom(ctx: StepRunnerContext): string {
-	const slug = ctx.intent.params['epicSlug'];
-	if (typeof slug !== 'string' || slug.length === 0) {
-		throw new Error(
-			`design.epic requires intent.params.epicSlug (the Define artifact's slug).`,
-		);
-	}
-	return slug;
+function epicHashFrom(ctx: StepRunnerContext): string {
+	const hash = ctx.intent.params['epicHash'];
+	assertEpicHash(hash, `design.epic requires intent.params.epicHash (the Define artifact's 16-char hash)`);
+	return hash;
 }
 
 function approvedEpicSummary(ctx: StepRunnerContext): string {
-	const slug = epicSlugFrom(ctx);
-	const epic = requireApprovedEpic(ctx.intent.repoPath, slug);
+	const hash = epicHashFrom(ctx);
+	const epic = requireApprovedEpic(ctx.intent.repoPath, hash);
 	return JSON.stringify({
 		flavor:       epic.body.flavor,
 		problem:      epic.body.problem,
@@ -114,7 +111,7 @@ const contextAssemble = llmPauseRunner({
 		].join('\n'),
 		userTurn: [
 			`Focus: ${ctx.intent.focus}`,
-			`Epic slug: ${epicSlugFrom(ctx)}`,
+			`Epic hash: ${epicHashFrom(ctx)}`,
 			'',
 			'Approved Epic (summary, verbatim):',
 			'```json',

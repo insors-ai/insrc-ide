@@ -131,8 +131,10 @@ export interface LldBody {
 	readonly openQuestions:        readonly string[];
 }
 
-// LLD meta extends the base with HLD anchoring.
+// LLD meta extends the base with HLD anchoring. Every LLD carries
+// the Epic hash (canonical Epic identity) + slug (display only).
 export interface LldMeta extends ArtifactMetaBase {
+	readonly epicHash:             string;
 	readonly epicSlug:             string;
 	readonly storyId:              string;
 	readonly hldBaseRunId:         string;

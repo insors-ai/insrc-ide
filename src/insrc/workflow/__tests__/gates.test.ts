@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
 	approveArtifactByJsonPath,
@@ -24,13 +24,30 @@ import {
 	rejectArtifactByJsonPath,
 	requireApprovedEpic,
 } from '../gates.js';
+import { defineArtifactPaths } from '../storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
 
 // ---------------------------------------------------------------------------
 // jsonPathForMd
 // ---------------------------------------------------------------------------
 
-test('jsonPathForMd swaps md → json', () => {
-	assert.equal(jsonPathForMd('/a/b/c.md'), '/a/b/c.json');
+test('jsonPathForMd swaps docs/defines md → .insrc/artifacts json', () => {
+	assert.equal(
+		jsonPathForMd(`/repo/docs/defines/DEF-${HASH}.md`),
+		`/repo/.insrc/artifacts/DEF-${HASH}.json`,
+	);
+});
+
+test('jsonPathForMd swaps docs/designs md → .insrc/artifacts json', () => {
+	assert.equal(
+		jsonPathForMd(`/repo/docs/designs/HLD-${HASH}.md`),
+		`/repo/.insrc/artifacts/HLD-${HASH}.json`,
+	);
+});
+
+test('jsonPathForMd leaves docs/stub layout untouched', () => {
+	assert.equal(jsonPathForMd('/repo/docs/stub/x.md'), '/repo/docs/stub/x.json');
 });
 
 test('jsonPathForMd returns json paths unchanged', () => {
@@ -46,14 +63,17 @@ test('jsonPathForMd rejects unknown extensions', () => {
 // ---------------------------------------------------------------------------
 
 function writeFixture(repo: string): string {
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	const path = join(repo, 'docs/defines/x.json');
-	writeFileSync(path, JSON.stringify({
-		meta: { workflow: 'define', runId: 'r1' },
+	const paths = defineArtifactPaths(repo, HASH);
+	mkdirSync(dirname(paths.json), { recursive: true });
+	writeFileSync(paths.json, JSON.stringify({
+		meta: {
+			workflow: 'define', runId: 'r1',
+			epicHash: HASH, epicSlug: 'x',
+		},
 		body: { flavor: 'new-capability', problem: 'x', nonGoals: [], assumptions: [], constraints: [], stories: [{ id: 's1', title: 't', userValue: 'v', acceptanceCriteria: [] }], openQuestions: [] },
 		citations: [],
 	}, null, 2));
-	return path;
+	return paths.json;
 }
 
 test('approveArtifactByJsonPath sets meta.approvedAt', () => {
@@ -116,7 +136,7 @@ test('requireApprovedEpic throws ArtifactMissingError when no Define exists', ()
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-gate-'));
 	try {
 		assert.throws(
-			() => requireApprovedEpic(repo, 'missing-slug'),
+			() => requireApprovedEpic(repo, HASH),
 			(err: Error) => err instanceof ArtifactMissingError,
 		);
 	} finally {
@@ -127,9 +147,9 @@ test('requireApprovedEpic throws ArtifactMissingError when no Define exists', ()
 test('requireApprovedEpic throws ArtifactNotApprovedError when Define is not approved', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-gate-'));
 	try {
-		writeFixture(repo);   // writes docs/defines/x.json
+		writeFixture(repo);
 		assert.throws(
-			() => requireApprovedEpic(repo, 'x'),
+			() => requireApprovedEpic(repo, HASH),
 			(err: Error) => err instanceof ArtifactNotApprovedError,
 		);
 	} finally {
@@ -142,7 +162,7 @@ test('requireApprovedEpic returns the Define artifact after approval', () => {
 	try {
 		const path = writeFixture(repo);
 		approveArtifactByJsonPath(path);
-		const epic = requireApprovedEpic(repo, 'x');
+		const epic = requireApprovedEpic(repo, HASH);
 		assert.equal(epic.body.flavor, 'new-capability');
 		assert.equal(epic.body.stories[0]!.id, 's1');
 	} finally {

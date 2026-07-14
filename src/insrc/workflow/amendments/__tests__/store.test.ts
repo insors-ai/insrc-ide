@@ -7,6 +7,8 @@
  * Amendment on-disk store — proposal + approval + rejection +
  * immutability + id generation.
  *
+ * Amendment ids under the hash layout are `AMD-<epicHash>-<n>`.
+ *
  * Run:
  *   npx tsx --test src/insrc/workflow/amendments/__tests__/store.test.ts
  */
@@ -31,6 +33,13 @@ import {
 } from '../store.js';
 import type { Amendment, AmendmentRecord } from '../types.js';
 
+const HASH = 'a3f4b8c9d1e2f3a4';
+const AMD1 = `AMD-${HASH}-1`;
+const AMD2 = `AMD-${HASH}-2`;
+const AMD3 = `AMD-${HASH}-3`;
+const AMD4 = `AMD-${HASH}-4`;
+const AMD10 = `AMD-${HASH}-10`;
+
 const AMENDMENT: Amendment = {
 	type: 'sharedContract.fieldAdd',
 	contractId: 'sc1',
@@ -40,8 +49,9 @@ const AMENDMENT: Amendment = {
 
 function record(overrides: Partial<AmendmentRecord> = {}): AmendmentRecord {
 	return {
-		id:           'amend-test-1',
-		epicSlug:     'test',
+		id:           AMD1,
+		epicHash:     HASH,
+		epicSlug:     'test-epic',
 		hldBaseRunId: 'base-1',
 		amendment:    AMENDMENT,
 		rationale:    'need sort order',
@@ -60,16 +70,16 @@ function record(overrides: Partial<AmendmentRecord> = {}): AmendmentRecord {
 test('nextAmendmentId starts at 1 in an empty repo', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
-		assert.equal(nextAmendmentId(repo, 'my-epic'), 'amend-my-epic-1');
+		assert.equal(nextAmendmentId(repo, HASH), AMD1);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 test('nextAmendmentId advances past existing entries', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
-		proposeAmendment(repo, record({ id: 'amend-test-1' }));
-		proposeAmendment(repo, record({ id: 'amend-test-3' }));
-		assert.equal(nextAmendmentId(repo, 'test'), 'amend-test-4');
+		proposeAmendment(repo, record({ id: AMD1 }));
+		proposeAmendment(repo, record({ id: AMD3 }));
+		assert.equal(nextAmendmentId(repo, HASH), `AMD-${HASH}-4`);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
@@ -81,8 +91,8 @@ test('proposeAmendment writes a record then readAmendment returns it', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		proposeAmendment(repo, record());
-		const back = readAmendment(repo, 'test', 'amend-test-1');
-		assert.equal(back.id, 'amend-test-1');
+		const back = readAmendment(repo, AMD1);
+		assert.equal(back.id, AMD1);
 		assert.equal(back.status, 'pending');
 		assert.equal(back.amendment.type, 'sharedContract.fieldAdd');
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -114,7 +124,7 @@ test('approveAmendment sets status + approvedAt + approvedBy', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		proposeAmendment(repo, record());
-		const back = approveAmendment(repo, 'test', 'amend-test-1', 'alice');
+		const back = approveAmendment(repo, AMD1, 'alice');
 		assert.equal(back.status, 'approved');
 		assert.equal(back.approvedBy, 'alice');
 		assert.match(back.approvedAt!, /^\d{4}-\d{2}-\d{2}T/);
@@ -125,9 +135,9 @@ test('approveAmendment refuses double-approve', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		proposeAmendment(repo, record());
-		approveAmendment(repo, 'test', 'amend-test-1', 'alice');
+		approveAmendment(repo, AMD1, 'alice');
 		assert.throws(
-			() => approveAmendment(repo, 'test', 'amend-test-1', 'alice'),
+			() => approveAmendment(repo, AMD1, 'alice'),
 			(err: Error) => err instanceof AmendmentImmutabilityError,
 		);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -137,7 +147,7 @@ test('rejectAmendment refuses missing reason', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		proposeAmendment(repo, record());
-		assert.throws(() => rejectAmendment(repo, 'test', 'amend-test-1', ''));
+		assert.throws(() => rejectAmendment(repo, AMD1, ''));
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
@@ -145,9 +155,9 @@ test('rejectAmendment refuses on approved records', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		proposeAmendment(repo, record());
-		approveAmendment(repo, 'test', 'amend-test-1', 'alice');
+		approveAmendment(repo, AMD1, 'alice');
 		assert.throws(
-			() => rejectAmendment(repo, 'test', 'amend-test-1', 'x'),
+			() => rejectAmendment(repo, AMD1, 'x'),
 			(err: Error) => err instanceof AmendmentImmutabilityError,
 		);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
@@ -160,29 +170,38 @@ test('rejectAmendment refuses on approved records', () => {
 test('listAmendments returns records in id-suffix order', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
-		proposeAmendment(repo, record({ id: 'amend-test-2' }));
-		proposeAmendment(repo, record({ id: 'amend-test-1' }));
-		proposeAmendment(repo, record({ id: 'amend-test-10' }));
-		const rows = listAmendments(repo, 'test');
-		assert.deepEqual(rows.map(r => r.id), ['amend-test-1', 'amend-test-2', 'amend-test-10']);
+		proposeAmendment(repo, record({ id: AMD2 }));
+		proposeAmendment(repo, record({ id: AMD1 }));
+		proposeAmendment(repo, record({ id: AMD10 }));
+		const rows = listAmendments(repo, HASH);
+		assert.deepEqual(rows.map(r => r.id), [AMD1, AMD2, AMD10]);
+	} finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test('listAmendments filters by Epic hash prefix', () => {
+	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
+	const OTHER = 'b1b1b1b1b1b1b1b1';
+	try {
+		proposeAmendment(repo, record({ id: AMD1 }));
+		proposeAmendment(repo, record({ id: `AMD-${OTHER}-1`, epicHash: OTHER }));
+		const rows = listAmendments(repo, HASH);
+		assert.deepEqual(rows.map(r => r.id), [AMD1]);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 test('listApprovedAmendments filters + sorts by approvedAt', async () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
-		proposeAmendment(repo, record({ id: 'amend-test-1' }));
-		proposeAmendment(repo, record({ id: 'amend-test-2' }));
-		proposeAmendment(repo, record({ id: 'amend-test-3' }));
-		proposeAmendment(repo, record({ id: 'amend-test-4' }));
-		// Approve 3 → 1 with small waits to ensure distinct timestamps.
-		approveAmendment(repo, 'test', 'amend-test-3', 'a');
+		proposeAmendment(repo, record({ id: AMD1 }));
+		proposeAmendment(repo, record({ id: AMD2 }));
+		proposeAmendment(repo, record({ id: AMD3 }));
+		proposeAmendment(repo, record({ id: AMD4 }));
+		approveAmendment(repo, AMD3, 'a');
 		await new Promise(r => setTimeout(r, 5));
-		approveAmendment(repo, 'test', 'amend-test-1', 'a');
-		// Leave -2 pending and reject -4 to check the filter.
-		rejectAmendment(repo, 'test', 'amend-test-4', 'nope');
-		const rows = listApprovedAmendments(repo, 'test');
-		assert.deepEqual(rows.map(r => r.id), ['amend-test-3', 'amend-test-1']);
+		approveAmendment(repo, AMD1, 'a');
+		rejectAmendment(repo, AMD4, 'nope');
+		const rows = listApprovedAmendments(repo, HASH);
+		assert.deepEqual(rows.map(r => r.id), [AMD3, AMD1]);
 	} finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
@@ -194,7 +213,7 @@ test('readAmendment throws when record is missing', () => {
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-'));
 	try {
 		assert.throws(
-			() => readAmendment(repo, 'test', 'nope'),
+			() => readAmendment(repo, `AMD-${HASH}-999`),
 			(err: Error) => err instanceof AmendmentNotFoundError,
 		);
 	} finally { rmSync(repo, { recursive: true, force: true }); }

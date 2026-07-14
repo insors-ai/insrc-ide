@@ -4,23 +4,18 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * `insrc workflow chain <epic-slug>` support module.
+ * `insrc workflow chain <epicHash>` support module.
  *
- * The chain command reports the current state of an Epic across
- * the whole workflow lifecycle (define → design.epic → design.story
- * per Story) and prints the exact next MCP tool invocation the
- * user should run.
+ * Reports the current state of an Epic across the whole workflow
+ * lifecycle (define → design.epic → design.story per Story) and
+ * prints the exact next MCP tool invocation the user should run.
  *
- * The command is a status + guide — it does NOT drive the LLM-
- * heavy workflows itself. Those run through the `insrc_workflow_step`
- * MCP tool inside a client like Claude Code / Codex CLI.
- *
- * Design principle: the framework tells the user (or their LLM)
- * exactly what to do next; the user runs it in-session.
+ * Epics are addressed by their 16-char hash. The human-readable
+ * slug pulled from the Define artifact's `meta.epicSlug` is shown
+ * in titles + prompts, but is never load-bearing.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 
 import type { DefineArtifact } from './artifacts/define.js';
 import type { HldArtifact } from './artifacts/hld.js';
@@ -33,7 +28,8 @@ import { scanLldStaleness } from './amendments/staleness.js';
 // ---------------------------------------------------------------------------
 
 export interface ChainReport {
-	readonly epicSlug: string;
+	readonly epicHash: string;
+	readonly epicSlug?: string;
 	readonly define: {
 		readonly exists:      boolean;
 		readonly approved:    boolean;
@@ -85,17 +81,19 @@ export type NextAction =
 // Builder
 // ---------------------------------------------------------------------------
 
-export function buildChainReport(repoPath: string, epicSlug: string): ChainReport {
-	const define = readDefineIfPresent(repoPath, epicSlug);
-	const hld    = readHldIfPresent(repoPath, epicSlug);
-	const stories = readStoryLldStatus(repoPath, epicSlug, define, hld);
-	const amendments = countAmendments(repoPath, epicSlug);
+export function buildChainReport(repoPath: string, epicHash: string): ChainReport {
+	const define = readDefineIfPresent(repoPath, epicHash);
+	const hld    = readHldIfPresent(repoPath, epicHash);
+	const stories = readStoryLldStatus(repoPath, epicHash, define, hld);
+	const amendments = countAmendments(repoPath, epicHash);
 	const tracker = readTrackerMeta(define.artifact);
-	const nextAction = computeNextAction(repoPath, epicSlug, {
+	const nextAction = computeNextAction(epicHash, {
 		define, hld, stories, amendments, tracker,
 	});
+	const epicSlug = define.artifact?.meta.epicSlug;
 	return {
-		epicSlug,
+		epicHash,
+		...(epicSlug !== undefined ? { epicSlug } : {}),
 		define: {
 			exists:   define.exists,
 			approved: define.approved,
@@ -131,8 +129,8 @@ interface HldState {
 	readonly artifact?: HldArtifact;
 }
 
-function readDefineIfPresent(repoPath: string, epicSlug: string): DefineState {
-	const paths = defineArtifactPaths(repoPath, epicSlug);
+function readDefineIfPresent(repoPath: string, epicHash: string): DefineState {
+	const paths = defineArtifactPaths(repoPath, epicHash);
 	if (!existsSync(paths.json)) return { exists: false, approved: false, rejected: false };
 	const raw = readFileSync(paths.json, 'utf8');
 	const artifact = JSON.parse(raw) as DefineArtifact;
@@ -141,8 +139,8 @@ function readDefineIfPresent(repoPath: string, epicSlug: string): DefineState {
 	return { exists: true, approved, rejected, path: paths.md, artifact };
 }
 
-function readHldIfPresent(repoPath: string, epicSlug: string): HldState {
-	const paths = hldArtifactPaths(repoPath, epicSlug);
+function readHldIfPresent(repoPath: string, epicHash: string): HldState {
+	const paths = hldArtifactPaths(repoPath, epicHash);
 	if (!existsSync(paths.json)) return { exists: false, approved: false, rejected: false };
 	const raw = readFileSync(paths.json, 'utf8');
 	const artifact = JSON.parse(raw) as HldArtifact;
@@ -153,18 +151,16 @@ function readHldIfPresent(repoPath: string, epicSlug: string): HldState {
 
 function readStoryLldStatus(
 	repoPath:  string,
-	epicSlug:  string,
+	epicHash:  string,
 	define:    DefineState,
 	hld:       HldState,
 ): ChainReport['stories'] {
 	if (define.artifact === undefined) return [];
 	const stories = define.artifact.body.stories;
-	// Staleness scan needs the HLD to be present. Without it we
-	// don't yet know effective hash, so just report existence.
 	const staleness = hld.artifact === undefined ? new Map<string, { stale: boolean; staleReason?: string }>()
-		: staleByStory(scanLldStaleness(repoPath, epicSlug, hld.artifact));
+		: staleByStory(scanLldStaleness(repoPath, epicHash, hld.artifact));
 	return stories.map(s => {
-		const paths = lldArtifactPaths(repoPath, epicSlug, s.id);
+		const paths = lldArtifactPaths(repoPath, epicHash, s.id);
 		const hasLld = existsSync(paths.json);
 		let approved = false;
 		if (hasLld) {
@@ -193,8 +189,8 @@ function staleByStory(entries: ReturnType<typeof scanLldStaleness>): Map<string,
 	return m;
 }
 
-function countAmendments(repoPath: string, epicSlug: string): ChainReport['amendments'] {
-	const rows = listAmendments(repoPath, epicSlug);
+function countAmendments(repoPath: string, epicHash: string): ChainReport['amendments'] {
+	const rows = listAmendments(repoPath, epicHash);
 	let pending = 0, approved = 0, rejected = 0;
 	for (const r of rows) {
 		if (r.status === 'pending')       pending++;
@@ -227,7 +223,7 @@ interface NextActionInput {
 	readonly tracker:   ChainReport['tracker'];
 }
 
-function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInput): NextAction {
+function computeNextAction(epicHash: string, s: NextActionInput): NextAction {
 	// 1. Define isn't done or approved.
 	if (!s.define.exists) {
 		return {
@@ -251,15 +247,15 @@ function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInpu
 	if (s.amendments.pending > 0) {
 		return {
 			kind: 'review-amendment',
-			amendmentId: `<list via: insrc workflow amend ${epicSlug} --list>`,
-			command: `insrc workflow amend ${epicSlug} --list`,
+			amendmentId: `<list via: insrc workflow amend ${epicHash} --list>`,
+			command: `insrc workflow amend ${epicHash} --list`,
 		};
 	}
 	// 3. HLD.
 	if (!s.hld.exists) {
 		return {
 			kind: 'run-hld',
-			command: `insrc_workflow_step phase=start workflow=design.epic focus="HLD for ${epicSlug}" params={"epicSlug":"${epicSlug}"}`,
+			command: `insrc_workflow_step phase=start workflow=design.epic focus="HLD for ${epicHash}" params={"epicHash":"${epicHash}"}`,
 		};
 	}
 	if (!s.hld.approved) {
@@ -281,7 +277,7 @@ function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInpu
 			return {
 				kind: 'run-lld',
 				storyId: story.id,
-				command: `insrc_workflow_step phase=start workflow=design.story focus="LLD for ${story.id}" params={"epicSlug":"${epicSlug}","storyId":"${story.id}"}`,
+				command: `insrc_workflow_step phase=start workflow=design.story focus="LLD for ${story.id}" params={"epicHash":"${epicHash}","storyId":"${story.id}"}`,
 			};
 		}
 		if (!story.approved) {
@@ -296,7 +292,7 @@ function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInpu
 	if (!s.tracker.pushed) {
 		return {
 			kind: 'push-tracker',
-			command: `insrc_workflow_step phase=start workflow=tracker.push focus="push ${epicSlug} to GitHub" params={"epicSlug":"${epicSlug}"}`,
+			command: `insrc_workflow_step phase=start workflow=tracker.push focus="push ${epicHash} to GitHub" params={"epicHash":"${epicHash}"}`,
 		};
 	}
 	// 6. Suggest a sync if it's been a while (heuristic: never
@@ -304,13 +300,10 @@ function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInpu
 	if (s.tracker.lastSyncedAt === undefined) {
 		return {
 			kind: 'sync-tracker',
-			command: `insrc_workflow_step phase=start workflow=tracker.sync focus="sync ${epicSlug} from GitHub" params={"epicSlug":"${epicSlug}"}`,
+			command: `insrc_workflow_step phase=start workflow=tracker.sync focus="sync ${epicHash} from GitHub" params={"epicHash":"${epicHash}"}`,
 		};
 	}
-	// Chain complete for this Epic (design + tracker up-to-date).
 	return { kind: 'chain-complete' };
-	// silence unused
-	void repoPath; void readdirSync; void join;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +313,8 @@ function computeNextAction(repoPath: string, epicSlug: string, s: NextActionInpu
 /** Render a chain report to plain text for CLI stdout. */
 export function formatChainReport(r: ChainReport): string {
 	const lines: string[] = [];
-	lines.push(`# Chain status: ${r.epicSlug}`);
+	const title = r.epicSlug !== undefined ? `${r.epicSlug} (${r.epicHash})` : r.epicHash;
+	lines.push(`# Chain status: ${title}`);
 	lines.push('');
 	lines.push(`## Define`);
 	lines.push(bullet('exists',   r.define.exists));

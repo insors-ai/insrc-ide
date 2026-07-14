@@ -12,7 +12,7 @@
  *   - Happy path (enhancement flavor) — LLD written under docs/designs/<slug>/<storyId>.md.
  *   - Happy path (new-capability flavor) — s7 skipped; artifact has no migration section.
  *   - Refuses without approved HLD.
- *   - Refuses without epicSlug or storyId param.
+ *   - Refuses without epicHash or storyId param.
  *   - Unknown shared-contract id in interactionWithShared → hard-fail.
  *   - implements-role mismatch (Story doesn't own the contract per HLD) → hard-fail.
  *   - Missing acceptance mapping → hard-fail.
@@ -26,6 +26,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { defineArtifactPaths, hldArtifactPaths } from '../../../workflow/storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
+const MISSING_HASH = '0000000000000000';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,12 +53,13 @@ function payload(env: Envelope): Record<string, unknown> {
 
 interface SeedOpts { readonly flavor: 'enhancement' | 'new-capability' }
 
-function seed(repo: string, slug: string, opts: SeedOpts): void {
+function seed(repo: string, epicHash: string, opts: SeedOpts): void {
 	// Approved Define
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	const definePath = join(repo, 'docs/defines', `${slug}.json`);
+	const definePaths = defineArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(definePaths.json), { recursive: true });
+	const definePath = definePaths.json;
 	writeFileSync(definePath, JSON.stringify({
-		meta: { workflow: 'define', runId: 'define-1', schemaVersion: 1 },
+		meta: { workflow: 'define', runId: 'define-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			flavor: opts.flavor,
 			problem: 'Users cannot filter todos by tag.',
@@ -71,10 +77,11 @@ function seed(repo: string, slug: string, opts: SeedOpts): void {
 	approveArtifactByJsonPath(definePath);
 
 	// Approved HLD
-	mkdirSync(join(repo, 'docs/designs', slug), { recursive: true });
-	const hldPath = join(repo, 'docs/designs', slug, '_hld.json');
+	const hldPaths = hldArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(hldPaths.json), { recursive: true });
+	const hldPath = hldPaths.json;
 	writeFileSync(hldPath, JSON.stringify({
-		meta: { workflow: 'design.epic', runId: 'hld-run-1', schemaVersion: 1 },
+		meta: { workflow: 'design.epic', runId: 'hld-run-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			frameworkSummary: 'Extract TagFilter service.',
 			architectureShape: 'TagFilter owns the tag index [[c1]]; sidebar consumes it.',
@@ -237,7 +244,7 @@ const hldSliceForS1 = {
 
 async function walkToSynthesize(
 	repo:     string,
-	epicSlug: string,
+	epicHash: string,
 	storyId:  string,
 	s7Resp:   Record<string, unknown> | null,
 	s8Resp:   Record<string, unknown>,
@@ -247,7 +254,7 @@ async function walkToSynthesize(
 		workflow: 'design.story',
 		focus:    'LLD for tag filtering story s1',
 		repo,
-		params:   { epicSlug, storyId },
+		params:   { epicHash, storyId },
 	}));
 	assert.equal(startOut['next'], 'emit_plan', JSON.stringify(startOut));
 	let state = startOut['state'] as string;
@@ -310,7 +317,7 @@ test('design.story enhancement: happy path writes LLD under docs/designs/<slug>/
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug, { flavor: 'enhancement' });
 		const state = await walkToSynthesize(repo, slug, 's1', s7Migration, s8PassedVerdict);
@@ -321,7 +328,7 @@ test('design.story enhancement: happy path writes LLD under docs/designs/<slug>/
 		}));
 		assert.equal(done['next'], 'done', JSON.stringify(done));
 		const outPath = done['path'] as string;
-		assert.ok(outPath.endsWith('/docs/designs/tag-filtering/s1.md'), outPath);
+		assert.ok(outPath.endsWith(`/docs/designs/LLD-${HASH}-s1.md`), outPath);
 		assert.ok(existsSync(outPath));
 		const md = readFileSync(outPath, 'utf8');
 		assert.ok(md.includes('# LLD: s1'));
@@ -337,7 +344,7 @@ test('design.story new-capability: s7 skips, artifact has no Migration section',
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'brand-new';
+	const slug = HASH;
 	try {
 		seed(repo, slug, { flavor: 'new-capability' });
 		const state = await walkToSynthesize(repo, slug, 's1', /* s7 */ null, s8PassedVerdict);
@@ -358,7 +365,7 @@ test('design.story: refuses without an approved HLD', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'no-hld';
+	const slug = HASH;
 	try {
 		// Seed only Define, not HLD.
 		mkdirSync(join(repo, 'docs/defines'), { recursive: true });
@@ -373,7 +380,7 @@ test('design.story: refuses without an approved HLD', async () => {
 
 		const startOut = payload(await handleWorkflowStep({
 			phase: 'start', workflow: 'design.story', focus: 'x', repo,
-			params: { epicSlug: slug, storyId: 's1' },
+			params: { epicHash: slug, storyId: 's1' },
 		}));
 		const state = startOut['state'] as string;
 		const planOut = payload(await handleWorkflowStep({
@@ -399,14 +406,14 @@ test('design.story: refuses without an approved HLD', async () => {
 	}
 });
 
-test('design.story: refuses without epicSlug or storyId params', async () => {
+test('design.story: refuses without epicHash or storyId params', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
 	try {
 		const errOut = payload(await handleWorkflowStep({
 			phase: 'start', workflow: 'design.story', focus: 'x', repo,
-			params: { epicSlug: 'x' }, // missing storyId
+			params: { epicHash: HASH }, // missing storyId
 		}));
 		assert.equal(errOut['next'], 'error');
 	} finally {
@@ -418,7 +425,7 @@ test('design.story: unknown shared-contract id fails synthesize', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug, { flavor: 'enhancement' });
 		const state = await walkToSynthesize(repo, slug, 's1', s7Migration, s8PassedVerdict);
@@ -440,7 +447,7 @@ test('design.story: migration MISSING for enhancement Epic → hard-fail', async
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug, { flavor: 'enhancement' });
 		const state = await walkToSynthesize(repo, slug, 's1', s7Migration, s8PassedVerdict);
@@ -458,7 +465,7 @@ test('design.story: migration PRESENT for new-capability Epic → hard-fail', as
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-lld-e2e-'));
-	const slug = 'brand-new';
+	const slug = HASH;
 	try {
 		seed(repo, slug, { flavor: 'new-capability' });
 		const state = await walkToSynthesize(repo, slug, 's1', null, s8PassedVerdict);

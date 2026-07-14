@@ -1,0 +1,276 @@
+{
+  "meta": {
+    "workflow": "define",
+    "runId": "wf-1783920120143-k46cmo",
+    "repoPath": "/Users/subhagho/work/projects/insors/insrc-ide",
+    "createdAt": "2026-07-13T05:31:11.911Z",
+    "model": "client",
+    "elapsedMs": 551768,
+    "repoIndexedAt": null,
+    "schemaVersion": 1,
+    "approvedAt": "2026-07-13T05:32:37.617Z",
+    "epicHash": "cd479e1361d35cfc",
+    "epicSlug": "support-per-repo-config-overrides-embedding"
+  },
+  "body": {
+    "flavor": "enhancement",
+    "problem": "Users cannot pin model choices (embedding, shaper, core) per repo today; every choice comes from the single global ~/.insrc/config.json file [[c1]]. Switching between repos with different embedding needs (GPU-rich Ollama vs. CPU-only ONNX vs. cloud CLI-only) forces hand-editing the global config and wiping the vector store on every switch, and two repos on the same machine can never disagree about which model they want. The friction blocks anyone with multiple projects from using insrc across all of them without conscious model-choice bookkeeping.",
+    "nonGoals": [
+      {
+        "text": "Team-level or org-level shared config sync.",
+        "rationale": "Users manage their own machines today; adding remote sync would introduce a wholly different failure mode (network / auth / merge) beyond the scope of a per-repo override."
+      },
+      {
+        "text": "Runtime hot-swap of a changed embedding model without a re-index.",
+        "rationale": "Changing embedding model requires wiping Lance and re-embedding to avoid dim-mismatch; the daemon-startup docs already reflect this and no user has asked for hot-swap."
+      },
+      {
+        "text": "Extending the per-repo override to config dimensions beyond model choices (logging levels, routing modes, permission gates, etc.).",
+        "rationale": "The ask is explicitly scoped to model choices. A broader per-repo scope would multiply the surface without a concrete user need."
+      }
+    ],
+    "assumptions": [
+      {
+        "text": "The insrc/config module is the correct owning site for the new per-repo dimension; no other module currently reads model config.",
+        "confidence": "high",
+        "source": "c1"
+      },
+      {
+        "text": "Users accept that changing the embedding model for a repo requires wiping that repo's Lance store and re-indexing (the same trade-off the global path already carries).",
+        "confidence": "high",
+        "source": "c1"
+      },
+      {
+        "text": "The three model dimensions in LocalProviderInfraConfig (embeddingModel, coreModel) plus the shaper dimension in AnalyzeShaperConfig cover the full override surface today.",
+        "confidence": "med",
+        "source": "c2"
+      }
+    ],
+    "constraints": [
+      {
+        "id": "k1",
+        "text": "Any new code in insrc/config MUST follow the module's existing conventions: camelCase functions, PascalCase classes, snake_case filenames, *.test test files.",
+        "type": "convention",
+        "source": "c3"
+      },
+      {
+        "id": "k2",
+        "text": "The global ~/.insrc/config.json MUST remain the fallback when a repo has no override; existing single-repo installs continue to work without any change.",
+        "type": "invariant",
+        "source": "c1"
+      },
+      {
+        "id": "k3",
+        "text": "The overridable dimensions MUST be exactly the model dimensions already exposed by the global surface: embeddingModel, embeddingDim, coreModel, shaperModel. Adding other config dimensions is out of scope (non-goal).",
+        "type": "contract",
+        "source": "c2"
+      },
+      {
+        "id": "k4",
+        "text": "CLI commands MUST live inside the existing insrc CLI command tree (same commander framework the current daemon / repo / setup / workflow commands use); no new binary.",
+        "type": "convention",
+        "source": "c1"
+      },
+      {
+        "id": "k5",
+        "text": "The runtime programmatic override entry point already used by callers (ShaperProviderOverrides in src/insrc/analyze/context/shaper-provider.ts) MUST continue to work; per-repo config becomes a new SOURCE of overrides, not a replacement of the runtime API.",
+        "type": "invariant",
+        "source": "c4"
+      }
+    ],
+    "stories": [
+      {
+        "id": "s1",
+        "title": "As a user of multiple repos, I can rely on the daemon serving the effective model choices for each repo, honouring per-repo overrides over the global default",
+        "userValue": "When I work across repos with different needs — a heavy Ollama box for one, an ONNX-only laptop for another, a Claude-CLI-only cloud VM for a third — each repo runs with the models I picked for it, without me hand-editing the global config or wiping state on every switch. The daemon reads the per-repo override at repo scope and applies the correct models automatically.",
+        "acceptanceCriteria": [
+          {
+            "id": "ac1",
+            "given": "a repo has no per-repo override",
+            "when": "the daemon serves an embed, shape, or core operation on that repo",
+            "then": "it uses the global ~/.insrc/config.json model choices, exactly as it does today",
+            "operationalizes": [
+              "k2"
+            ]
+          },
+          {
+            "id": "ac2",
+            "given": "a repo has a per-repo override for the embedding model",
+            "when": "the daemon indexes or queries that repo",
+            "then": "it uses the overridden embedding model and dimension, not the global values",
+            "operationalizes": [
+              "k3"
+            ]
+          },
+          {
+            "id": "ac3",
+            "given": "a repo has a per-repo embedding override whose dimension conflicts with what the repo's vector store already persisted",
+            "when": "the daemon boots serving that repo",
+            "then": "it surfaces a clear error naming the required cleanup step (same recovery path already documented for ONNX-vs-Ollama dim mismatch on the global path)",
+            "operationalizes": [
+              "k2",
+              "k3"
+            ]
+          },
+          {
+            "id": "ac4",
+            "given": "callers use the existing programmatic override entry point today",
+            "when": "per-repo config overrides are added",
+            "then": "the programmatic entry point continues to work unchanged and per-repo config is layered as an additional source, not a replacement",
+            "operationalizes": [
+              "k5"
+            ]
+          }
+        ],
+        "existingCapabilityRefs": [
+          "c1",
+          "c2",
+          "c4"
+        ],
+        "sizeEstimate": "M"
+      },
+      {
+        "id": "s2",
+        "title": "As a user, I can set a per-repo model override from the command line so my choice persists without editing global files",
+        "userValue": "I don't have to hand-edit ~/.insrc/config.json or wipe state to pin a model choice for a repo. One command sets the override and the next daemon read picks it up.",
+        "acceptanceCriteria": [
+          {
+            "id": "ac1",
+            "given": "a repo is registered with insrc",
+            "when": "I run the CLI to set an override for one of the covered model dimensions on that repo",
+            "then": "the override is persisted and the next daemon read of that repo's config picks up the new value",
+            "operationalizes": [
+              "k3",
+              "k4"
+            ]
+          },
+          {
+            "id": "ac2",
+            "given": "a per-repo override already exists for a dimension",
+            "when": "I run the CLI to set a new value on the same dimension",
+            "then": "the previous value is replaced and only the new value takes effect on the next read",
+            "operationalizes": [
+              "k4"
+            ]
+          },
+          {
+            "id": "ac3",
+            "given": "I ask the CLI to set an override for a repo that is not registered with insrc",
+            "when": "the command runs",
+            "then": "it exits with a clear error naming the missing repo and does not create any override entry",
+            "operationalizes": [
+              "k4"
+            ]
+          }
+        ],
+        "dependsOn": [
+          "s1"
+        ],
+        "existingCapabilityRefs": [
+          "c1"
+        ],
+        "sizeEstimate": "S"
+      },
+      {
+        "id": "s3",
+        "title": "As a user, I can list the per-repo overrides active on a repo so I know which model choices are being used",
+        "userValue": "Before I run an index or a query I want a fast way to confirm whether a repo is using the global config or an override, and if it is, what value it holds.",
+        "acceptanceCriteria": [
+          {
+            "id": "ac1",
+            "given": "a repo has one or more per-repo overrides set",
+            "when": "I run the CLI to list overrides on that repo",
+            "then": "each active override is shown with its dimension name and the current value",
+            "operationalizes": [
+              "k3"
+            ]
+          },
+          {
+            "id": "ac2",
+            "given": "a repo has no per-repo overrides",
+            "when": "I run the CLI to list overrides on that repo",
+            "then": "the output states explicitly that no overrides are set and the repo will use the global config",
+            "operationalizes": [
+              "k2"
+            ]
+          }
+        ],
+        "dependsOn": [
+          "s1"
+        ],
+        "existingCapabilityRefs": [
+          "c1"
+        ],
+        "sizeEstimate": "S"
+      },
+      {
+        "id": "s4",
+        "title": "As a user, I can unset a per-repo model override so the repo falls back to the global config without touching the global file",
+        "userValue": "When my needs for a repo change and I want to return to the global default for a dimension, I clear the override for that dimension only — without editing global config and without disturbing overrides on other dimensions.",
+        "acceptanceCriteria": [
+          {
+            "id": "ac1",
+            "given": "a repo has per-repo overrides set for multiple dimensions",
+            "when": "I run the CLI to unset an override on one specific dimension",
+            "then": "only that dimension's override is removed and the others remain in effect",
+            "operationalizes": [
+              "k4"
+            ]
+          },
+          {
+            "id": "ac2",
+            "given": "all per-repo overrides for a repo have been cleared",
+            "when": "the daemon next reads that repo's config",
+            "then": "it uses the global ~/.insrc/config.json values, exactly as it did before any override was ever set",
+            "operationalizes": [
+              "k2"
+            ]
+          },
+          {
+            "id": "ac3",
+            "given": "the user asks to unset an override that is not currently set on the repo",
+            "when": "the command runs",
+            "then": "it succeeds as a no-op with a clear message saying nothing was set for that dimension",
+            "operationalizes": [
+              "k4"
+            ]
+          }
+        ],
+        "dependsOn": [
+          "s1"
+        ],
+        "existingCapabilityRefs": [
+          "c1"
+        ],
+        "sizeEstimate": "S"
+      }
+    ],
+    "openQuestions": []
+  },
+  "citations": [
+    {
+      "id": "c1",
+      "kind": "analyze-bundle",
+      "ref": "capability-discovery: does the codebase already support per-repo config overrides for model choices (embedding, shaper, core), or is config global only?",
+      "quotedText": "No module in the codebase currently delivers per-repo config overrides. src/insrc/config (partial-match) owns the config surface but none reads a per-repo scope."
+    },
+    {
+      "id": "c2",
+      "kind": "code",
+      "ref": "/Users/subhagho/work/projects/insors/insrc-ide/src/insrc/config/local.ts:LocalProviderInfraConfig",
+      "quotedText": "LocalProviderInfraConfig entity exposes host, embeddingModel, embeddingDim, coreModel."
+    },
+    {
+      "id": "c3",
+      "kind": "convention",
+      "ref": "convention.detect on /Users/subhagho/work/projects/insors/insrc-ide/src/insrc/config",
+      "quotedText": "namingSchema: functions=camelCase, classes=PascalCase, files=snake_case, testFiles=*.test."
+    },
+    {
+      "id": "c4",
+      "kind": "code",
+      "ref": "/Users/subhagho/work/projects/insors/insrc-ide/src/insrc/analyze/context/shaper-provider.ts:ShaperProviderOverrides",
+      "quotedText": "ShaperProviderOverrides entity: programmatic (in-code) override mechanism used by analyze callers to substitute a shaper provider at runtime."
+    }
+  ]
+}

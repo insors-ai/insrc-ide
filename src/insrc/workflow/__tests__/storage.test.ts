@@ -17,12 +17,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+	amendmentArtifactPath,
+	amendmentFilenamePrefix,
+	amendmentsRootDir,
 	defineArtifactPaths,
 	hldArtifactPaths,
 	lldArtifactPaths,
+	lldFilenamePrefix,
 	stubArtifactPaths,
 	writeAtomic,
 } from '../storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
 
 test('writeAtomic creates parent dirs + writes content', () => {
 	const tmp = mkdtempSync(join(tmpdir(), 'insrc-storage-'));
@@ -61,21 +67,39 @@ test('stubArtifactPaths returns docs/stub layout', () => {
 	assert.equal(p.json, '/repo/docs/stub/my-slug.json');
 });
 
-test('defineArtifactPaths returns docs/defines layout', () => {
-	const p = defineArtifactPaths('/repo', 'my-epic');
-	assert.equal(p.md,   '/repo/docs/defines/my-epic.md');
-	assert.equal(p.json, '/repo/docs/defines/my-epic.json');
+test('defineArtifactPaths — md in docs/, json in .insrc/artifacts/', () => {
+	const p = defineArtifactPaths('/repo', HASH);
+	assert.equal(p.md,   `/repo/docs/defines/DEF-${HASH}.md`);
+	assert.equal(p.json, `/repo/.insrc/artifacts/DEF-${HASH}.json`);
 });
 
-test('hldArtifactPaths returns docs/designs/<slug>/_hld.*', () => {
-	const p = hldArtifactPaths('/repo', 'my-epic');
-	assert.equal(p.md,   '/repo/docs/designs/my-epic/_hld.md');
-	assert.equal(p.json, '/repo/docs/designs/my-epic/_hld.json');
-	assert.equal(p.dir,  '/repo/docs/designs/my-epic');
+test('hldArtifactPaths — md in docs/, json in .insrc/artifacts/', () => {
+	const p = hldArtifactPaths('/repo', HASH);
+	assert.equal(p.md,   `/repo/docs/designs/HLD-${HASH}.md`);
+	assert.equal(p.json, `/repo/.insrc/artifacts/HLD-${HASH}.json`);
 });
 
-test('lldArtifactPaths returns docs/designs/<slug>/<storyId>.*', () => {
-	const p = lldArtifactPaths('/repo', 'my-epic', 's3');
-	assert.equal(p.md,   '/repo/docs/designs/my-epic/s3.md');
-	assert.equal(p.json, '/repo/docs/designs/my-epic/s3.json');
+test('lldArtifactPaths — md in docs/, json in .insrc/artifacts/', () => {
+	const p = lldArtifactPaths('/repo', HASH, 's3');
+	assert.equal(p.md,   `/repo/docs/designs/LLD-${HASH}-s3.md`);
+	assert.equal(p.json, `/repo/.insrc/artifacts/LLD-${HASH}-s3.json`);
+});
+
+test('amendmentArtifactPath uses the AMD- prefix inside .insrc/artifacts/', () => {
+	assert.equal(
+		amendmentArtifactPath('/repo', `AMD-${HASH}-1`),
+		`/repo/.insrc/artifacts/AMD-${HASH}-1.json`,
+	);
+});
+
+test('amendmentFilenamePrefix is `AMD-<hash>-`', () => {
+	assert.equal(amendmentFilenamePrefix(HASH), `AMD-${HASH}-`);
+});
+
+test('lldFilenamePrefix is `LLD-<hash>-`', () => {
+	assert.equal(lldFilenamePrefix(HASH), `LLD-${HASH}-`);
+});
+
+test('amendmentsRootDir points at .insrc/artifacts', () => {
+	assert.equal(amendmentsRootDir('/repo'), '/repo/.insrc/artifacts');
 });

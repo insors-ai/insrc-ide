@@ -11,10 +11,13 @@
  * is the trust boundary between workflows — a downstream workflow
  * MUST call the corresponding gate before consuming an upstream
  * artifact.
+ *
+ * All Epic-scoped reads take the 16-char epicHash. The display slug
+ * lives in `meta.epicSlug` and surfaces in error messages via the
+ * artifact's own meta.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { getEffectiveHld } from './amendments/effective.js';
 import { makeStaleAck } from './amendments/staleness.js';
@@ -41,8 +44,8 @@ export class ArtifactNotApprovedError extends Error {
 }
 
 /** Read the canonical Define JSON from disk. */
-export function readDefineArtifact(repoPath: string, epicSlug: string): DefineArtifact {
-	const paths = defineArtifactPaths(repoPath, epicSlug);
+export function readDefineArtifact(repoPath: string, epicHash: string): DefineArtifact {
+	const paths = defineArtifactPaths(repoPath, epicHash);
 	if (!existsSync(paths.json)) {
 		throw new ArtifactMissingError(
 			`Define artifact not found at ${paths.json}. Run \`insrc_workflow_step\` ` +
@@ -55,26 +58,28 @@ export function readDefineArtifact(repoPath: string, epicSlug: string): DefineAr
 
 /** Same as `readDefineArtifact` but refuses when the artifact is
  *  not approved. Downstream runners (`design.epic` s1) call this. */
-export function requireApprovedEpic(repoPath: string, epicSlug: string): DefineArtifact {
-	const define = readDefineArtifact(repoPath, epicSlug);
+export function requireApprovedEpic(repoPath: string, epicHash: string): DefineArtifact {
+	const define = readDefineArtifact(repoPath, epicHash);
+	const label  = define.meta.epicSlug ?? epicHash;
 	if (define.meta.approvedAt === undefined || define.meta.approvedAt.length === 0) {
-		const path = defineArtifactPaths(repoPath, epicSlug).md;
+		const path = defineArtifactPaths(repoPath, epicHash).md;
 		throw new ArtifactNotApprovedError(
-			`Epic '${epicSlug}' is not approved. Run \`insrc workflow approve ${path}\` ` +
-			`before starting design.epic.`,
+			`Epic '${label}' (${epicHash}) is not approved. ` +
+			`Run \`insrc workflow approve ${path}\` before starting design.epic.`,
 		);
 	}
 	if (define.meta.rejectedAt !== undefined && define.meta.rejectedAt.length > 0) {
 		throw new ArtifactNotApprovedError(
-			`Epic '${epicSlug}' was rejected on ${define.meta.rejectedAt}. Re-run define with --reopen first.`,
+			`Epic '${label}' (${epicHash}) was rejected on ${define.meta.rejectedAt}. ` +
+			`Re-run define with --reopen first.`,
 		);
 	}
 	return define;
 }
 
 /** Read the canonical HLD JSON from disk. */
-export function readHldArtifact(repoPath: string, epicSlug: string): HldArtifact {
-	const paths = hldArtifactPaths(repoPath, epicSlug);
+export function readHldArtifact(repoPath: string, epicHash: string): HldArtifact {
+	const paths = hldArtifactPaths(repoPath, epicHash);
 	if (!existsSync(paths.json)) {
 		throw new ArtifactMissingError(
 			`HLD not found at ${paths.json}. Run design.epic before design.story.`,
@@ -92,23 +97,25 @@ export function readHldArtifact(repoPath: string, epicSlug: string): HldArtifact
  *  Amendments are only applied when the base is approved; a
  *  pending or rejected base short-circuits with
  *  `ArtifactNotApprovedError` as before. */
-export function requireApprovedHld(repoPath: string, epicSlug: string): HldArtifact {
-	const hld = readHldArtifact(repoPath, epicSlug);
+export function requireApprovedHld(repoPath: string, epicHash: string): HldArtifact {
+	const hld   = readHldArtifact(repoPath, epicHash);
+	const label = hld.meta.epicSlug ?? epicHash;
 	if (hld.meta.approvedAt === undefined || hld.meta.approvedAt.length === 0) {
-		const path = hldArtifactPaths(repoPath, epicSlug).md;
+		const path = hldArtifactPaths(repoPath, epicHash).md;
 		throw new ArtifactNotApprovedError(
-			`HLD for Epic '${epicSlug}' is not approved. Run \`insrc workflow approve ${path}\` before starting design.story.`,
+			`HLD for Epic '${label}' (${epicHash}) is not approved. ` +
+			`Run \`insrc workflow approve ${path}\` before starting design.story.`,
 		);
 	}
-	return getEffectiveHld(repoPath, epicSlug, hld);
+	return getEffectiveHld(repoPath, epicHash, hld);
 }
 
 /** Read the BASE HLD (no amendments applied). Used by amendment
  *  approval CLI + the effective-hash calculator + the staleness
  *  scanner. Downstream workflows should call `requireApprovedHld`
  *  instead. */
-export function readBaseHld(repoPath: string, epicSlug: string): HldArtifact {
-	return readHldArtifact(repoPath, epicSlug);
+export function readBaseHld(repoPath: string, epicHash: string): HldArtifact {
+	return readHldArtifact(repoPath, epicHash);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,15 +201,29 @@ export function rejectArtifactByJsonPath(jsonPath: string, reason: string): Reje
 }
 
 /** Given an md path (which the CLI accepts), resolve the sibling
- *  .json. Users almost always have the md path handy. */
+ *  .json. Users almost always have the md path handy. With the hash
+ *  layout, md lives under `docs/` and json under `.insrc/artifacts/`,
+ *  so we swap the parent directory as well as the extension. */
 export function jsonPathForMd(mdPath: string): string {
 	if (mdPath.endsWith('.json')) return mdPath;
-	if (mdPath.endsWith('.md'))   return mdPath.slice(0, -3) + '.json';
-	throw new Error(`Expected a .md or .json path, got '${mdPath}'`);
+	if (!mdPath.endsWith('.md')) {
+		throw new Error(`Expected a .md or .json path, got '${mdPath}'`);
+	}
+	const swapped = swapDocsToArtifacts(mdPath);
+	return swapped.slice(0, -3) + '.json';
 }
 
-// Kept as a silence-fixup import so the module surface stays clean
-// when nothing else in this file needs `writeFileSync`.
-export { writeFileSync as _writeFileSync };
-// Re-exports so callers can pull everything gate-related from one module.
-export { join as _join };
+/** `.../docs/defines/DEF-<h>.md` → `.../.insrc/artifacts/DEF-<h>.md`.
+ *  Only the first matching `docs/{defines,designs}/` segment gets
+ *  swapped. If no such segment is present, the path is returned as-
+ *  is (older layouts / non-standard callers). */
+function swapDocsToArtifacts(p: string): string {
+	for (const seg of ['/docs/defines/', '/docs/designs/']) {
+		const i = p.indexOf(seg);
+		if (i >= 0) {
+			return p.slice(0, i) + '/.insrc/artifacts/' + p.slice(i + seg.length);
+		}
+	}
+	// `docs/stub/*` files keep md + json side by side; no swap.
+	return p;
+}

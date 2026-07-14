@@ -14,7 +14,6 @@ export {
 	AmendmentImmutabilityError,
 	AmendmentNotFoundError,
 	amendmentPath,
-	amendmentsDir,
 	approveAmendment,
 	listAmendments,
 	listApprovedAmendments,

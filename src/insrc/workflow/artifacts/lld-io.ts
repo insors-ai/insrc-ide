@@ -15,8 +15,8 @@ import { lldArtifactPaths } from '../storage.js';
 import { ArtifactMissingError } from '../gates.js';
 import type { LldArtifact } from './lld.js';
 
-export function readLldArtifact(repoPath: string, epicSlug: string, storyId: string): LldArtifact {
-	const paths = lldArtifactPaths(repoPath, epicSlug, storyId);
+export function readLldArtifact(repoPath: string, epicHash: string, storyId: string): LldArtifact {
+	const paths = lldArtifactPaths(repoPath, epicHash, storyId);
 	if (!existsSync(paths.json)) {
 		throw new ArtifactMissingError(
 			`LLD not found at ${paths.json}. Run design.story for '${storyId}' first.`,

@@ -47,10 +47,10 @@ Two flavors are detected at define time:
 
 | Workflow | Purpose | Output |
 | :--- | :--- | :--- |
-| `define`         | Frame Epic + Stories                       | `docs/defines/<slug>.md` |
-| `design.epic`    | HLD: framework + contracts + rollout       | `docs/designs/<slug>/_hld.md` |
-| `design.story`   | LLD: Story contract + tests + migration    | `docs/designs/<slug>/<storyId>.md` |
-| `tracker.push`   | Push Epic + Stories to GitHub Issues       | `~/.insrc/workflow-runs/<slug>/tracker-push-<runId>.{md,json}` + Epic meta patch |
+| `define`         | Frame Epic + Stories                       | `docs/defines/DEF-<h16>.md` |
+| `design.epic`    | HLD: framework + contracts + rollout       | `docs/designs/HLD-<h16>.md` |
+| `design.story`   | LLD: Story contract + tests + migration    | `docs/designs/LLD-<h16>-<storyId>.md` |
+| `tracker.push`   | Push Epic + Stories to GitHub Issues       | `~/.insrc/workflow-runs/<h16>/tracker.push-<runId>.jsonl` + Epic meta patch |
 | `tracker.sync`   | Pull GitHub Issue status back into meta    | Epic meta patch |
 | `tracker.post`   | Attach HLD/LLD/amendment summary as comment | GitHub comment |
 
@@ -122,13 +122,15 @@ decomposer prompt) → emits the 4-step plan → runs
 flavor + gather analyze bundles) → `epic.frame` → `stories.compose`
 → `checklist.verify` → synthesize.
 
-Output lands at `docs/defines/add-tag-filtering-todos.md` +
-`.json`.
+Output lands at `docs/defines/DEF-<h16>.md` (with the canonical
+JSON at `.insrc/artifacts/DEF-<h16>.json`). The `<h16>` is the
+16-char Epic hash minted by the Define workflow; every downstream
+artifact for this Epic will reuse it.
 
 ### 2. Approve the Epic
 
 ```
-insrc workflow approve docs/defines/add-tag-filtering-todos.md
+insrc workflow approve docs/defines/DEF-<h16>.md
 ```
 
 Downstream workflows refuse to run until this happens.
@@ -138,7 +140,8 @@ Downstream workflows refuse to run until this happens.
 > Use `insrc_workflow_step` to run design.epic for
 > add-tag-filtering-todos.
 
-Params required: `{ epicSlug: "add-tag-filtering-todos" }`.
+Params required: `{ epicHash: "<h16>" }` — the 16-char hash the
+Define workflow minted.
 
 Six steps: context (Epic-scoped analyze bundles) →
 alternatives.enumerate (2–4 shapes) → alternatives.judge (score
@@ -146,8 +149,8 @@ against constraints) → framework.write (the big one — chosen
 framework + shared contracts + Story boundaries) → rollout.overview
 (phases + risky bits) → checklist.verify.
 
-Output: `docs/designs/add-tag-filtering-todos/_hld.md`. Approve
-with `insrc workflow approve`.
+Output: `docs/designs/HLD-<h16>.md`. Approve with `insrc workflow
+approve`.
 
 ### 4. Design LLDs (one per Story)
 
@@ -155,7 +158,7 @@ For each Story:
 
 ```
 insrc_workflow_step phase=start workflow=design.story \
-  focus="LLD for s1" params={"epicSlug":"add-tag-filtering-todos","storyId":"s1"}
+  focus="LLD for s1" params={"epicHash":"<h16>","storyId":"s1"}
 ```
 
 Eight steps (seven always + one conditional): context (Story
@@ -163,7 +166,7 @@ scope) → alternatives × 2 → contract.detail → error.paths →
 test.strategy → migration.write (only for `enhancement` flavor;
 skips for `new-capability`) → checklist.verify.
 
-Output: `docs/designs/add-tag-filtering-todos/s1.md`. Approve.
+Output: `docs/designs/LLD-<h16>-s1.md`. Approve.
 
 ### 5. Push to GitHub (optional)
 
@@ -189,7 +192,7 @@ Then from your client:
 > Use `insrc_workflow_step` to run tracker.push for
 > add-tag-filtering-todos.
 
-Params: `{ epicSlug: "add-tag-filtering-todos" }`. The LLM runs
+Params: `{ epicHash: "<h16>" }`. The LLM runs
 `gh` directly, creates labels + issues + task list + back-refs,
 and the framework patches the Epic's `meta.tracker` with the refs.
 
@@ -214,23 +217,21 @@ change — a shared contract needs one more field, a Story needs
 reassigned ownership. The `contract.detail` and `error.paths`
 steps can emit an amendment proposal alongside their output. The
 framework validates the proposal against the applier and persists
-it as pending under `docs/designs/<slug>/_hld-amendments/`.
+it as pending under `.insrc/artifacts/AMD-<h16>-<n>.json`.
 
 Review pending amendments:
 
 ```
-insrc workflow amend add-tag-filtering-todos --list
-insrc workflow amend add-tag-filtering-todos --show amend-add-tag-filtering-todos-1
+insrc workflow amend <h16> --list
+insrc workflow amend <h16> --show AMD-<h16>-1
 ```
 
 Approve or reject:
 
 ```
-insrc workflow amend add-tag-filtering-todos \
-  --approve amend-add-tag-filtering-todos-1
+insrc workflow amend <h16> --approve AMD-<h16>-1
 
-insrc workflow amend add-tag-filtering-todos \
-  --reject amend-add-tag-filtering-todos-2 \
+insrc workflow amend <h16> --reject AMD-<h16>-2 \
   --notes "not needed; existing contract is fine"
 ```
 
@@ -241,7 +242,7 @@ pre-approval hash are marked stale.
 ### 7. Chain status any time
 
 ```
-insrc workflow chain add-tag-filtering-todos
+insrc workflow chain <h16>
 ```
 
 Prints the current state of Define / HLD / LLDs / amendments /
@@ -249,31 +250,43 @@ tracker and the exact next command to run.
 
 ## Storage layout
 
-Everything is on disk, human-readable, and version-controllable:
+Every artifact carries a 16-char Epic hash (`<h16>`, the same
+value across every artifact for the Epic). Human-facing markdown
+lives under `docs/`; canonical JSON lives under `.insrc/artifacts/`
+so `docs/` stays clean.
 
 ```
 <repo>/
-├── docs/
+├── docs/                                # human-facing markdown only
 │   ├── defines/
-│   │   └── <slug>.{md,json}                       # Epic
+│   │   └── DEF-<h16>.md                 # Epic
 │   └── designs/
-│       └── <slug>/
-│           ├── _hld.{md,json}                     # HLD
-│           ├── s1.{md,json}                       # LLD per Story
-│           ├── s2.{md,json}
-│           └── _hld-amendments/
-│               ├── amend-<slug>-1.json
-│               └── amend-<slug>-2.json
+│       ├── HLD-<h16>.md                 # HLD
+│       ├── LLD-<h16>-s1.md              # LLD per Story
+│       └── LLD-<h16>-s2.md
+│
+└── .insrc/artifacts/                    # canonical JSON, hidden, git-tracked
+    ├── DEF-<h16>.json
+    ├── HLD-<h16>.json
+    ├── LLD-<h16>-s1.json
+    ├── LLD-<h16>-s2.json
+    ├── AMD-<h16>-1.json                 # amendments, one file each
+    └── AMD-<h16>-2.json
 
 ~/.insrc/
-├── github.json                                    # GitHub tracker config
+├── github.json                          # GitHub tracker config
 └── workflow-runs/
-    └── <slug>/
-        ├── define-<runId>.jsonl                  # per-run step log
+    └── <h16>/                           # jsonl trace logs (outside repo)
+        ├── define-<runId>.jsonl
         ├── design.epic-<runId>.jsonl
         ├── design.story-<runId>.jsonl
-        └── tracker-push-<runId>.{md,json}         # tracker audit only
+        └── tracker.push-<runId>.jsonl
 ```
+
+The 16-char hash is `sha256(defineRunId).slice(0, 16)` — minted
+by the Define workflow, reused by every downstream artifact for
+the Epic. The human-readable slug derived from the focus lives
+only in `meta.epicSlug` for display.
 
 ## CLI reference
 
@@ -281,11 +294,11 @@ Everything is on disk, human-readable, and version-controllable:
 
 ```
 insrc workflow list                    # enumerate registered workflows
-insrc workflow chain <slug>            # end-to-end status + next action
-insrc workflow status <slug>           # pending amendments + LLD staleness
+insrc workflow chain <h16>             # end-to-end status + next action
+insrc workflow status <h16>            # pending amendments + LLD staleness
 insrc workflow gh-config               # resolved GitHub config
-insrc workflow runs [--slug <slug>]    # workflow-run log files
-insrc workflow derive-slug <focus>    # preview the slug derivation
+insrc workflow runs [--epic <h16>]     # workflow-run log files
+insrc workflow derive-slug <focus>     # preview the display slug for a focus
 ```
 
 ### Approvals
@@ -299,16 +312,16 @@ insrc workflow ack-stale <lld-path> --reason <text>
 ### Amendments
 
 ```
-insrc workflow amend <slug> --list
-insrc workflow amend <slug> --show <amendmentId>
-insrc workflow amend <slug> --approve <amendmentId>
-insrc workflow amend <slug> --reject <amendmentId> --notes <text>
+insrc workflow amend <h16> --list
+insrc workflow amend <h16> --show <amendmentId>
+insrc workflow amend <h16> --approve <amendmentId>
+insrc workflow amend <h16> --reject <amendmentId> --notes <text>
 ```
 
 ### GitHub tracker
 
 ```
-insrc workflow unlink <slug>           # clear tracker meta locally (does NOT touch GitHub)
+insrc workflow unlink <h16>            # clear tracker meta locally (does NOT touch GitHub)
 ```
 
 Push/sync/post themselves run via the MCP tool — those need LLM

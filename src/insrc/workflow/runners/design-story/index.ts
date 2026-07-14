@@ -25,6 +25,7 @@
 import { registerRunner } from '../../executor.js';
 import { requireApprovedEpic, requireApprovedHld } from '../../gates.js';
 import { extractHldContextSlice } from '../../artifacts/lld.js';
+import { assertEpicHash } from '../../hash.js';
 import type { StepRunner, StepRunnerContext } from '../../types.js';
 import {
 	alternativesEnumerateSchema,
@@ -42,12 +43,10 @@ import {
 // Params helpers
 // ---------------------------------------------------------------------------
 
-function epicSlugFrom(ctx: StepRunnerContext): string {
-	const slug = ctx.intent.params['epicSlug'];
-	if (typeof slug !== 'string' || slug.length === 0) {
-		throw new Error(`design.story requires intent.params.epicSlug`);
-	}
-	return slug;
+function epicHashFrom(ctx: StepRunnerContext): string {
+	const hash = ctx.intent.params['epicHash'];
+	assertEpicHash(hash, `design.story requires intent.params.epicHash`);
+	return hash;
 }
 
 function storyIdFrom(ctx: StepRunnerContext): string {
@@ -66,13 +65,13 @@ function readUpstream(ctx: StepRunnerContext): {
 	readonly story: ReturnType<typeof requireApprovedEpic>['body']['stories'][number];
 	readonly hldSlice: ReturnType<typeof extractHldContextSlice>;
 } {
-	const epicSlug = epicSlugFrom(ctx);
+	const epicHash = epicHashFrom(ctx);
 	const storyId  = storyIdFrom(ctx);
-	const epic  = requireApprovedEpic(ctx.intent.repoPath, epicSlug);
-	const hld   = requireApprovedHld(ctx.intent.repoPath, epicSlug);
+	const epic  = requireApprovedEpic(ctx.intent.repoPath, epicHash);
+	const hld   = requireApprovedHld(ctx.intent.repoPath, epicHash);
 	const story = epic.body.stories.find(s => s.id === storyId);
 	if (story === undefined) {
-		throw new Error(`design.story: Story '${storyId}' not found in Epic '${epicSlug}'.`);
+		throw new Error(`design.story: Story '${storyId}' not found in Epic '${epicHash}'.`);
 	}
 	const hldSlice = extractHldContextSlice(hld, storyId);
 	return { epic, hld, story, hldSlice };
@@ -132,7 +131,7 @@ const contextAssemble = llmPauseRunner({
 			].join('\n'),
 			userTurn: [
 				`Focus: ${ctx.intent.focus}`,
-				`Epic slug: ${epicSlugFrom(ctx)}   Story: ${story.id} — ${story.title}`,
+				`Epic hash: ${epicHashFrom(ctx)}   Story: ${story.id} — ${story.title}`,
 				'',
 				'Epic flavor (informs migration in s7):',
 				epic.body.flavor,

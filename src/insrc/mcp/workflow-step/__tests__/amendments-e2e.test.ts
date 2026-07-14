@@ -26,7 +26,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { defineArtifactPaths, hldArtifactPaths } from '../../../workflow/storage.js';
+
+const HASH = 'a3f4b8c9d1e2f3a4';
 
 import { handleWorkflowStep } from '../handler.js';
 import { registerWorkflowRunners } from '../../../workflow/index.js';
@@ -34,6 +37,7 @@ import { _clearWorkflowStateStoreForTests } from '../state-store.js';
 import {
 	ackStaleArtifact,
 	approveArtifactByJsonPath,
+	jsonPathForMd,
 	readBaseHld,
 } from '../../../workflow/gates.js';
 import {
@@ -53,11 +57,12 @@ function payload(env: Envelope): Record<string, unknown> {
 // Seed
 // ---------------------------------------------------------------------------
 
-function seed(repo: string, slug: string): void {
-	mkdirSync(join(repo, 'docs/defines'), { recursive: true });
-	const defPath = join(repo, 'docs/defines', `${slug}.json`);
+function seed(repo: string, epicHash: string): void {
+	const definePaths = defineArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(definePaths.json), { recursive: true });
+	const defPath = definePaths.json;
 	writeFileSync(defPath, JSON.stringify({
-		meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1 },
+		meta: { workflow: 'define', runId: 'def-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			flavor: 'enhancement',
 			problem: 'Users cannot filter todos by tag.',
@@ -75,10 +80,11 @@ function seed(repo: string, slug: string): void {
 	}, null, 2));
 	approveArtifactByJsonPath(defPath);
 
-	mkdirSync(join(repo, 'docs/designs', slug), { recursive: true });
-	const hldPath = join(repo, 'docs/designs', slug, '_hld.json');
+	const hldPaths = hldArtifactPaths(repo, epicHash);
+	mkdirSync(dirname(hldPaths.json), { recursive: true });
+	const hldPath = hldPaths.json;
 	writeFileSync(hldPath, JSON.stringify({
-		meta: { workflow: 'design.epic', runId: 'hld-1', schemaVersion: 1 },
+		meta: { workflow: 'design.epic', runId: 'hld-1', schemaVersion: 1, epicHash, epicSlug: 'tag-filtering' },
 		body: {
 			frameworkSummary: 'Extract TagFilter service.',
 			architectureShape: 'TagFilter owns index [[c1]]; sidebar consumes.',
@@ -218,7 +224,7 @@ function makeArtifact(): Record<string, unknown> {
 async function walkLld(repo: string, slug: string, storyId: string, s4Response: Record<string, unknown>): Promise<string> {
 	const startOut = payload(await handleWorkflowStep({
 		phase: 'start', workflow: 'design.story', focus: `LLD for ${storyId}`, repo,
-		params: { epicSlug: slug, storyId },
+		params: { epicHash: slug, storyId },
 	}));
 	let state = startOut['state'] as string;
 	const planOut = payload(await handleWorkflowStep({
@@ -260,7 +266,7 @@ test('LLD s4 amendment proposal lands as pending AmendmentRecord', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug);
 		const state = await walkLld(repo, slug, 's1', S4_WITH_PROPOSAL);
@@ -283,7 +289,7 @@ test('Bad proposal that would fail applier is refused at synthesize', async () =
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug);
 		const state = await walkLld(repo, slug, 's1', S4_BAD_PROPOSAL);
@@ -302,7 +308,7 @@ test('Approving amendment marks existing LLD stale via effective-hash mismatch',
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug);
 		const state = await walkLld(repo, slug, 's1', S4_WITH_PROPOSAL);
@@ -314,7 +320,7 @@ test('Approving amendment marks existing LLD stale via effective-hash mismatch',
 
 		const amendments = listAmendments(repo, slug);
 		const pending = amendments[0]!;
-		approveAmendment(repo, slug, pending.id, 'human');
+		approveAmendment(repo, pending.id, 'human');
 
 		// The s1 LLD was written before amendment approval; its
 		// hldEffectiveHash reflects pre-approval state. After approval,
@@ -331,14 +337,14 @@ test('ack-stale writes staleAckedAt onto LLD meta', async () => {
 	_clearWorkflowStateStoreForTests();
 	registerWorkflowRunners();
 	const repo = mkdtempSync(join(tmpdir(), 'insrc-amend-e2e-'));
-	const slug = 'tag-filtering';
+	const slug = HASH;
 	try {
 		seed(repo, slug);
 		const state = await walkLld(repo, slug, 's1', S4_WITH_PROPOSAL);
 		const done = payload(await handleWorkflowStep({
 			phase: 'synthesize', artifact: makeArtifact(), state,
 		}));
-		const lldPath = (done['path'] as string).replace(/\.md$/, '.json');
+		const lldPath = jsonPathForMd(done['path'] as string);
 		const before = JSON.parse(readFileSync(lldPath, 'utf8'));
 		assert.equal(before.meta.staleAckedAt, undefined);
 		const r = ackStaleArtifact(lldPath, 'known-inconsistency; scheduled to re-run');

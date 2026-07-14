@@ -48,7 +48,7 @@ export async function handleStep(
 		);
 	}
 
-	const tick = await resumeRun(state.executor, input.response, state.slug);
+	const tick = await resumeRun(state.executor, input.response, state.epicKey);
 	log.info(
 		{ runId: state.runId, tickType: tick.type, stepId: input.stepId },
 		'insrc_workflow_step[step]: executor tick',
@@ -62,7 +62,7 @@ export async function handleStep(
 		const next: WorkflowStepStatePayload = {
 			version:     STATE_VERSION,
 			runId:       state.runId,
-			slug:        state.slug,
+			epicKey:     state.epicKey,
 			startedAtMs: state.startedAtMs,
 			intent:      state.intent,
 			executor:    tick.state,
@@ -87,7 +87,7 @@ export async function handleStep(
 	const next: WorkflowStepStatePayload = {
 		version:     STATE_VERSION,
 		runId:       state.runId,
-		slug:        state.slug,
+		epicKey:     state.epicKey,
 		startedAtMs: state.startedAtMs,
 		intent:      state.intent,
 		stepOutputs: tick.stepOutputs,
