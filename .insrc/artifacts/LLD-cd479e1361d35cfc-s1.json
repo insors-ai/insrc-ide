@@ -1,0 +1,453 @@
+{
+  "meta": {
+    "workflow": "design.story",
+    "runId": "wf-1784008348613-t42iyu",
+    "repoPath": "/Users/subhagho/work/projects/insors/insrc-ide",
+    "createdAt": "2026-07-14T06:11:49.608Z",
+    "model": "client",
+    "elapsedMs": 1160991,
+    "repoIndexedAt": null,
+    "schemaVersion": 1,
+    "epicHash": "cd479e1361d35cfc",
+    "epicSlug": "support-per-repo-config-overrides-embedding",
+    "storyId": "s1",
+    "hldBaseRunId": "wf-1783920776460-bd44gr",
+    "hldEffectiveHash": "ff7482e7beb3ad417c65546731583bced8a5bb1fc67db34ecdf8e411fac6bdcb",
+    "hldAmendmentsApplied": [],
+    "approvedAt": "2026-07-14T06:12:31.423Z",
+    "storyRef": "insors-ai/insrc-ide#1",
+    "storyPushedAt": "2026-07-14T00:00:00.000Z"
+  },
+  "body": {
+    "hldContextSlice": {
+      "frameworkSummary": "A layered config resolver in src/insrc/config reads the existing global loader first and overlays a per-repo override file (JSON) at ~/.insrc/repos/<slug>/config.json when present [[c1]]. All 15 config read sites (daemon boot, indexer, embedder, seven Lance stores, and tests) migrate to a repo-aware loader; the CLI reads / writes / deletes dimensions inside the same override file. No LMDB migration and no repo-tree writes; the global config's schema is unchanged and overrides are hand-editable JSON.",
+      "ownedContracts": [
+        {
+          "id": "sc1",
+          "name": "PerRepoOverrideFile",
+          "purpose": "The on-disk shape of a per-repo override file and the path convention that locates it, so the writer Stories (s2 / s4) and the daemon reader Story (s1) agree on the format and location.",
+          "interfaceSketch": "// Path convention: ~/.insrc/repos/<slug>/config.json\n// where <slug> is derived from the canonical repo path by the existing\n// repo registry (same slug the daemon already uses for workflow-runs and\n// per-repo state).\n\ninterface PerRepoOverrideFile {\n    // Any subset of these four dimensions MAY be present. A missing key\n    // falls through to the global config's value for that dimension.\n    // The file MUST contain no additional keys; unknown keys are a\n    // validation error at read time.\n    embeddingModel?: string;\n    embeddingDim?:   number;\n    coreModel?:      string;\n    shaperModel?:    string;\n}\n\n// Path helper (type-only sketch)\ndeclare function perRepoOverridePath(repoPath: string): string;",
+          "ownedByStory": "s1",
+          "consumedByStories": [
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "assumptions": [
+            "c1",
+            "c2"
+          ]
+        }
+      ],
+      "consumedContracts": [],
+      "boundary": {
+        "storyId": "s1",
+        "owns": [
+          "sc1"
+        ],
+        "depends": [],
+        "internal": "The resolver code inside src/insrc/config that layers the override file over the global loader, the migration of all 15 existing config read sites (daemon boot, indexer, embedder, seven Lance stores, and the two test files) to pass the repo path through the loader, and the per-repo dim-mismatch check that surfaces at daemon boot. Every read-site call signature change is internal to s1: CLI Stories never touch the runtime loaders."
+      },
+      "rolloutPhase": "Phase A -- foundational resolver + sc1",
+      "nonFunctional": {
+        "performance": "Adds one fs.readFileSync (per-repo JSON, a few KB max) per repo-scoped config read; negligible compared to the existing global load. Zero performance change for calls without a repo scope.",
+        "security": "Override file lives inside ~/.insrc/, which is user-owned; no elevated privileges required. Same trust boundary as the existing global config file.",
+        "observability": "Every daemon read of the effective config logs which dimensions were sourced from global vs. per-repo, so users can trace where a given model choice was resolved from when debugging.",
+        "durability": "Override files are single-JSON atomic writes (write to .tmp, rename); no LMDB migration, no backup coordination. Losing an override file loses only the machine-local override for that repo; the global config is unaffected."
+      }
+    },
+    "contractDetails": {
+      "surfaceLevel": "internal-shared",
+      "api": [
+        {
+          "name": "loadEffectiveLocalConfig",
+          "signature": "function loadEffectiveLocalConfig(repoPath: string): LocalProviderInfraConfig",
+          "parameters": [
+            {
+              "name": "repoPath",
+              "type": "string",
+              "purpose": "The canonical repo path the daemon is serving. Used to derive the per-repo slug via the existing repo registry so the resolver knows which override file to overlay.",
+              "optional": false
+            }
+          ],
+          "returns": {
+            "type": "LocalProviderInfraConfig",
+            "meaning": "The effective local-provider config for this repo: the existing global loader's output with any dimensions in ~/.insrc/repos/<slug>/config.json overlaid on top per-dimension."
+          },
+          "errors": [
+            {
+              "type": "UnregisteredRepoError",
+              "condition": "The repoPath does not resolve to a registered repo slug via the existing repo registry."
+            },
+            {
+              "type": "InvalidOverrideFileError",
+              "condition": "The per-repo override file exists but contains malformed JSON, unknown top-level keys, or values that fail the sc1 type contract (embeddingModel not a string, embeddingDim not a number, etc.)."
+            }
+          ],
+          "preconditions": [
+            "The global loader in src/insrc/config/local.ts is unchanged and continues to return the same LocalProviderInfraConfig shape it does today [[c1]].",
+            "The repo registry (`insrc repo add`) has been used to register repoPath, or the repo was registered previously."
+          ],
+          "postconditions": [
+            "Every key in LocalProviderInfraConfig has a value: either from the per-repo override (when the file provides that dimension) or from the global loader (when it does not).",
+            "The programmatic override entry point (ShaperProviderOverrides) is untouched \u2014 it continues to layer on top of whatever this loader returns [[c3]]."
+          ]
+        },
+        {
+          "name": "loadEffectiveAnalyzeConfig",
+          "signature": "function loadEffectiveAnalyzeConfig(repoPath: string): AnalyzeShaperConfig",
+          "parameters": [
+            {
+              "name": "repoPath",
+              "type": "string",
+              "purpose": "The canonical repo path the daemon is serving. Same derivation as loadEffectiveLocalConfig.",
+              "optional": false
+            }
+          ],
+          "returns": {
+            "type": "AnalyzeShaperConfig",
+            "meaning": "The effective analyze-shaper config for this repo: the existing global analyze-shaper loader's output with the shaperModel dimension overlaid from ~/.insrc/repos/<slug>/config.json when present."
+          },
+          "errors": [
+            {
+              "type": "UnregisteredRepoError",
+              "condition": "Same as loadEffectiveLocalConfig \u2014 repoPath does not resolve to a registered repo slug."
+            },
+            {
+              "type": "InvalidOverrideFileError",
+              "condition": "Same as loadEffectiveLocalConfig \u2014 the per-repo file exists but is malformed or contains keys outside the sc1 contract."
+            }
+          ],
+          "preconditions": [
+            "The global analyze-shaper loader in src/insrc/config/analyze.ts is unchanged and continues to return the same AnalyzeShaperConfig shape it does today [[c2]].",
+            "The repo registry has been used to register repoPath."
+          ],
+          "postconditions": [
+            "Every key in AnalyzeShaperConfig has a value: either from the per-repo override (only shaperModel is overridable per sc1) or from the global loader (all other keys).",
+            "The programmatic override entry point (ShaperProviderOverrides) is untouched [[c3]]."
+          ]
+        }
+      ]
+    },
+    "dataModelChanges": [
+      {
+        "entity": "loadLocalProviderConfig",
+        "change": "invariant-change",
+        "details": "The public export named `loadLocalProviderConfig` in src/insrc/config/local.ts (function, lines 57-83, current signature `loadLocalProviderConfig(): LocalProviderInfraConfig`) is renamed to a module-private helper (leading underscore, no re-export from src/insrc/config's barrel). No behavior change; only the visibility + name change. The 15 external read sites named in the HLD architectureShape are migrated to call loadEffectiveLocalConfig(repoPath) instead [[c1]].",
+        "callSites": [
+          "src/insrc/config/local.ts",
+          "src/insrc/daemon/index.ts",
+          "src/insrc/indexer/index.ts",
+          "src/insrc/indexer/embedder.ts",
+          "src/insrc/db/lance/*"
+        ]
+      },
+      {
+        "entity": "loadAnalyzeShaperConfig",
+        "change": "invariant-change",
+        "details": "Parallel treatment to loadLocalProviderConfig: the current public analyze-shaper loader in src/insrc/config/analyze.ts (exact export name to be confirmed at implementation time per s1 backFlowNotes) is renamed to a module-private helper. The read sites for analyze-shaper config migrate to loadEffectiveAnalyzeConfig(repoPath). No behavior change on the global path [[c2]].",
+        "callSites": [
+          "src/insrc/analyze/context/shaper-provider.ts",
+          "src/insrc/config/analyze.ts"
+        ]
+      }
+    ],
+    "interactionWithShared": [
+      {
+        "contractId": "sc1",
+        "role": "implements",
+        "howDetails": "This Story OWNS sc1. It implements the read side: (1) computes the file path per sc1's path convention `~/.insrc/repos/<slug>/config.json` via the existing repo-registry slug helper; (2) reads the file with fs.readFileSync when it exists; (3) parses JSON and validates against sc1's four-key allowed set (embeddingModel, embeddingDim, coreModel, shaperModel), rejecting unknown keys with InvalidOverrideFileError as sc1 requires; (4) applies per-dimension right-wins over the global loader's output; (5) returns the LocalProviderInfraConfig / AnalyzeShaperConfig with per-dimension values sourced accordingly. Writer Stories s2 and s4 consume this same on-disk contract to add / remove dimensions in the file; s3 consumes it to list what's present. sc1's on-disk shape does not change under this Story \u2014 only the read code is added."
+      }
+    ],
+    "errorPaths": {
+      "errorCases": [
+        {
+          "scenario": "Per-repo override file exists but is not valid JSON.",
+          "detection": "The resolver's try/catch around JSON.parse of the file body catches SyntaxError; the resolver re-throws as InvalidOverrideFileError with the file path + parser message.",
+          "response": "Fail fast at the load call. Do NOT silently fall back to global \u2014 a malformed override the user thought was active would silently disappear, which is the opposite of the observability nonFunctional target.",
+          "userImpact": "The daemon boot for that repo fails with a clear error naming the file path + the JSON parser's line/column so the user can fix or delete the file.",
+          "recoverable": true
+        },
+        {
+          "scenario": "Per-repo override file has unknown top-level keys (outside sc1's four allowed dimensions).",
+          "detection": "After JSON.parse, the resolver iterates the parsed object's own keys and checks each against a hardcoded set of allowed sc1 keys. Any unknown key trips InvalidOverrideFileError before any dimension is overlaid.",
+          "response": "Fail fast with an error naming the offending key and enumerating the allowed set. Explicitly do NOT silently ignore unknown keys \u2014 typos in a user-edited file must not silently do the wrong thing.",
+          "userImpact": "The daemon boot for that repo fails with a message like 'unknown key \"embedingModel\" in ~/.insrc/repos/<slug>/config.json; allowed: embeddingModel, embeddingDim, coreModel, shaperModel'.",
+          "recoverable": true
+        },
+        {
+          "scenario": "Per-repo override file has a value whose type does not match sc1's type contract (e.g. embeddingDim is a string, embeddingModel is a number).",
+          "detection": "The resolver checks each present key's runtime typeof against the expected type from sc1 (embeddingModel: string, embeddingDim: number, coreModel: string, shaperModel: string). A mismatch trips InvalidOverrideFileError.",
+          "response": "Fail fast with a message naming the key and the expected vs. actual type.",
+          "userImpact": "The daemon boot for that repo fails with an actionable error the user can fix by re-editing the file.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The per-repo embedding dimension in the override file conflicts with what the repo's Lance vector store has already persisted.",
+          "detection": "At daemon-repo-attach time, after the resolver returns an effective LocalProviderInfraConfig, the daemon compares the effective embeddingDim to the Lance store's persisted dim (same check the daemon already does today at global boot for ONNX-vs-Ollama). Mismatch is detected by the dim inequality.",
+          "response": "Emit the same shape of error today's ONNX-vs-Ollama global-path emit uses, prefixed with the specific repo slug and naming the cleanup step (drop `~/.insrc/repos/<slug>/lance/` and re-index that repo). Detection happens at daemon-repo-attach time so users see it up front, not per query (HLD architectureShape 'Failure surface').",
+          "userImpact": "The daemon refuses to serve the repo until the user runs the named cleanup; other repos on the same daemon continue serving normally.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The override file exists but fs.readFileSync raises EACCES / permission denied.",
+          "detection": "try/catch around fs.readFileSync catches the errno; the resolver re-throws as InvalidOverrideFileError with the OS error message included.",
+          "response": "Fail fast. Do NOT fall back to global \u2014 a permission-denied file is user intent that must be surfaced, not silently masked.",
+          "userImpact": "The daemon boot for that repo fails with the OS-level permissions error naming the file path.",
+          "recoverable": true
+        }
+      ],
+      "edgeCases": [
+        {
+          "input": "The override file exists but is empty (zero bytes).",
+          "expected": "The resolver treats an empty file as InvalidOverrideFileError (JSON.parse of empty string throws SyntaxError). No dimension is overlaid. This is intentional: an empty file is likely user error, not intent to override nothing (that's what a missing file signals)."
+        },
+        {
+          "input": "The override file is a JSON object with all four keys set to `null`.",
+          "expected": "InvalidOverrideFileError. `null` for a dimension is a type mismatch against sc1's four allowed types (string / number). To 'unset' a dimension, the user removes the key or the file, not sets it to null."
+        },
+        {
+          "input": "The override file is present but the JSON parses to something other than an object (array, number, string, boolean, null at the root).",
+          "expected": "InvalidOverrideFileError with a message like 'expected object, got <actual type>'."
+        },
+        {
+          "input": "The override file exists with only whitespace/newlines.",
+          "expected": "Same as the empty-file edge \u2014 SyntaxError \u2192 InvalidOverrideFileError."
+        },
+        {
+          "input": "The override file has exactly one dimension set (e.g. only embeddingModel).",
+          "expected": "Per-dimension right-wins: embeddingModel comes from the file, embeddingDim + coreModel + shaperModel come from the global loader. This is the intended sc1 semantics."
+        },
+        {
+          "input": "The repoPath resolves to a slug for which ~/.insrc/repos/<slug>/ does not yet exist as a directory.",
+          "expected": "The resolver treats this identically to 'file does not exist' \u2014 empty overlay, global loader wins. No implicit mkdir; the writer Stories (s2/s4) own directory creation as part of the write path."
+        },
+        {
+          "input": "Two concurrent daemon requests hit loadEffectiveLocalConfig with the same repoPath while the writer Story is mid-write to the override file.",
+          "expected": "sc1's write-then-rename atomic write means the reader either sees the pre-write file or the post-write file, never a partial file. If somehow the file is caught mid-rename, the reader falls back to whichever version the OS surfaced; the next boot's read reflects the final state."
+        }
+      ],
+      "invariantsToPreserve": [
+        {
+          "text": "The global ~/.insrc/config.json path continues to be the single source of truth for dimensions that have no per-repo override. Single-repo installs with no ~/.insrc/repos/<slug>/config.json file present continue to work exactly as they do today \u2014 zero behavior change on the pass-through path.",
+          "source": "c1"
+        },
+        {
+          "text": "LocalProviderInfraConfig and AnalyzeShaperConfig retain their existing field shapes; the effective loader returns the same interface type as today's global loader. Downstream consumers do not learn a new type.",
+          "source": "c2"
+        },
+        {
+          "text": "The ShaperProviderOverrides programmatic runtime-override entry point at src/insrc/analyze/context/shaper-provider.ts:59-64 continues to layer on top of whatever the effective loader returns. Runtime overrides remain the highest-priority source; per-repo file is a NEW SOURCE below runtime and above global, not a replacement of either.",
+          "source": "c3"
+        }
+      ]
+    },
+    "testStrategy": {
+      "testLevels": [
+        {
+          "level": "unit",
+          "purpose": "Exercise loadEffectiveLocalConfig + loadEffectiveAnalyzeConfig against tmpdir-backed override files: pass-through (no file), full overlay (all four dims), partial overlay (one dim), and every InvalidOverrideFileError case from s5.",
+          "subjects": [
+            "loadEffectiveLocalConfig",
+            "loadEffectiveAnalyzeConfig",
+            "the sc1 key + type validator inside the resolver"
+          ],
+          "fixturesNeeded": [
+            "a tmpdir stubbing ~/.insrc/repos/<slug>/config.json for various contents (valid partial, valid full, malformed JSON, unknown key, wrong-typed value, permission-denied, empty)",
+            "a stub for the existing global loader that returns a fixed LocalProviderInfraConfig / AnalyzeShaperConfig so overlay behavior is deterministic"
+          ]
+        },
+        {
+          "level": "unit",
+          "purpose": "Verify the module-private renaming does not leak: importing loadLocalProviderConfig from src/insrc/config's barrel must fail to type-check.",
+          "subjects": [
+            "src/insrc/config barrel exports"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "Boot the daemon against a two-repo fixture where one repo has a per-repo embedding override and the other does not. Verify that the indexer + embedder + Lance stores serving each repo receive the correct effective config (per-repo for repo A, global for repo B).",
+          "subjects": [
+            "daemon boot with per-repo overrides",
+            "read-site migration across the 15 named callers"
+          ],
+          "fixturesNeeded": [
+            "a two-repo tmpdir install with ~/.insrc/config.json and ~/.insrc/repos/<slugA>/config.json seeded",
+            "the same test-harness used by the existing daemon integration tests (extended, not new)"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "Verify the per-repo dim-mismatch error: seed a repo whose Lance store persisted dim = 1024 and a per-repo override embeddingDim = 768. Boot the daemon serving that repo and assert the exact error message shape + cleanup step.",
+          "subjects": [
+            "daemon-repo-attach dim-mismatch check"
+          ],
+          "fixturesNeeded": [
+            "a Lance store pre-populated with a known dim value",
+            "a per-repo override file whose embeddingDim conflicts"
+          ]
+        },
+        {
+          "level": "contract",
+          "purpose": "sc1 read-side contract test: given every legal PerRepoOverrideFile shape (per-dimension subset), the resolver produces the expected effective config. Given every disallowed shape from s5 error cases, the resolver produces the expected InvalidOverrideFileError with the expected message shape.",
+          "subjects": [
+            "sc1 read-side contract",
+            "InvalidOverrideFileError message shapes"
+          ]
+        }
+      ],
+      "acceptanceMapping": [
+        {
+          "criterionId": "ac1",
+          "provingTests": [
+            "unit: loadEffectiveLocalConfig(repoPath) returns exactly the global loader's output when ~/.insrc/repos/<slug>/config.json does not exist",
+            "integration: daemon serving repo B (no override file) uses global model choices verbatim, byte-for-byte with today's behavior"
+          ]
+        },
+        {
+          "criterionId": "ac2",
+          "provingTests": [
+            "unit: loadEffectiveLocalConfig(repoPath) with a per-repo file setting embeddingModel + embeddingDim returns the overridden values",
+            "integration: daemon serving repo A (override embeddingModel=nomic, embeddingDim=768) uses those values when indexing + querying, not the global values"
+          ]
+        },
+        {
+          "criterionId": "ac3",
+          "provingTests": [
+            "integration: per-repo dim-mismatch dim=768 vs persisted Lance dim=1024 boot produces the exact HLD-specified error naming the repo slug + drop-and-reindex cleanup step",
+            "unit: the dim-mismatch check reads from the effective config, not the global config"
+          ]
+        },
+        {
+          "criterionId": "ac4",
+          "provingTests": [
+            "integration: ShaperProviderOverrides used programmatically continues to override whatever loadEffectiveAnalyzeConfig returns \u2014 runtime override wins over per-repo, per-repo wins over global",
+            "unit: the resolver does not import from or touch src/insrc/analyze/context/shaper-provider.ts"
+          ]
+        }
+      ],
+      "testFramework": "node:test with tsx (the repo-wide test runner used by every workflow / daemon / config test today)"
+    },
+    "migration": {
+      "stateBefore": "src/insrc/config exposes two publicly-imported loaders \u2014 `loadLocalProviderConfig()` at src/insrc/config/local.ts:57-83 (per s1 analyze bundle) and its analyze-shaper counterpart in src/insrc/config/analyze.ts (exact name to reconfirm at implementation time). Both take zero arguments and return the global-only config verbatim. The daemon boot, indexer, embedder, seven Lance stores, and two test files (15 read sites total per HLD architectureShape) all call these loaders directly with no repoPath in scope. There is no per-repo overlay: every repo the daemon serves sees the same global model choices [[c1]].",
+      "stateAfter": "src/insrc/config exposes two new publicly-imported loaders \u2014 `loadEffectiveLocalConfig(repoPath)` and `loadEffectiveAnalyzeConfig(repoPath)` \u2014 which read the existing global loaders first (now module-private, underscore-prefixed) and overlay the per-repo override file at ~/.insrc/repos/<slug>/config.json when present. The old public names are gone from the module's barrel exports. All 15 read sites pass their repoPath through the new loaders. Repos with no override file behave exactly as today; repos with an override file get per-dimension effective values with a per-repo dim-mismatch check firing at daemon-repo-attach time.",
+      "migrationSteps": [
+        {
+          "order": 1,
+          "action": "Add the new module-private helpers (renamed from the current public loaders, prefixed with underscore) inside src/insrc/config/local.ts and src/insrc/config/analyze.ts. No behavior change; existing tests continue to pass because the public re-exports still point at the same function body via a temporary alias.",
+          "rollbackable": true
+        },
+        {
+          "order": 2,
+          "action": "Add the new resolver code inside src/insrc/config that reads the global result via the module-private helpers, reads the per-repo override JSON if it exists, validates against sc1's four-key allowed set + type contract, and applies per-dimension right-wins. Expose it as loadEffectiveLocalConfig / loadEffectiveAnalyzeConfig from the src/insrc/config barrel.",
+          "rollbackable": true
+        },
+        {
+          "order": 3,
+          "action": "Add the per-repo dim-mismatch check to daemon-repo-attach. Reuse the exact error wording of the current ONNX-vs-Ollama global-path dim-mismatch error, prefixed with the specific repo slug and naming the drop-Lance-dir + re-index cleanup step. Do NOT wire this check into any user path yet \u2014 leaving it dormant behind a feature flag is out of scope; the check activates the moment repo attach runs it.",
+          "rollbackable": true
+        },
+        {
+          "order": 4,
+          "action": "Migrate every one of the 15 read sites from `loadLocalProviderConfig()` / `<analyze-loader>()` calls to `loadEffectiveLocalConfig(repoPath)` / `loadEffectiveAnalyzeConfig(repoPath)`. Do this in one PR (not split by call site) so tsc's compile-time signal for missed callers actually fires \u2014 splitting the migration hides the risk mitigation. Threads repoPath through the daemon call chain wherever it does not already sit in scope.",
+          "rollbackable": true
+        },
+        {
+          "order": 5,
+          "action": "Remove the old public re-exports of `loadLocalProviderConfig` and the analyze-shaper loader from src/insrc/config's barrel. This is the terminal step \u2014 once removed, any missed read site becomes a hard build error. Without this step the tsc-flags-every-caller mitigation is inert.",
+          "rollbackable": true
+        },
+        {
+          "order": 6,
+          "action": "Add the escape-hatch entry point for callers with no repo scope (setup wizard, daemon boot before any repo attaches): expose a `loadGlobalLocalProviderConfig()` and `loadGlobalAnalyzeShaperConfig()` pair from the barrel that returns the global-only view. Document explicitly as no-repo-context only.",
+          "rollbackable": true
+        },
+        {
+          "order": 7,
+          "action": "Add observability logging inside the resolver: on every effective-config load, log which dimensions were sourced from per-repo vs. global for the current repo slug (HLD nonFunctional observability target).",
+          "rollbackable": true
+        }
+      ],
+      "backwardCompat": "The global ~/.insrc/config.json path continues to be the single source of truth for dimensions with no per-repo override. Single-repo installs with no ~/.insrc/repos/<slug>/config.json file present see zero behavior change (invariant 1 from s5). The public export names change (`loadLocalProviderConfig` \u2192 `loadEffectiveLocalConfig` + a new global-only escape hatch), which is a BREAKING CHANGE at the module boundary \u2014 external callers must migrate. Internal to the insrc repo, every caller is under s1's scope and migrates in the same PR. No on-disk data migration is required: existing daemons boot against the new loaders with the same global config file, unchanged. The programmatic override entry point (ShaperProviderOverrides) is untouched.",
+      "zeroDowntime": true,
+      "dataRewriteRequired": false
+    },
+    "alternativesConsidered": [
+      {
+        "id": "a1",
+        "name": "Fresh-named effective loaders; old names go module-private",
+        "oneLineSummary": "Add loadEffectiveLocalConfig(repoPath) and loadEffectiveAnalyzeConfig(repoPath) as the new public entrypoints; rename the current global loaders to underscore-prefixed module-private helpers.",
+        "approach": "src/insrc/config exposes two NEW public functions: loadEffectiveLocalConfig(repoPath: string): LocalProviderInfraConfig and loadEffectiveAnalyzeConfig(repoPath: string): AnalyzeShaperConfig. The existing loadLocalProviderConfig / analyze counterpart become module-internal helpers with a leading underscore (or move to a private file inside src/insrc/config). Every one of the 15 external read sites migrates to the new name, passing its repoPath. Callers without a repo scope (setup wizard, daemon boot before any repo is known) reach into src/insrc/config for a distinct loadGlobalLocalProviderConfig() escape hatch that is explicitly narrow and documented as no-repo-context only.\n\nBecause the old exported name disappears, tsc flags every unmigrated read site at compile time \u2014 the HLD riskyBits mitigation kicks in mechanically. The new loaders internally call the module-private globals for the base read + overlay the per-repo file. Return type stays LocalProviderInfraConfig / AnalyzeShaperConfig unchanged so downstream consumers do not have to reshape.",
+        "pros": [
+          "tsc flags every unmigrated caller at compile time \u2014 direct application of the HLD riskyBits mitigation.",
+          "Return type unchanged \u2014 zero downstream reshape work.",
+          "Clean two-tier public surface: repo-scoped (effective) and no-repo (global-only), with the distinct name preventing accidental misuse.",
+          "The 'effective' vocabulary matches the HLD prose so future readers immediately grok the layering."
+        ],
+        "cons": [
+          "Every one of the 15 read sites needs an edit (which is the work regardless \u2014 but this alternative touches them all in one PR).",
+          "Callers that only had `repoPath` in a deeper scope must now thread it through \u2014 a small but non-zero API-shape ripple at the read sites."
+        ],
+        "costEstimate": "M"
+      },
+      {
+        "id": "a2",
+        "name": "In-place overload with optional repoPath",
+        "oneLineSummary": "Keep the existing loader names; make repoPath an optional trailing parameter that layers the per-repo file when present and passes through to global otherwise.",
+        "approach": "The current loadLocalProviderConfig / loadAnalyzeShaperConfig signatures grow an optional repoPath parameter: loadLocalProviderConfig(repoPath?: string): LocalProviderInfraConfig. When repoPath is undefined the loader behaves exactly as today (pure global read). When repoPath is provided the loader layers the per-repo override on top. No new public names; the diff at each read site is just adding a repoPath argument.\n\nCallers that today have a repoPath in scope (indexer, embedder, Lance stores) pass it; callers that don't (setup wizard, boot code) pass nothing and get the current global behavior transparently. The runtime programmatic override entry point (ShaperProviderOverrides) continues to sit above the loader untouched.",
+        "pros": [
+          "Smallest possible diff at each read site \u2014 add one argument, no rename.",
+          "Backward-compatible at the type level: existing zero-arg callers still compile.",
+          "Setup wizard and boot code need no explicit escape hatch \u2014 they just keep calling zero-arg.",
+          "No new exported symbol names to design or document."
+        ],
+        "cons": [
+          "tsc does NOT flag unmigrated read sites \u2014 they silently keep the global-only behavior, which is EXACTLY the failure mode the HLD riskyBits mitigation was written to prevent.",
+          "The overload muddies the loader's contract: the same function has two meaningfully different behaviors depending on argument presence, which future readers must decode.",
+          "Loses the 'effective' vocabulary that reads clearly against the HLD framework summary."
+        ],
+        "costEstimate": "S",
+        "reasonRejected": "Two partials on ac2 + ac3 (the two most load-bearing ACs, both operationalizing k3). Both partials trace to the same root cause: silent absence of a compile-time signal on unmigrated read sites, exactly the risk the HLD wrote a mitigation against."
+      },
+      {
+        "id": "a3",
+        "name": "Sources-annotated effective config record",
+        "oneLineSummary": "Return a { config, sources } record so every read site can log per-dimension provenance without re-reading the override file.",
+        "approach": "Shape the return type of the new repo-scoped loaders as loadEffectiveLocalConfig(repoPath: string): { config: LocalProviderInfraConfig, sources: EffectiveConfigSources } where EffectiveConfigSources = { embeddingModel: 'global' | 'per-repo', embeddingDim: 'global' | 'per-repo', coreModel: 'global' | 'per-repo', shaperModel: 'global' | 'per-repo' }. Same for the analyze counterpart with its own key set.\n\nCallers that only care about the values destructure { config } as before. Callers that want observability (the HLD nonFunctional requirement: 'log which dimensions were sourced from global vs. per-repo') read the sources field and log accordingly. The dim-mismatch check at daemon boot uses the sources field to produce a more specific error message ('embeddingDim override for repo X conflicts with the persisted Lance dim').",
+        "pros": [
+          "The nonFunctional observability requirement is served directly by the data model, not by side-channel logging inside the loader.",
+          "The dim-mismatch error message can be more specific because it knows whether the mismatch came from a per-repo override or global drift.",
+          "Zero cost to callers that ignore sources \u2014 they just destructure the config field."
+        ],
+        "cons": [
+          "Return-type change ripples through every one of the 15 read sites even more than a1 (they all learn a new tuple shape).",
+          "The 'sources' surface can be built cheaply inside the loader on every call without materializing the sources record \u2014 alternatives a1 or a2 with a plain log-at-load-time achieve the same observability goal with a smaller contract."
+        ],
+        "costEstimate": "M",
+        "reasonRejected": "Fully satisfies but ships a broader return-type contract for observability the resolver can log directly without materializing. Non-goal: adds surface area without unlocking capability the Story didn't ask for."
+      }
+    ],
+    "chosenAlternative": "a1",
+    "openQuestions": []
+  },
+  "citations": [
+    {
+      "id": "c1",
+      "kind": "code",
+      "ref": "src/insrc/config/local.ts:33-83",
+      "quotedText": "LocalProviderInfraConfig interface at :33-39 and loadLocalProviderConfig function at :57-83 (signature: loadLocalProviderConfig(): LocalProviderInfraConfig). Located via symbol.locate in s1 analyze bundle 1."
+    },
+    {
+      "id": "c2",
+      "kind": "code",
+      "ref": "src/insrc/config/analyze.ts:33-53",
+      "quotedText": "AnalyzeShaperConfig interface at :33-53. Located via symbol.locate in s1 analyze bundle 2."
+    },
+    {
+      "id": "c3",
+      "kind": "code",
+      "ref": "src/insrc/analyze/context/shaper-provider.ts:59-64",
+      "quotedText": "ShaperProviderOverrides interface \u2014 the HLD's [[c3]] programmatic runtime-override entry point pinned as unchanged. Located via symbol.locate in s1 analyze bundle 2."
+    }
+  ]
+}

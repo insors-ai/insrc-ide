@@ -9,7 +9,10 @@
     "repoIndexedAt": null,
     "schemaVersion": 1,
     "epicHash": "cd479e1361d35cfc",
-    "epicSlug": "support-per-repo-config-overrides-embedding"
+    "epicSlug": "support-per-repo-config-overrides-embedding",
+    "approvedAt": "2026-07-14T05:52:17.612Z",
+    "epicRef": "insors-ai/insrc-ide#5",
+    "epicPushedAt": "2026-07-14T00:00:00.000Z"
   },
   "body": {
     "frameworkSummary": "A layered config resolver in src/insrc/config reads the existing global loader first and overlays a per-repo override file (JSON) at ~/.insrc/repos/<slug>/config.json when present [[c1]]. All 15 config read sites (daemon boot, indexer, embedder, seven Lance stores, and tests) migrate to a repo-aware loader; the CLI reads / writes / deletes dimensions inside the same override file. No LMDB migration and no repo-tree writes; the global config's schema is unchanged and overrides are hand-editable JSON.",

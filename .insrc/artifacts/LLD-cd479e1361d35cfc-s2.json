@@ -1,0 +1,391 @@
+{
+  "meta": {
+    "workflow": "design.story",
+    "runId": "wf-1784009557148-smnduw",
+    "repoPath": "/Users/subhagho/work/projects/insors/insrc-ide",
+    "createdAt": "2026-07-14T06:19:29.610Z",
+    "model": "client",
+    "elapsedMs": 412460,
+    "repoIndexedAt": null,
+    "schemaVersion": 1,
+    "epicHash": "cd479e1361d35cfc",
+    "epicSlug": "support-per-repo-config-overrides-embedding",
+    "storyId": "s2",
+    "hldBaseRunId": "wf-1783920776460-bd44gr",
+    "hldEffectiveHash": "ff7482e7beb3ad417c65546731583bced8a5bb1fc67db34ecdf8e411fac6bdcb",
+    "hldAmendmentsApplied": [],
+    "approvedAt": "2026-07-14T06:20:02.907Z",
+    "storyRef": "insors-ai/insrc-ide#2",
+    "storyPushedAt": "2026-07-14T00:00:00.000Z"
+  },
+  "body": {
+    "hldContextSlice": {
+      "frameworkSummary": "A layered config resolver in src/insrc/config reads the existing global loader first and overlays a per-repo override file (JSON) at ~/.insrc/repos/<slug>/config.json when present [[c1]]. All 15 config read sites (daemon boot, indexer, embedder, seven Lance stores, and tests) migrate to a repo-aware loader; the CLI reads / writes / deletes dimensions inside the same override file. No LMDB migration and no repo-tree writes; the global config's schema is unchanged and overrides are hand-editable JSON.",
+      "ownedContracts": [],
+      "consumedContracts": [
+        {
+          "id": "sc1",
+          "name": "PerRepoOverrideFile",
+          "purpose": "The on-disk shape of a per-repo override file and the path convention that locates it, so the writer Stories (s2 / s4) and the daemon reader Story (s1) agree on the format and location.",
+          "interfaceSketch": "// Path convention: ~/.insrc/repos/<slug>/config.json\n// where <slug> is derived from the canonical repo path by the existing\n// repo registry (same slug the daemon already uses for workflow-runs and\n// per-repo state).\n\ninterface PerRepoOverrideFile {\n    // Any subset of these four dimensions MAY be present. A missing key\n    // falls through to the global config's value for that dimension.\n    // The file MUST contain no additional keys; unknown keys are a\n    // validation error at read time.\n    embeddingModel?: string;\n    embeddingDim?:   number;\n    coreModel?:      string;\n    shaperModel?:    string;\n}\n\n// Path helper (type-only sketch)\ndeclare function perRepoOverridePath(repoPath: string): string;",
+          "ownedByStory": "s1",
+          "consumedByStories": [
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "assumptions": [
+            "c1",
+            "c2"
+          ]
+        }
+      ],
+      "boundary": {
+        "storyId": "s2",
+        "owns": [],
+        "depends": [
+          "sc1"
+        ],
+        "internal": "Argument parsing for the set subcommand, validation that the dimension name is one of the four allowed dimensions and the value type-checks, the error message wording for the not-registered-repo case, and the single-file atomic write. The set command NEVER reads existing overrides beyond loading + rewriting the JSON object."
+      },
+      "rolloutPhase": "Phase B -- CLI CRUD for overrides",
+      "nonFunctional": {
+        "performance": "Adds one fs.readFileSync (per-repo JSON, a few KB max) per repo-scoped config read; negligible compared to the existing global load. Zero performance change for calls without a repo scope.",
+        "security": "Override file lives inside ~/.insrc/, which is user-owned; no elevated privileges required. Same trust boundary as the existing global config file.",
+        "observability": "Every daemon read of the effective config logs which dimensions were sourced from global vs. per-repo, so users can trace where a given model choice was resolved from when debugging.",
+        "durability": "Override files are single-JSON atomic writes (write to .tmp, rename); no LMDB migration, no backup coordination. Losing an override file loses only the machine-local override for that repo; the global config is unaffected."
+      }
+    },
+    "contractDetails": {
+      "surfaceLevel": "public",
+      "api": [
+        {
+          "name": "registerConfigCommands",
+          "signature": "function registerConfigCommands(program: Command): void",
+          "parameters": [
+            {
+              "name": "program",
+              "type": "Command",
+              "purpose": "The root commander instance the CLI mounts every subcommand family on. Same handle passed to registerDaemonCommands / registerRepoCommands / registerWorkflowCommands [[c1]].",
+              "optional": false
+            }
+          ],
+          "returns": {
+            "type": "void",
+            "meaning": "Side-effect only \u2014 mounts the `config` command family (including the `set` subcommand) on the passed-in program."
+          },
+          "errors": [],
+          "preconditions": [
+            "commander's Command class is imported from the same version currently used by the other register*Commands functions."
+          ],
+          "postconditions": [
+            "`insrc config set <dimension> <value> [--repo <path>]` is a valid CLI invocation.",
+            "The commander root exposes the new command family alongside daemon / repo / setup / workflow."
+          ]
+        }
+      ]
+    },
+    "dataModelChanges": [
+      {
+        "entity": "src/insrc/cli/commands/config.ts",
+        "change": "new",
+        "details": "New file mounting the `config` command family. Exports registerConfigCommands(program: Command): void following the surrounding sibling convention (registerDaemonCommands, registerRepoCommands, registerWorkflowCommands) [[c1]]. File name is snake_case per the src/insrc/cli/commands convention (config.ts). The file's action handler for `set` calls listRepos [[c3]] to satisfy ac3 and writeAtomic [[c2]] to perform the durable write. No new class or subsystem is introduced; this is a leaf CLI-command file.",
+        "callSites": [
+          "src/insrc/cli/commands/daemon.ts",
+          "src/insrc/cli/commands/repo.ts",
+          "src/insrc/cli/commands/workflow.ts",
+          "src/insrc/cli/index.ts"
+        ]
+      },
+      {
+        "entity": "insrc CLI root",
+        "change": "invariant-change",
+        "details": "The CLI root gains a new `config` command family via a one-line addition in the CLI's index (mirroring the existing `program.addCommand(...)` or `register*Commands(program)` calls). No behavior change to daemon / repo / setup / workflow subcommands; they continue to work exactly as today [[c1]].",
+        "callSites": [
+          "src/insrc/cli/index.ts"
+        ]
+      }
+    ],
+    "interactionWithShared": [
+      {
+        "contractId": "sc1",
+        "role": "consumes",
+        "howDetails": "This Story CONSUMES sc1. It implements the write side for the set operation: (1) computes the file path per sc1's path convention `~/.insrc/repos/<slug>/config.json` via the same repo-registry slug helper s1 uses on the read side (ensuring the CLI writes to exactly where the daemon reads); (2) validates the CLI's <dimension> positional against sc1's four allowed keys (embeddingModel, embeddingDim, coreModel, shaperModel) and refuses anything else with a message enumerating the allowed set; (3) coerces the <value> positional to the correct type per sc1's type contract (Number(value) for embeddingDim with an integer sanity check, string-verbatim for the three model names); (4) reads the current on-disk JSON (or seeds an empty object when the file does not exist), sets the one dimension in-memory, and writes the whole object atomically via writeAtomic [[c2]]. sc1's on-disk shape does not change under this Story \u2014 only the write code is added. s1 reads what s2 writes, byte-for-byte; s3 (list) reads it; s4 (unset) writes the reduced form."
+      }
+    ],
+    "errorPaths": {
+      "errorCases": [
+        {
+          "scenario": "The user passes a <dimension> positional that is not one of sc1's four allowed keys.",
+          "detection": "The action handler checks the positional string against the hardcoded set { embeddingModel, embeddingDim, coreModel, shaperModel } (the exact key set sc1 defines). A miss trips a Story-level UnknownDimensionError before listRepos or any fs call.",
+          "response": "Print `error: unknown dimension '<X>'. Allowed: embeddingModel, embeddingDim, coreModel, shaperModel.` to stderr and exit non-zero. Do NOT read or write any file.",
+          "userImpact": "The command exits with the enumeration of allowed dimensions. The user retries with a valid name.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The user sets embeddingDim to a value that is not a positive integer.",
+          "detection": "The action handler calls Number(value) and checks Number.isInteger + value > 0. Non-integer or non-positive input trips InvalidDimensionValueError.",
+          "response": "Print `error: dimension 'embeddingDim' requires a positive integer, got '<value>'.` to stderr and exit non-zero. No write occurs.",
+          "userImpact": "The command refuses before any file mutation. Existing overrides on this repo are untouched.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The user passes --repo <path> for a path that is not a registered insrc repo (ac3).",
+          "detection": "After argument validation but before any write, the action handler calls listRepos and checks whether any RegisteredRepo's canonical path matches the passed --repo (or cwd when --repo is omitted). No match trips UnregisteredRepoError.",
+          "response": "Print `error: repo '<path>' is not registered with insrc. Run 'insrc repo add <path>' first.` to stderr and exit non-zero. No file is created.",
+          "userImpact": "The command refuses to create an override for a repo the daemon has not been told about. ac3 satisfied.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The atomic write fails at the OS level (disk full, quota exceeded, permission denied on ~/.insrc/repos/<slug>/).",
+          "detection": "writeAtomic wraps writeFileSync + renameSync; both raise typed errno errors. The action handler's try/catch around writeAtomic catches the error and surfaces it.",
+          "response": "Print `error: failed to write override file <path>: <os-error-message>` to stderr and exit non-zero. Any .tmp file writeAtomic left behind is a known transient artifact that gets cleaned up next successful write.",
+          "userImpact": "The command fails with the OS-level error naming the file path so the user knows what to fix.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The current on-disk override file exists but its JSON is malformed.",
+          "detection": "The action handler's JSON.parse of the read file body raises SyntaxError; the handler's try/catch converts to MalformedOverrideFileError.",
+          "response": "Print `error: existing override file at <path> is malformed JSON: <parser message>. Fix or delete the file, then re-run.` to stderr and exit non-zero. Do NOT overwrite with a fresh file \u2014 that would silently discard whatever the user was trying to preserve.",
+          "userImpact": "The set command refuses to silently obliterate corruption. User inspects the file, fixes or deletes it, retries.",
+          "recoverable": true
+        }
+      ],
+      "edgeCases": [
+        {
+          "input": "The override file does not exist yet (first `set` on this repo).",
+          "expected": "The handler treats a missing file identically to an empty JSON object `{}`, sets the one dimension in-memory, and writes the whole JSON via writeAtomic. writeAtomic creates parent dirs as needed (its documented behavior at src/insrc/workflow/storage.ts:62-73), so ~/.insrc/repos/<slug>/ is created implicitly."
+        },
+        {
+          "input": "The override file exists with only some of the four dimensions set; user sets a dimension that is NOT among them.",
+          "expected": "The dimension is added to the JSON object; the other pre-existing dimensions are preserved verbatim. Written file has the union of prior dimensions + the new one."
+        },
+        {
+          "input": "The override file already carries the dimension the user is setting, and the new value equals the current value.",
+          "expected": "The command is idempotent: the same JSON gets re-written to disk. ac2 semantics (previous value replaced) hold trivially. No signal to the user that nothing changed \u2014 the CLI does not read-diff before writing."
+        },
+        {
+          "input": "The user sets a model name string containing shell-unfriendly characters (spaces, colons, tags: e.g. `qwen3-embedding:0.6b`).",
+          "expected": "The value is written verbatim as a JSON string; shell quoting is the user's responsibility. The colon-containing model tag lands unchanged in the JSON string value."
+        },
+        {
+          "input": "The --repo path is a symlink to the actual repo directory.",
+          "expected": "The handler resolves the passed path through the repo-registry slug helper, which follows the same canonicalization the daemon uses on the read side. Symlink and target both map to the same slug \u2014 identical override file location for both invocations."
+        },
+        {
+          "input": "The user omits --repo and cwd is not itself a registered repo but is inside a registered repo tree.",
+          "expected": "The handler treats the exact cwd as the repo path candidate. If cwd is a subdirectory of a registered repo, the listRepos check fails with UnregisteredRepoError (the CLI does not walk up looking for a parent repo \u2014 that heuristic is out of scope). Users pass --repo explicitly in this case."
+        }
+      ],
+      "invariantsToPreserve": [
+        {
+          "text": "The atomic-write primitive at src/insrc/workflow/storage.ts:62-73 is reused verbatim; its documented behavior (mkdir -p parent dirs, write to .tmp, rename) is what sc1's durability nonFunctional relies on. Adding a second atomic-write helper for the CLI would fragment the durability guarantee.",
+          "source": "c2"
+        },
+        {
+          "text": "The existing register*Commands(program: Command): void pattern in src/insrc/cli/commands (daemon.ts, repo.ts, workflow.ts) is preserved; the new config.ts file adds a sibling of exactly the same shape. No changes to the existing subcommand modules.",
+          "source": "c1"
+        }
+      ]
+    },
+    "testStrategy": {
+      "testLevels": [
+        {
+          "level": "unit",
+          "purpose": "Exercise the dimension validator, value coercer, and the load-patch-write flow against tmpdir-backed override files. Cover every legal (dimension, value) pair from sc1's four keys plus every InvalidDimensionValueError / UnknownDimensionError case from s5.",
+          "subjects": [
+            "the dimension validator inside the set action handler",
+            "the value coercer for embeddingDim (Number.isInteger + > 0)",
+            "the load-patch-write path for both file-missing and file-present cases"
+          ],
+          "fixturesNeeded": [
+            "a tmpdir stubbing ~/.insrc/repos/<slug>/config.json for various pre-existing contents (no file, empty JSON object, one dim already set, all four dims set, malformed JSON)",
+            "a stub for the repo-registry slug helper returning a fixed slug for a canonical repo path so the resolver is deterministic"
+          ]
+        },
+        {
+          "level": "unit",
+          "purpose": "Verify the listRepos check runs before any write and produces the exact error string for ac3.",
+          "subjects": [
+            "the not-registered-repo check",
+            "the exact UnregisteredRepoError message shape"
+          ],
+          "fixturesNeeded": [
+            "a stub for listRepos returning a fixed RegisteredRepo[] so the test can force both hit and miss paths"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "Drive the actual CLI via node:test's child_process to exec `insrc config set <dim> <val> --repo <path>` against a registered tmpdir repo. Assert the override file lands with the exact JSON shape sc1 defines, and that a subsequent invocation replaces the dimension in place (ac2).",
+          "subjects": [
+            "the wired-up commander subcommand",
+            "the CLI's end-to-end argument-to-file flow"
+          ],
+          "fixturesNeeded": [
+            "a tmpdir install with a repo registered via `insrc repo add`",
+            "the built CLI binary or an npx tsx invocation of src/insrc/cli/index.ts"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "End-to-end read-write consistency: run `insrc config set embeddingModel qwen3` on a registered repo, then invoke loadEffectiveLocalConfig(repoPath) from s1's read side and assert the effective embeddingModel is 'qwen3'. This proves the CLI writes to exactly where the daemon reads.",
+          "subjects": [
+            "s1 read / s2 write path agreement on sc1's on-disk location"
+          ],
+          "fixturesNeeded": [
+            "a two-side test that runs the CLI, then invokes the resolver from src/insrc/config"
+          ]
+        },
+        {
+          "level": "contract",
+          "purpose": "sc1 write-side contract test: given every legal (dimension, value) pair, the written file matches the sc1 shape byte-for-byte. Given every illegal input from s5 error cases, no file is written and the exact error message shape is emitted.",
+          "subjects": [
+            "sc1 write-side contract",
+            "UnknownDimensionError + InvalidDimensionValueError + UnregisteredRepoError + MalformedOverrideFileError message shapes"
+          ]
+        }
+      ],
+      "acceptanceMapping": [
+        {
+          "criterionId": "ac1",
+          "provingTests": [
+            "unit: dimension validator accepts each of the four sc1 keys and the load-patch-write flow persists the correct value for each",
+            "integration: after `insrc config set embeddingModel qwen3 --repo <registered>`, the file at ~/.insrc/repos/<slug>/config.json contains { \"embeddingModel\": \"qwen3\" } exactly",
+            "integration: after the set command, calling loadEffectiveLocalConfig(repoPath) returns the overridden value (proves ac1's 'next daemon read picks up the new value' clause)"
+          ]
+        },
+        {
+          "criterionId": "ac2",
+          "provingTests": [
+            "unit: with a pre-existing file { \"embeddingModel\": \"old\" }, setting embeddingModel=new writes { \"embeddingModel\": \"new\" }, no other keys",
+            "integration: two consecutive `insrc config set embeddingModel X` invocations leave only the second value on disk"
+          ]
+        },
+        {
+          "criterionId": "ac3",
+          "provingTests": [
+            "unit: the not-registered-repo check produces the exact 'error: repo <path> is not registered with insrc. Run insrc repo add <path> first.' message and exits non-zero",
+            "integration: `insrc config set embeddingModel qwen3 --repo /tmp/does-not-exist` exits non-zero and no override file is created anywhere under ~/.insrc/repos/"
+          ]
+        }
+      ],
+      "testFramework": "node:test with tsx (the repo-wide test runner used by every workflow / daemon / config test today)"
+    },
+    "migration": {
+      "stateBefore": "src/insrc/cli/commands exposes four sibling subcommand files (daemon.ts, repo.ts, setup.ts, workflow.ts) each with a `register*Commands(program: Command): void` export mounted onto the CLI root [[c1]]. There is no `insrc config` command family and no way for a user to set a per-repo model override from the command line: users would have to hand-edit ~/.insrc/config.json globally or later hand-edit ~/.insrc/repos/<slug>/config.json directly. The atomic-write primitive at src/insrc/workflow/storage.ts:62-73 [[c2]] exists and is exercised elsewhere in the codebase; listRepos at src/insrc/db/repos.ts:213-222 [[c3]] exists and returns the registered repo list.",
+      "stateAfter": "src/insrc/cli/commands has a fifth sibling file (config.ts) exporting registerConfigCommands(program: Command): void, mounted onto the CLI root alongside daemon / repo / setup / workflow. Running `insrc config set <dimension> <value> [--repo <path>]` writes the given dimension into ~/.insrc/repos/<slug>/config.json via writeAtomic. The write path validates the dimension against sc1's four allowed keys, coerces the value per sc1's type contract, checks listRepos to satisfy ac3, and preserves any pre-existing dimensions in the file. The existing four register*Commands functions and their subcommands are unchanged.",
+      "migrationSteps": [
+        {
+          "order": 1,
+          "action": "Create src/insrc/cli/commands/config.ts. Export a single registerConfigCommands(program: Command): void function that mounts the `config` command family with one subcommand `set` accepting two positional args (<dimension>, <value>) and one option (--repo, defaulting to cwd). The action handler is a shell at this step \u2014 no validation, no write \u2014 so the commander wiring alone can be verified.",
+          "rollbackable": true
+        },
+        {
+          "order": 2,
+          "action": "Wire registerConfigCommands into the CLI root by adding a single line to src/insrc/cli/index.ts (or wherever the other register*Commands are invoked). No other CLI code changes.",
+          "rollbackable": true
+        },
+        {
+          "order": 3,
+          "action": "Add the dimension validator + value coercer inside the `set` action handler. Validator hardcodes the four sc1 keys (embeddingModel, embeddingDim, coreModel, shaperModel). Coercer applies Number(value) + Number.isInteger + > 0 for embeddingDim; the other three pass through as strings.",
+          "rollbackable": true
+        },
+        {
+          "order": 4,
+          "action": "Add the not-registered-repo check: call listRepos and compare the resolved --repo path against the returned RegisteredRepo[]. Miss trips UnregisteredRepoError with the exact ac3 message shape.",
+          "rollbackable": true
+        },
+        {
+          "order": 5,
+          "action": "Add the load-patch-write flow: resolve the override file path via the same repo-registry slug helper the daemon reader uses, read the existing JSON (treat missing file as `{}`), set the one dimension, and call writeAtomic with the serialized full object. Wrap fs + JSON.parse in try/catch surfacing MalformedOverrideFileError on parse failure.",
+          "rollbackable": true
+        },
+        {
+          "order": 6,
+          "action": "Add the unit + integration tests under src/insrc/cli/commands/__tests__/config-set.test.ts covering every acceptance mapping from s6 and every error case from s5.",
+          "rollbackable": true
+        },
+        {
+          "order": 7,
+          "action": "Update docs (docs/config.md or the existing daemon docs \u2014 whichever the setup wizard already references) to explain `insrc config set` with a short example and a link to sc1's on-disk shape for hand-editors.",
+          "rollbackable": true
+        }
+      ],
+      "backwardCompat": "The insrc CLI gains a new `config` command family that did not exist before; existing subcommands (daemon / repo / setup / workflow) are unchanged and continue to work exactly as today. No global config file changes; users who never invoke `insrc config set` see zero difference. The programmatic override entry point (ShaperProviderOverrides) and the daemon's runtime API are untouched. There is no data migration: the CLI simply gains a way to produce sc1-shaped files at the location the daemon reader already reads from.",
+      "zeroDowntime": true,
+      "dataRewriteRequired": false
+    },
+    "alternativesConsidered": [
+      {
+        "id": "a1",
+        "name": "Subcommand-per-dimension",
+        "oneLineSummary": "Give each of the four covered dimensions its own commander subcommand under `insrc config set` (e.g. `insrc config set embedding-model <value> --repo <path>`).",
+        "approach": "Register four commander subcommands under a parent `config set` group: `embedding-model`, `embedding-dim`, `core-model`, `shaper-model`. Each subcommand accepts one positional `<value>` argument and an optional `--repo <path>` (defaulting to cwd). The kebab-case in the CLI maps to sc1's camelCase keys via a static mapping table. The subcommand's action handler resolves the repo path, calls listRepos to satisfy ac3, loads (or creates) the JSON object, sets its own dimension, and writes atomically via writeAtomic.\n\nBecause each dimension is a distinct commander definition, an unknown dimension name is caught by commander itself (`Unknown command 'embeddigmodel'`) before any user code runs.",
+        "pros": [
+          "Unknown-dimension errors are surfaced by commander itself \u2014 no Story-level validation of the dimension name needed; typos get a native 'did you mean' hint on modern commander versions.",
+          "Each subcommand can carry its own help text about the dimension's semantics + value shape (e.g. embedding-dim expects a positive integer)."
+        ],
+        "cons": [
+          "Four subcommands to define + wire up when the underlying contract has one shape.",
+          "Adding a fifth dimension in a future Epic requires another commander definition + entry in the mapping table (though this is out-of-scope per k3)."
+        ],
+        "costEstimate": "S",
+        "reasonRejected": "Satisfies every AC + every applicable Epic constraint but ships 4 subcommand definitions when 1 covers the same surface area. The 'commander catches unknown dimension' pro is real but the same effect is achievable in a2 with a one-line validation that also produces a more precise error message (enumerating the four allowed dimensions verbatim from sc1)."
+      },
+      {
+        "id": "a2",
+        "name": "Single subcommand with positional dimension",
+        "oneLineSummary": "`insrc config set <dimension> <value> [--repo <path>]` \u2014 one subcommand, dimension is a validated positional argument.",
+        "approach": "Register a single commander subcommand `config set` that accepts two positional arguments (`<dimension>` and `<value>`) plus an optional `--repo <path>` option (defaulting to cwd). The action handler validates `<dimension>` against sc1's four allowed dimension names, coerces `<value>` to the correct type per sc1's type contract (number for embeddingDim, string for the three model names), resolves the repo path, checks listRepos for ac3, loads (or creates) the JSON object, sets the dimension, and writes atomically via writeAtomic.\n\nThe dimension name matches sc1's exact camelCase keys (embeddingModel, embeddingDim, coreModel, shaperModel) so the CLI vocabulary is byte-identical to the on-disk file's key set.",
+        "pros": [
+          "One subcommand definition; the dimension list lives in one place tied to sc1's four allowed keys.",
+          "The CLI's dimension name matches sc1's on-disk JSON key exactly (no kebab/camel conversion needed).",
+          "Terse invocation \u2014 `insrc config set embeddingModel qwen3` is the tightest possible form."
+        ],
+        "cons": [
+          "Unknown-dimension errors are Story-level (must be raised by the action handler with a message enumerating the allowed set); commander itself has no signal.",
+          "Positional-arg parsing needs to disambiguate `--repo` when the user places the flag between the two positionals; commander handles this correctly but the ergonomics are less obvious than all-flag form."
+        ],
+        "costEstimate": "S"
+      },
+      {
+        "id": "a3",
+        "name": "Flag-only invocation",
+        "oneLineSummary": "`insrc config set --dimension <name> --value <value> [--repo <path>]` \u2014 no positional args; every field is a named flag.",
+        "approach": "Register one commander subcommand `config set` whose action takes three required options: --dimension, --value, --repo (defaulting to cwd). Same validation + write path as a2, but the CLI shape is uniformly flag-driven. Matches the shape of insrc's existing commands where flags dominate (e.g. `insrc workflow amend <slug> --approve <id>`).",
+        "pros": [
+          "Consistent with insrc's flag-heavy CLI style \u2014 users can rely on tab-completion for option names.",
+          "Order-independent invocation (users can put --repo first, second, or last)."
+        ],
+        "cons": [
+          "Verbose to type; two required flags with no positional shorthand.",
+          "Diverges from the `insrc repo add <path>` idiom which uses positional args for the primary noun."
+        ],
+        "costEstimate": "S",
+        "reasonRejected": "Fully satisfies but the CLI shape (all flags) is verbose vs. a2's positional idiom and diverges from `insrc repo add <path>`. No ac / constraint gain over a2 to offset the ergonomics loss."
+      }
+    ],
+    "chosenAlternative": "a2",
+    "openQuestions": []
+  },
+  "citations": [
+    {
+      "id": "c1",
+      "kind": "analyze-bundle",
+      "ref": "s1 bundle 1: module.profile+symbol.locate on src/insrc/cli/commands",
+      "quotedText": "4 sibling subcommand files each exporting a single register*Commands(program: Command): void. registerDaemonCommands (daemon.ts:18-45), registerRepoCommands (repo.ts:10-27), registerWorkflowCommands (workflow.ts:52-293). File naming is snake_case (4/4); function naming is camelCase (19/21)."
+    },
+    {
+      "id": "c2",
+      "kind": "code",
+      "ref": "src/insrc/workflow/storage.ts:62-73:writeAtomic",
+      "quotedText": "writeAtomic(absPath: string, content: string): void \u2014 atomic write-then-rename primitive, creates parent dirs as needed. Located via s1 bundle 2 symbol.locate."
+    },
+    {
+      "id": "c3",
+      "kind": "code",
+      "ref": "src/insrc/db/repos.ts:213-222:listRepos",
+      "quotedText": "listRepos(_db: DbClient): Promise<RegisteredRepo[]> \u2014 returns the registered repo list. Located via s1 bundle 2 symbol.locate."
+    }
+  ]
+}

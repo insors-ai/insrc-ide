@@ -10,7 +10,25 @@
     "schemaVersion": 1,
     "approvedAt": "2026-07-13T05:32:37.617Z",
     "epicHash": "cd479e1361d35cfc",
-    "epicSlug": "support-per-repo-config-overrides-embedding"
+    "epicSlug": "support-per-repo-config-overrides-embedding",
+    "tracker": {
+      "adapter": "github",
+      "epicRef": "insors-ai/insrc-ide#5",
+      "storyRefs": {
+        "s1": "insors-ai/insrc-ide#1",
+        "s2": "insors-ai/insrc-ide#2",
+        "s3": "insors-ai/insrc-ide#3",
+        "s4": "insors-ai/insrc-ide#4"
+      },
+      "labelsCreated": [
+        "insrc:epic",
+        "insrc:story",
+        "epic:support-per-repo-config-overrides-embedding",
+        "insrc:in-progress",
+        "insrc:blocked"
+      ],
+      "pushedAt": "2026-07-14T07:04:57.144Z"
+    }
   },
   "body": {
     "flavor": "enhancement",

@@ -1,0 +1,340 @@
+{
+  "meta": {
+    "workflow": "design.story",
+    "runId": "wf-1784010008324-a1cgch",
+    "repoPath": "/Users/subhagho/work/projects/insors/insrc-ide",
+    "createdAt": "2026-07-14T06:25:55.818Z",
+    "model": "client",
+    "elapsedMs": 347492,
+    "repoIndexedAt": null,
+    "schemaVersion": 1,
+    "epicHash": "cd479e1361d35cfc",
+    "epicSlug": "support-per-repo-config-overrides-embedding",
+    "storyId": "s3",
+    "hldBaseRunId": "wf-1783920776460-bd44gr",
+    "hldEffectiveHash": "ff7482e7beb3ad417c65546731583bced8a5bb1fc67db34ecdf8e411fac6bdcb",
+    "hldAmendmentsApplied": [],
+    "approvedAt": "2026-07-14T06:27:19.010Z",
+    "storyRef": "insors-ai/insrc-ide#3",
+    "storyPushedAt": "2026-07-14T00:00:00.000Z"
+  },
+  "body": {
+    "hldContextSlice": {
+      "frameworkSummary": "A layered config resolver in src/insrc/config reads the existing global loader first and overlays a per-repo override file (JSON) at ~/.insrc/repos/<slug>/config.json when present [[c1]]. All 15 config read sites (daemon boot, indexer, embedder, seven Lance stores, and tests) migrate to a repo-aware loader; the CLI reads / writes / deletes dimensions inside the same override file. No LMDB migration and no repo-tree writes; the global config's schema is unchanged and overrides are hand-editable JSON.",
+      "ownedContracts": [],
+      "consumedContracts": [
+        {
+          "id": "sc1",
+          "name": "PerRepoOverrideFile",
+          "purpose": "The on-disk shape of a per-repo override file and the path convention that locates it, so the writer Stories (s2 / s4) and the daemon reader Story (s1) agree on the format and location.",
+          "interfaceSketch": "// Path convention: ~/.insrc/repos/<slug>/config.json\n// where <slug> is derived from the canonical repo path by the existing\n// repo registry (same slug the daemon already uses for workflow-runs and\n// per-repo state).\n\ninterface PerRepoOverrideFile {\n    // Any subset of these four dimensions MAY be present. A missing key\n    // falls through to the global config's value for that dimension.\n    // The file MUST contain no additional keys; unknown keys are a\n    // validation error at read time.\n    embeddingModel?: string;\n    embeddingDim?:   number;\n    coreModel?:      string;\n    shaperModel?:    string;\n}\n\n// Path helper (type-only sketch)\ndeclare function perRepoOverridePath(repoPath: string): string;",
+          "ownedByStory": "s1",
+          "consumedByStories": [
+            "s2",
+            "s3",
+            "s4"
+          ],
+          "assumptions": [
+            "c1",
+            "c2"
+          ]
+        }
+      ],
+      "boundary": {
+        "storyId": "s3",
+        "owns": [],
+        "depends": [
+          "sc1"
+        ],
+        "internal": "Pretty-print output for the list subcommand and the exact wording used when no overrides are present (must make explicit that fallback is to global). No interaction with the daemon; pure filesystem read."
+      },
+      "rolloutPhase": "Phase B -- CLI CRUD for overrides",
+      "nonFunctional": {
+        "performance": "Adds one fs.readFileSync (per-repo JSON, a few KB max) per repo-scoped config read; negligible compared to the existing global load. Zero performance change for calls without a repo scope.",
+        "security": "Override file lives inside ~/.insrc/, which is user-owned; no elevated privileges required. Same trust boundary as the existing global config file.",
+        "observability": "Every daemon read of the effective config logs which dimensions were sourced from global vs. per-repo, so users can trace where a given model choice was resolved from when debugging.",
+        "durability": "Override files are single-JSON atomic writes (write to .tmp, rename); no LMDB migration, no backup coordination. Losing an override file loses only the machine-local override for that repo; the global config is unaffected."
+      }
+    },
+    "contractDetails": {
+      "surfaceLevel": "internal",
+      "api": []
+    },
+    "dataModelChanges": [
+      {
+        "entity": "src/insrc/cli/commands/config.ts",
+        "change": "invariant-change",
+        "details": "The same registerConfigCommands(program: Command): void function s2 introduces gains a second subcommand: `list`. The `set` subcommand from s2 is unchanged. `list` accepts one option --repo <path> (defaulting to cwd), calls the same not-registered-repo check listRepos [[c2]] used by `set`, reads sc1's file at ~/.insrc/repos/<slug>/config.json via fs.readFileSync, parses JSON, and prints a four-row table per the winning alternative. The existing register*Commands pattern is preserved [[c1]].",
+        "callSites": [
+          "src/insrc/cli/commands/config.ts",
+          "src/insrc/db/repos.ts"
+        ]
+      }
+    ],
+    "interactionWithShared": [
+      {
+        "contractId": "sc1",
+        "role": "consumes",
+        "howDetails": "This Story CONSUMES sc1. It reads sc1's file at sc1's exact path convention (~/.insrc/repos/<slug>/config.json) via the same repo-registry slug helper s1 (reader) and s2 (set writer) use. Only sc1's four allowed dimensions (embeddingModel, embeddingDim, coreModel, shaperModel) are printed, in sc1's fixed key order. When the file exists, each key present in the JSON prints as `<dimension>: <value>`; keys absent from the JSON print as `<dimension>: (global fallback)`. When the file does not exist, is empty, or parses to `{}`, all four dimensions print as `(global fallback)` plus a footer line `all four dimensions using global config from ~/.insrc/config.json` \u2014 the explicit-wording requirement from ac2. sc1's on-disk shape is not modified; s3 is read-only. Unknown keys in the file (should not occur under normal use per sc1's contract but can arise from hand editing) surface via the same MalformedOverrideFileError s2's contract already defines."
+      }
+    ],
+    "errorPaths": {
+      "errorCases": [
+        {
+          "scenario": "The user passes --repo <path> for a path that is not a registered insrc repo.",
+          "detection": "The list action handler calls listRepos and checks whether any RegisteredRepo's canonical path matches the passed --repo (or cwd when --repo is omitted). No match trips UnregisteredRepoError \u2014 same shape as s2's set command uses.",
+          "response": "Print `error: repo '<path>' is not registered with insrc. Run 'insrc repo add <path>' first.` to stderr and exit non-zero. No file is read.",
+          "userImpact": "The command exits without printing any dimension info. Users get the same message shape they see from `set` \u2014 uniform CLI error UX.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The override file exists but is not valid JSON.",
+          "detection": "JSON.parse of the file body raises SyntaxError; the handler's try/catch converts to MalformedOverrideFileError \u2014 same type name s2 defines.",
+          "response": "Print `error: existing override file at <path> is malformed JSON: <parser message>. Fix or delete the file, then re-run.` to stderr and exit non-zero. Do NOT pretend the file is empty; the user's intent is not readable and silently showing `(global fallback)` for all four dims would mislead.",
+          "userImpact": "The list command refuses to render a false picture. User inspects the file, fixes or deletes it, retries.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The override file exists but its JSON parses to a non-object (array, number, string, boolean, or null at the root).",
+          "detection": "After JSON.parse, the handler checks `typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)`. Anything else trips MalformedOverrideFileError with a message like `expected object, got <actual type>`.",
+          "response": "Same MalformedOverrideFileError path \u2014 fail fast, name the actual type.",
+          "userImpact": "Same as the SyntaxError case \u2014 the user knows exactly what to fix.",
+          "recoverable": true
+        },
+        {
+          "scenario": "The override file exists but fs.readFileSync raises EACCES / permission denied.",
+          "detection": "try/catch around fs.readFileSync catches the errno; the handler surfaces the OS error path + message.",
+          "response": "Print `error: cannot read override file <path>: <os-error-message>` to stderr and exit non-zero.",
+          "userImpact": "User sees the OS-level error naming the file path. No false `(global fallback)` display that would hide the permission problem.",
+          "recoverable": true
+        }
+      ],
+      "edgeCases": [
+        {
+          "input": "The override file does not exist.",
+          "expected": "Print the four-row table with all four rows as `<dimension>: (global fallback)` plus the footer `all four dimensions using global config from ~/.insrc/config.json`. This is the ac2 explicit-wording case and it is NOT an error \u2014 a missing file is the expected default state for a repo that has never had `set` run against it."
+        },
+        {
+          "input": "The override file exists and parses to `{}` (empty object).",
+          "expected": "Same output as the missing-file case \u2014 four `(global fallback)` rows + the footer. Behaviorally equivalent; the CLI does not signal 'file exists but empty' as distinct from 'file missing'."
+        },
+        {
+          "input": "The override file has exactly one dimension set (e.g. only embeddingModel).",
+          "expected": "Four rows: embeddingModel: <value>; embeddingDim: (global fallback); coreModel: (global fallback); shaperModel: (global fallback). No footer (footer prints only when ALL four are fallback)."
+        },
+        {
+          "input": "The override file has all four dimensions set.",
+          "expected": "Four rows with real values \u2014 no `(global fallback)` markers, no footer."
+        },
+        {
+          "input": "The user omits --repo and cwd is not itself a registered repo.",
+          "expected": "Same UnregisteredRepoError shape as s2's set command uses \u2014 CLI error UX is uniform between set and list. The CLI does not walk up looking for a parent repo."
+        },
+        {
+          "input": "The --repo path is a symlink to the actual repo directory.",
+          "expected": "The handler resolves the passed path through the same repo-registry slug helper s1 / s2 use \u2014 symlink and target both map to the same slug and read the same file."
+        },
+        {
+          "input": "The override file has a value that is technically a string like 'true' or '42' when the sc1 contract expects the corresponding raw type.",
+          "expected": "The list command prints the value verbatim as parsed by JSON.parse. It does NOT re-validate types against sc1's type contract \u2014 that validation lives on the s1 reader (which will surface the mismatch as an InvalidOverrideFileError at daemon load time). Rationale: list should show what's there, not do the reader's validation work; the mismatch will surface loudly on the next daemon read."
+        }
+      ],
+      "invariantsToPreserve": [
+        {
+          "text": "sc1's on-disk shape is READ-ONLY under this Story. The list command never writes to ~/.insrc/repos/<slug>/config.json, never creates the file, never mutates existing contents \u2014 pure filesystem read + stdout print.",
+          "source": "c1"
+        },
+        {
+          "text": "The existing register*Commands(program: Command): void pattern in src/insrc/cli/commands is preserved; s3 adds a `list` subcommand to the same registerConfigCommands function s2 introduces, no new register* function.",
+          "source": "c1"
+        },
+        {
+          "text": "The UnregisteredRepoError shape (both the type name and the exact message wording) is shared between s2's set command and s3's list command \u2014 CLI users see the same error text for the same failure mode across every config subcommand.",
+          "source": "c2"
+        }
+      ]
+    },
+    "testStrategy": {
+      "testLevels": [
+        {
+          "level": "unit",
+          "purpose": "Exercise the list action handler against tmpdir-backed override files covering every legal shape (missing, empty, partial, full) and assert the exact four-row output for each.",
+          "subjects": [
+            "the list action handler's format-and-print flow",
+            "the `(global fallback)` marker rendering",
+            "the all-fallback footer rendering"
+          ],
+          "fixturesNeeded": [
+            "a tmpdir stubbing ~/.insrc/repos/<slug>/config.json for various pre-existing contents (no file, empty JSON object, one dim set, all four dims set, malformed JSON, non-object root)",
+            "a stub for listRepos returning a fixed RegisteredRepo[] so the handler proceeds past the not-registered-repo gate deterministically"
+          ]
+        },
+        {
+          "level": "unit",
+          "purpose": "Verify the not-registered-repo check for `list` produces the exact same UnregisteredRepoError message shape as `set` (shared CLI error UX invariant).",
+          "subjects": [
+            "the not-registered-repo check on the list path",
+            "message shape parity with the set command"
+          ],
+          "fixturesNeeded": [
+            "a stub for listRepos to force the miss path"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "Drive the actual CLI via child_process to exec `insrc config list --repo <path>` against a registered tmpdir repo in three states: no override file, one-dim override, all-dims override. Assert stdout matches the expected four-row shape verbatim.",
+          "subjects": [
+            "end-to-end argument-to-stdout flow of the list subcommand",
+            "commander wiring under registerConfigCommands"
+          ],
+          "fixturesNeeded": [
+            "a tmpdir install with a repo registered via `insrc repo add`",
+            "the built CLI binary or an npx tsx invocation of src/insrc/cli/index.ts"
+          ]
+        },
+        {
+          "level": "integration",
+          "purpose": "Round-trip check with s2: run `insrc config set embeddingModel qwen3 --repo <path>`, then `insrc config list --repo <path>`, and assert the list output shows `embeddingModel: qwen3` on row 1 and `(global fallback)` on the other three rows.",
+          "subjects": [
+            "s2/s3 write/read parity on the same on-disk sc1 file"
+          ],
+          "fixturesNeeded": [
+            "the same tmpdir install used above"
+          ]
+        },
+        {
+          "level": "contract",
+          "purpose": "sc1 read-side display contract: given every legal PerRepoOverrideFile shape (per-dimension subset), the list output matches the expected four-row rendering. Given every disallowed file shape from s5 error cases (malformed JSON, non-object root, permission denied), the correct MalformedOverrideFileError / OS error is emitted with the expected message shape.",
+          "subjects": [
+            "sc1 read-side display contract",
+            "MalformedOverrideFileError + UnregisteredRepoError message shape parity with s2"
+          ]
+        }
+      ],
+      "acceptanceMapping": [
+        {
+          "criterionId": "ac1",
+          "provingTests": [
+            "unit: with a per-repo file `{ \"embeddingModel\": \"qwen3\", \"embeddingDim\": 768 }`, the list output has row `embeddingModel: qwen3` and row `embeddingDim: 768` (both containing the dimension name AND the current value verbatim)",
+            "integration: `insrc config set embeddingModel qwen3 --repo <path>` followed by `insrc config list --repo <path>` prints `embeddingModel: qwen3` verbatim in the list output"
+          ]
+        },
+        {
+          "criterionId": "ac2",
+          "provingTests": [
+            "unit: with no override file present at ~/.insrc/repos/<slug>/config.json, the list output has all four rows as `<dim>: (global fallback)` AND the footer line `all four dimensions using global config from ~/.insrc/config.json` verbatim \u2014 the exact wording ac2 requires",
+            "integration: `insrc config list --repo <path>` on a registered repo with no override file emits both the four-fallback rows and the global-config footer to stdout (not stderr)"
+          ]
+        }
+      ],
+      "testFramework": "node:test with tsx (the repo-wide test runner used by every workflow / daemon / config test today \u2014 same as s2 uses)"
+    },
+    "migration": {
+      "stateBefore": "After s2 lands, src/insrc/cli/commands/config.ts exports registerConfigCommands(program: Command): void with a single `set` subcommand. There is no `insrc config list` command; the only way to inspect what overrides are on a repo is to open the JSON file at ~/.insrc/repos/<slug>/config.json directly. sc1's file convention is defined by s1 and its atomic-write primitive by src/insrc/workflow/storage.ts [[c1]]. listRepos at src/insrc/db/repos.ts:213-222 [[c2]] exists and returns the registered repo list.",
+      "stateAfter": "src/insrc/cli/commands/config.ts's registerConfigCommands gains a second subcommand `list` alongside `set`. Running `insrc config list [--repo <path>]` prints a four-row table naming every sc1 dimension (embeddingModel, embeddingDim, coreModel, shaperModel) in sc1's fixed key order with either the per-repo value or the marker `(global fallback)`. When no dimensions are overridden, a footer line `all four dimensions using global config from ~/.insrc/config.json` prints. UnregisteredRepoError and MalformedOverrideFileError message shapes match s2's exact wording so the CLI's error UX is uniform across every config subcommand.",
+      "migrationSteps": [
+        {
+          "order": 1,
+          "action": "Add a `list` subcommand under the same `config` command family the `set` subcommand mounts on. Accept one option --repo <path> (defaulting to cwd). Wire the action handler as a shell (no read, no format) so the commander wiring alone can be verified.",
+          "rollbackable": true
+        },
+        {
+          "order": 2,
+          "action": "Add the not-registered-repo check to the list action by reusing the same listRepos + repo-registry slug helper the `set` action uses. Miss trips the shared UnregisteredRepoError with the exact same message shape as set (verified by test).",
+          "rollbackable": true
+        },
+        {
+          "order": 3,
+          "action": "Add the file read: resolve the sc1 file path via the shared slug helper, wrap fs.readFileSync in try/catch to surface MalformedOverrideFileError on SyntaxError, non-object root, or EACCES. Missing file (ENOENT) is NOT an error \u2014 it's the all-fallback edge case.",
+          "rollbackable": true
+        },
+        {
+          "order": 4,
+          "action": "Add the format-and-print step: for each of sc1's four dimensions in fixed order, print `<dimension>: <value>` when the key is present in the parsed JSON, else `<dimension>: (global fallback)`. When all four rows are fallback, append the footer line `all four dimensions using global config from ~/.insrc/config.json`.",
+          "rollbackable": true
+        },
+        {
+          "order": 5,
+          "action": "Extend src/insrc/cli/commands/__tests__/config-set.test.ts (or add a sibling config-list.test.ts, whichever the existing convention prefers when the module lands) with the unit + integration tests from s6 covering every acceptance mapping and every error case from s5.",
+          "rollbackable": true
+        },
+        {
+          "order": 6,
+          "action": "Update the docs stub s2 introduced (docs/config.md or the setup-wizard-linked doc) with a brief mention of `insrc config list` including the four-row output shape example.",
+          "rollbackable": true
+        }
+      ],
+      "backwardCompat": "The `list` subcommand is purely additive. The `set` subcommand from s2 is unchanged. Existing insrc CLI subcommands (daemon / repo / setup / workflow) are unchanged. Users who never run `insrc config list` see zero difference. sc1's on-disk shape is not modified; the daemon reader (s1 LLD) continues to read the same file the same way \u2014 s3 is READ-ONLY and never writes.",
+      "zeroDowntime": true,
+      "dataRewriteRequired": false
+    },
+    "alternativesConsidered": [
+      {
+        "id": "a1",
+        "name": "Sparse list \u2014 present-dimensions only + no-overrides banner",
+        "oneLineSummary": "Print one line per dimension present in the override file; when the file is missing/empty, print a single explicit line stating no overrides are set and global will be used.",
+        "approach": "The `list` action reads ~/.insrc/repos/<slug>/config.json. When the file exists and has at least one dimension, print one line per present dimension: `<dimension>: <value>` (aligned columns for readability). When the file is missing, empty, or parses to an empty object, print exactly one line: `no per-repo overrides on <repoPath>; using global config from ~/.insrc/config.json`.\n\nDimensions NOT in the file are omitted from the output. The output is tight: only what is actively overriding shows up.",
+        "pros": [
+          "Output length scales with what the user actually configured \u2014 no visual noise from four rows when only one dim is overridden.",
+          "The no-overrides banner satisfies ac2's explicit-wording requirement in one glanceable line.",
+          "Read semantics match the HLD boundary exactly: pure filesystem read, no global-config file access needed to show fallback."
+        ],
+        "cons": [
+          "Users looking for 'is this dimension overridden or not?' have to remember the four sc1 keys and check whether each one appears \u2014 harder scan than a full four-row table.",
+          "No way to see, in one command, ALL four dimensions the Epic covers with their fallback status."
+        ],
+        "costEstimate": "XS",
+        "reasonRejected": "Fully satisfies but its output length varies (0 rows for missing, 1-4 for partial) which is harder for a shell script to consume than a2's fixed four-row shape. The 'sparse' output is easier at a glance for humans with one override active, but a2's fixed shape is more consistent \u2014 and the four rows are not visual noise (~40 chars each)."
+      },
+      {
+        "id": "a2",
+        "name": "Full-table list \u2014 all four dimensions with (global fallback) markers",
+        "oneLineSummary": "Print all four sc1 dimensions on every invocation; per-repo values inline, missing dimensions show `(global fallback)` verbatim.",
+        "approach": "The `list` action reads the override file and prints a four-row table: one row per sc1 dimension in the fixed order (embeddingModel, embeddingDim, coreModel, shaperModel). Each row is either `<dimension>: <per-repo value>` or `<dimension>: (global fallback)`. When the file is missing/empty, ALL four rows show `(global fallback)` \u2014 the ac2 requirement is satisfied without a separate banner because the output itself is unambiguous.\n\nOptionally, the table gets a header line `# per-repo overrides on <repoPath>` for context.",
+        "pros": [
+          "Users see all four sc1 dimensions in every list run \u2014 a single command answers 'is anything overridden here?' at a glance.",
+          "The `(global fallback)` marker is explicit and identical for missing-file and file-present-but-dim-unset cases \u2014 no special-case banner logic.",
+          "The output is identical shape whether the file exists or not \u2014 easier to parse for shell scripts / downstream tooling."
+        ],
+        "cons": [
+          "Four rows every time even when the user only cares about one dimension (a wash on cost \u2014 four rows of ~40 chars is not visual noise).",
+          "The `(global fallback)` label reads as if the CLI knows the global values, but a2 does NOT read the global config file \u2014 the marker is only about the ABSENCE of an override, not the actual global value. Users could be confused about whether the label is showing the global value or just noting fallback. Precise wording in a2: `(global fallback)` explicitly means 'not overridden', not 'global value: <X>'."
+        ],
+        "costEstimate": "XS"
+      },
+      {
+        "id": "a3",
+        "name": "JSON-only output \u2014 print the raw override file",
+        "oneLineSummary": "cat-equivalent \u2014 print the JSON in the override file as-is (pretty-formatted); when file is missing, print `{}` with a stderr note that no overrides are set.",
+        "approach": "The `list` action reads the override file and writes its content to stdout as pretty-printed JSON. When the file exists, output is the file's JSON body. When the file is missing, output is `{}` on stdout with a note on stderr: `no per-repo overrides on <repoPath>; using global config`. This is the shape of `insrc workflow gh-config`-style commands where JSON is the primary output.",
+        "pros": [
+          "Shell-friendly: `insrc config list --repo <path> | jq .embeddingModel` just works.",
+          "Symmetric with the existing `insrc workflow gh-config` command that emits JSON to stdout.",
+          "Zero pretty-print code to maintain \u2014 JSON.stringify with indent 2 is one line."
+        ],
+        "cons": [
+          "ac2's 'output states explicitly that no overrides are set and the repo will use the global config' is technically satisfied via stderr but a user piping to a file or a viewer sees only `{}`, not the explanatory text \u2014 partial on ac2.",
+          "Casual users get raw JSON they must decode instead of aligned column output \u2014 less human-friendly than a1 or a2 for the interactive case."
+        ],
+        "costEstimate": "XS",
+        "reasonRejected": "Two partials (ac2 + k2) both trace to the same root cause: the explanatory 'no overrides; using global' text lives on stderr while ac2/k2 want it in the primary output. Piping-friendliness is nice but does not offset the ac2 partial. A `--json` flag could layer a3 on top of a2 later without the ac2 downgrade."
+      }
+    ],
+    "chosenAlternative": "a2",
+    "openQuestions": []
+  },
+  "citations": [
+    {
+      "id": "c1",
+      "kind": "prior-artifact",
+      "ref": ".insrc/artifacts/LLD-cd479e1361d35cfc-s2.json (register*Commands convention + writeAtomic + sc1 file path)",
+      "quotedText": "s2 LLD grounded register*Commands(program: Command): void pattern across daemon.ts:18-45, repo.ts:10-27, workflow.ts:52-293. writeAtomic at src/insrc/workflow/storage.ts:62-73 is the atomic write-then-rename primitive."
+    },
+    {
+      "id": "c2",
+      "kind": "code",
+      "ref": "src/insrc/db/repos.ts:213-222:listRepos",
+      "quotedText": "listRepos(_db: DbClient): Promise<RegisteredRepo[]> \u2014 returns the registered repo list; shared not-registered-repo check across `set` (s2) and `list` (s3)."
+    }
+  ]
+}
